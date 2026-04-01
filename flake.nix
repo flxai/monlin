@@ -17,6 +17,7 @@
 
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
+        doCheck = true;
 
         meta = with pkgs.lib; {
           description = "Tiny CPU monitor for nxu tmux side panes";
@@ -28,6 +29,9 @@
     in {
       default = monlin;
       nxu-cpu = monlin;
+    });
+    checks = eachSystem (system: {
+      default = self.packages.${system}.default;
     });
   };
 }
