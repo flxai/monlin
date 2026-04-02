@@ -667,7 +667,18 @@ fn read_gpu_sample() -> io::Result<GpuSample> {
 }
 
 fn read_generic_gpu_sample() -> io::Result<GpuSample> {
-    let entries = fs::read_dir("/sys/class/drm")?;
+    let entries = match fs::read_dir("/sys/class/drm") {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(GpuSample::default());
+        }
+        Err(error) => return Err(error),
+    };
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
@@ -679,7 +690,18 @@ fn read_generic_gpu_sample() -> io::Result<GpuSample> {
         if !path.exists() {
             continue;
         }
-        let value = fs::read_to_string(path)?;
+        let value = match fs::read_to_string(&path) {
+            Ok(value) => value,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if let Ok(percent) = value.trim().parse::<f64>() {
             return Ok(GpuSample {
                 utilization: Some((percent / 100.0).clamp(0.0, 1.0)),
