@@ -3,7 +3,7 @@ use std::env;
 
 use crate::color::{gradient_for, interpolate, paint, split_gradients_for};
 use crate::config::{Align, Config};
-use crate::layout::{split_even_width, Layout, MetricKind};
+use crate::layout::{Layout, LayoutItem, MetricKind};
 use crate::metrics::MetricValue;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,13 +34,13 @@ pub fn render_lines(
     layout
         .rows()
         .iter()
-        .map(|metrics| {
+        .map(|items| {
             render_row(
                 config,
                 width,
                 color_enabled,
                 histories,
-                metrics,
+                items,
                 values,
                 label_width,
             )
@@ -53,7 +53,7 @@ fn render_row(
     width: usize,
     color_enabled: bool,
     histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
-    metrics: &[MetricKind],
+    items: &[LayoutItem],
     values: &HashMap<MetricKind, MetricValue>,
     label_width: usize,
 ) -> String {
@@ -64,21 +64,22 @@ fn render_row(
         .unwrap_or_default();
 
     let inner_width = width.saturating_sub(prefix.chars().count());
-    let separators = metrics.len().saturating_sub(1);
+    let separators = items.len().saturating_sub(1);
     let segment_space = inner_width.saturating_sub(separators);
-    let widths = split_even_width(segment_space, metrics.len());
+    let widths = split_weighted_width(segment_space, items);
 
-    let segments = metrics
+    let segments = items
         .iter()
         .zip(widths)
-        .map(|(metric, width)| {
-            let history = histories.get(metric).cloned().unwrap_or_default();
+        .map(|(item, width)| {
+            let metric = item.metric();
+            let history = histories.get(&metric).cloned().unwrap_or_default();
             let value = values
-                .get(metric)
+                .get(&metric)
                 .copied()
                 .unwrap_or(MetricValue::Single(0.0));
             render_segment(
-                *metric,
+                metric,
                 &history,
                 value,
                 width,
@@ -91,6 +92,30 @@ fn render_row(
         .collect::<Vec<_>>();
 
     format!("{prefix}{}", segments.join(" "))
+}
+
+fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let total_weight = items.iter().map(|item| item.weight()).sum::<usize>().max(1);
+    let mut widths = items
+        .iter()
+        .map(|item| total.saturating_mul(item.weight()) / total_weight)
+        .collect::<Vec<_>>();
+
+    let allocated = widths.iter().sum::<usize>();
+    let mut remaining = total.saturating_sub(allocated);
+    let mut index = 0;
+    let len = widths.len();
+    while remaining > 0 {
+        widths[index % len] += 1;
+        remaining -= 1;
+        index += 1;
+    }
+
+    widths
 }
 
 fn render_segment(
@@ -548,6 +573,19 @@ mod tests {
 
         let line = &lines[0];
         assert_eq!(visible_width(&line), 40);
+    }
+
+    #[test]
+    fn weighted_rows_split_width_proportionally() {
+        let widths = split_weighted_width(
+            14,
+            &[
+                LayoutItem::new(MetricKind::Cpu, 3),
+                LayoutItem::new(MetricKind::Memory, 4),
+            ],
+        );
+
+        assert_eq!(widths, vec![6, 8]);
     }
 
     #[test]

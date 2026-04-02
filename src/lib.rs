@@ -43,15 +43,15 @@ where
             .map_err(|error| format!("nxu-cpu: {error}"))?;
 
         for metric in requested_metrics {
-            let value = values
-                .get(metric)
-                .copied()
-                .unwrap_or(MetricValue::Single(0.0));
             if let Some(history) = histories.get_mut(metric) {
-                if history.len() == config.history.max(1) {
-                    history.pop_front();
+                if let Some(value) = values.get(metric).copied() {
+                    if history.len() == config.history.max(1) {
+                        history.pop_front();
+                    }
+                    history.push_back(value);
+                } else {
+                    history.clear();
                 }
-                history.push_back(value);
             }
         }
 
@@ -61,14 +61,20 @@ where
             .unwrap_or(80)
             .max(16);
         let color_enabled = colors_enabled(config.color_mode);
-        let lines = render::render_lines(
+        let active_layout = config
+            .layout
+            .retain_available(|metric| values.contains_key(&metric));
+        let mut lines = render::render_lines(
             &config,
             width,
             color_enabled,
             &histories,
-            &config.layout,
+            &active_layout,
             &values,
         );
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
 
         if rendered_rows > 0 {
             write!(stdout, "\r").map_err(|error| error.to_string())?;

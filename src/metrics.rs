@@ -122,13 +122,13 @@ impl Sampler {
         };
 
         let gpu_value = if metrics.contains(&MetricKind::Gpu) || metrics.contains(&MetricKind::Gfx) {
-            Some(gpu_sample.unwrap_or_default().utilization.unwrap_or(0.0))
+            gpu_sample.unwrap_or_default().utilization
         } else {
             None
         };
 
         let vram_value = if metrics.contains(&MetricKind::Vram) || metrics.contains(&MetricKind::Gfx) {
-            Some(gpu_sample.unwrap_or_default().vram_fraction().unwrap_or(0.0))
+            gpu_sample.unwrap_or_default().vram_fraction()
         } else {
             None
         };
@@ -156,44 +156,28 @@ impl Sampler {
 
         for metric in metrics {
             let value = match metric {
-                MetricKind::Cpu => MetricValue::Single(cpu_value.unwrap_or(0.0)),
-                MetricKind::Sys => MetricValue::Split {
+                MetricKind::Cpu => cpu_value.map(MetricValue::Single),
+                MetricKind::Sys => Some(MetricValue::Split {
                     upper: cpu_value.unwrap_or(0.0),
                     lower: memory_value.unwrap_or(0.0),
-                },
-                MetricKind::Gpu => MetricValue::Single(gpu_value.unwrap_or(0.0)),
-                MetricKind::Vram => MetricValue::Single(vram_value.unwrap_or(0.0)),
-                MetricKind::Gfx => MetricValue::Split {
-                    upper: gpu_value.unwrap_or(0.0),
-                    lower: vram_value.unwrap_or(0.0),
-                },
-                MetricKind::Memory => MetricValue::Single(memory_value.unwrap_or(0.0)),
-                MetricKind::Io => io_value.unwrap_or(MetricValue::Split {
-                    upper: 0.0,
-                    lower: 0.0,
                 }),
-                MetricKind::Net => net_value.unwrap_or(MetricValue::Split {
-                    upper: 0.0,
-                    lower: 0.0,
-                }),
-                MetricKind::Ingress => MetricValue::Single(
-                    net_value
-                        .unwrap_or(MetricValue::Split {
-                            upper: 0.0,
-                            lower: 0.0,
-                        })
-                        .upper(),
-                ),
-                MetricKind::Egress => MetricValue::Single(
-                    net_value
-                        .unwrap_or(MetricValue::Split {
-                            upper: 0.0,
-                            lower: 0.0,
-                        })
-                        .lower(),
-                ),
+                MetricKind::Gpu => gpu_value.map(MetricValue::Single),
+                MetricKind::Vram => vram_value.map(MetricValue::Single),
+                MetricKind::Gfx => match (gpu_value, vram_value) {
+                    (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
+                    (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
+                    (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
+                    (None, None) => None,
+                },
+                MetricKind::Memory => memory_value.map(MetricValue::Single),
+                MetricKind::Io => io_value,
+                MetricKind::Net => net_value,
+                MetricKind::Ingress => net_value.map(|value| MetricValue::Single(value.upper())),
+                MetricKind::Egress => net_value.map(|value| MetricValue::Single(value.lower())),
             };
-            values.insert(*metric, clamp_value(value));
+            if let Some(value) = value {
+                values.insert(*metric, clamp_value(value));
+            }
         }
 
         Ok(values)
@@ -570,5 +554,23 @@ mod tests {
         let sample = parse_nvidia_smi_csv("35, 1024, 4096\n").unwrap();
         assert_eq!(sample.utilization, Some(0.35));
         assert_eq!(sample.vram_fraction(), Some(0.25));
+    }
+
+    #[test]
+    fn gfx_can_degrade_to_gpu_only() {
+        let value = match (Some(0.35), None) {
+            (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
+            (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
+            (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
+            (None, None) => None,
+        };
+
+        assert_eq!(
+            value,
+            Some(MetricValue::Split {
+                upper: 0.35,
+                lower: 0.0,
+            })
+        );
     }
 }
