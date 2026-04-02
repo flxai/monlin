@@ -14,10 +14,7 @@ use layout::MetricKind;
 use metrics::MetricValue;
 use serde_json::json;
 
-pub fn run<I>(args: I) -> Result<(), String>
-where
-    I: IntoIterator<Item = String>,
-{
+pub fn run(args: Vec<String>) -> Result<(), String> {
     let config = config::parse_args(args)?;
     if config.show_help {
         print!("{}", config::help_text());
@@ -26,9 +23,7 @@ where
 
     let requested_metrics = config.layout.metrics();
     let mut sampler = metrics::Sampler::default();
-    sampler
-        .prime(requested_metrics)
-        .map_err(|error| format!("monlin: {error}"))?;
+    sampler.prime(requested_metrics).map_err(monlin_error)?;
 
     let mut histories = init_histories(requested_metrics, config.history);
     match config.output_mode {
@@ -52,30 +47,48 @@ fn run_terminal(
 
         let lines = sample_lines(config, sampler, histories)?;
 
-        if rendered_rows > 0 {
-            write!(stdout, "\r").map_err(|error| error.to_string())?;
-            if rendered_rows > 1 {
-                write!(stdout, "\x1b[{}A", rendered_rows - 1)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-
-        for (index, line) in lines.iter().enumerate() {
-            write!(stdout, "{line}\x1b[K").map_err(|error| error.to_string())?;
-            if index + 1 < lines.len() {
-                writeln!(stdout).map_err(|error| error.to_string())?;
-            }
-        }
-        stdout.flush().map_err(|error| error.to_string())?;
-        rendered_rows = lines.len();
+        rendered_rows =
+            write_terminal_frame(&mut stdout, &lines, rendered_rows).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
 
         if config.once {
-            writeln!(stdout).map_err(|error| error.to_string())?;
+            writeln!(stdout).map_err(io_to_string)?;
             break;
         }
     }
 
     Ok(())
+}
+
+fn write_terminal_frame<W: Write>(
+    stdout: &mut W,
+    lines: &[String],
+    previous_rows: usize,
+) -> io::Result<usize> {
+    if previous_rows > 0 {
+        write!(stdout, "\r")?;
+        if previous_rows > 1 {
+            write!(stdout, "\x1b[{}A", previous_rows - 1)?;
+        }
+    }
+
+    for (index, line) in lines.iter().enumerate() {
+        write!(stdout, "{line}\x1b[K")?;
+        if index + 1 < lines.len() {
+            writeln!(stdout)?;
+        }
+    }
+
+    let stale_rows = previous_rows.saturating_sub(lines.len());
+    if stale_rows > 0 {
+        for _ in 0..stale_rows {
+            writeln!(stdout)?;
+            write!(stdout, "\x1b[K")?;
+        }
+        write!(stdout, "\r\x1b[{}A", stale_rows)?;
+    }
+
+    Ok(lines.len())
 }
 
 fn run_i3bar(
@@ -84,9 +97,8 @@ fn run_i3bar(
     histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
 ) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
-    writeln!(stdout, "{}", json!({"version": 1, "click_events": false}))
-        .map_err(|error| error.to_string())?;
-    writeln!(stdout, "[").map_err(|error| error.to_string())?;
+    writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
 
     let mut first = true;
     loop {
@@ -98,15 +110,15 @@ fn run_i3bar(
         let frame = i3bar_frame_json(&lines).to_string();
 
         if !first {
-            writeln!(stdout, ",{frame}").map_err(|error| error.to_string())?;
+            writeln!(stdout, ",{frame}").map_err(io_to_string)?;
         } else {
-            writeln!(stdout, "{frame}").map_err(|error| error.to_string())?;
+            writeln!(stdout, "{frame}").map_err(io_to_string)?;
             first = false;
         }
-        stdout.flush().map_err(|error| error.to_string())?;
+        stdout.flush().map_err(io_to_string)?;
 
         if config.once {
-            writeln!(stdout, "]").map_err(|error| error.to_string())?;
+            writeln!(stdout, "]").map_err(io_to_string)?;
             break;
         }
     }
@@ -120,9 +132,7 @@ fn sample_lines(
     histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
 ) -> Result<Vec<String>, String> {
     let requested_metrics = config.layout.metrics();
-    let sample = sampler
-        .sample(requested_metrics)
-        .map_err(|error| format!("monlin: {error}"))?;
+    let sample = sampler.sample(requested_metrics).map_err(monlin_error)?;
     let values = &sample.values;
     let headlines = &sample.headlines;
 
@@ -168,30 +178,27 @@ fn sample_lines(
 }
 
 fn i3bar_frame_json(lines: &[String]) -> serde_json::Value {
-    serde_json::Value::Array(
-        lines.iter()
-            .enumerate()
-            .map(|(index, line)| {
-                json!({
-                    "name": format!("monlin-{index}"),
-                    "full_text": line,
-                    "separator": false,
-                    "separator_block_width": 0,
-                })
-            })
-            .collect(),
-    )
+    let mut blocks = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        blocks.push(json!({
+            "name": format!("monlin-{index}"),
+            "full_text": line,
+            "separator": false,
+            "separator_block_width": 0,
+        }));
+    }
+    serde_json::Value::Array(blocks)
 }
 
 fn init_histories(
     metrics: &[MetricKind],
     history_len: usize,
 ) -> HashMap<MetricKind, VecDeque<MetricValue>> {
-    metrics
-        .iter()
-        .copied()
-        .map(|metric| (metric, VecDeque::with_capacity(history_len.max(1))))
-        .collect()
+    let mut histories = HashMap::with_capacity(metrics.len());
+    for metric in metrics {
+        histories.insert(*metric, VecDeque::with_capacity(history_len.max(1)));
+    }
+    histories
 }
 
 fn colors_enabled(mode: ColorMode) -> bool {
@@ -202,9 +209,18 @@ fn colors_enabled(mode: ColorMode) -> bool {
     }
 }
 
+fn monlin_error(error: io::Error) -> String {
+    format!("monlin: {error}")
+}
+
+fn io_to_string(error: io::Error) -> String {
+    error.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::MetricKind;
 
     #[test]
     fn i3bar_frame_uses_one_block_per_line() {
@@ -215,5 +231,152 @@ mod tests {
         assert_eq!(blocks[0]["full_text"], "sys  40% ....");
         assert_eq!(blocks[1]["name"], "monlin-1");
         assert_eq!(blocks[1]["full_text"], "net 1.5M/s ....");
+    }
+
+    #[test]
+    fn terminal_repaint_moves_back_to_the_top_of_a_multiline_frame() {
+        let mut output = Vec::new();
+
+        let rendered_rows = write_terminal_frame(
+            &mut output,
+            &["sys  40% ....".to_owned(), "net 1.5M/s ....".to_owned()],
+            0,
+        )
+        .unwrap();
+        let rendered_rows = write_terminal_frame(
+            &mut output,
+            &["cpu  12% ....".to_owned(), "ram  63% ....".to_owned()],
+            rendered_rows,
+        )
+        .unwrap();
+
+        assert_eq!(rendered_rows, 2);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "sys  40% ....\x1b[K\nnet 1.5M/s ....\x1b[K\r\x1b[1Acpu  12% ....\x1b[K\nram  63% ....\x1b[K"
+        );
+    }
+
+    #[test]
+    fn terminal_repaint_clears_stale_rows_when_a_frame_shrinks() {
+        let mut output = Vec::new();
+
+        let rendered_rows = write_terminal_frame(
+            &mut output,
+            &[
+                "sys  40% ....".to_owned(),
+                "gfx  22% ....".to_owned(),
+                "net 1.5M/s ....".to_owned(),
+            ],
+            0,
+        )
+        .unwrap();
+        let rendered_rows =
+            write_terminal_frame(&mut output, &["cpu  12% ....".to_owned()], rendered_rows)
+                .unwrap();
+
+        assert_eq!(rendered_rows, 1);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "sys  40% ....\x1b[K\ngfx  22% ....\x1b[K\nnet 1.5M/s ....\x1b[K\r\x1b[2Acpu  12% ....\x1b[K\n\x1b[K\n\x1b[K\r\x1b[2A"
+        );
+    }
+
+    #[test]
+    fn init_histories_keeps_requested_metrics_and_minimum_capacity() {
+        let histories = init_histories(&[MetricKind::Cpu, MetricKind::Net], 0);
+
+        assert_eq!(histories.len(), 2);
+        assert!(histories.contains_key(&MetricKind::Cpu));
+        assert!(histories.contains_key(&MetricKind::Net));
+        assert_eq!(histories[&MetricKind::Cpu].capacity(), 1);
+        assert_eq!(histories[&MetricKind::Net].capacity(), 1);
+    }
+
+    #[test]
+    fn colors_enabled_respects_explicit_modes_and_auto() {
+        assert!(colors_enabled(ColorMode::Always));
+        assert!(!colors_enabled(ColorMode::Never));
+        assert_eq!(colors_enabled(ColorMode::Auto), io::stdout().is_terminal());
+    }
+
+    #[test]
+    fn run_help_returns_without_error() {
+        assert!(run(vec!["monlin".to_owned(), "--help".to_owned()]).is_ok());
+    }
+
+    #[test]
+    fn sample_lines_updates_history_and_keeps_width_floor() {
+        let config = config::parse_args(
+            [
+                "monlin",
+                "--layout",
+                "cpu",
+                "--history",
+                "1",
+                "--width",
+                "8",
+                "--color",
+                "never",
+                "--once",
+            ]
+            .into_iter()
+            .map(|item| item.to_string()),
+        )
+        .unwrap();
+        let metrics = config.layout.metrics();
+        let mut sampler = metrics::Sampler::default();
+        sampler.prime(metrics).unwrap();
+        let mut histories = init_histories(metrics, config.history);
+
+        let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
+        let history = histories.get(&MetricKind::Cpu).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert!(!lines[0].is_empty());
+        assert_eq!(history.len(), 1);
+
+        let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
+        let history = histories.get(&MetricKind::Cpu).unwrap();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn run_terminal_once_executes_successfully() {
+        let config = config::parse_args(
+            [
+                "monlin", "--layout", "cpu", "--width", "16", "--color", "never", "--once",
+            ]
+            .into_iter()
+            .map(|item| item.to_string()),
+        )
+        .unwrap();
+        let metrics = config.layout.metrics();
+        let mut sampler = metrics::Sampler::default();
+        sampler.prime(metrics).unwrap();
+        let mut histories = init_histories(metrics, config.history);
+
+        assert!(run_terminal(&config, &mut sampler, &mut histories).is_ok());
+    }
+
+    #[test]
+    fn run_i3bar_once_executes_successfully() {
+        let config = config::parse_args(
+            [
+                "monlin", "--layout", "cpu", "--width", "16", "--color", "always", "--output",
+                "i3bar", "--once",
+            ]
+            .into_iter()
+            .map(|item| item.to_string()),
+        )
+        .unwrap();
+        let metrics = config.layout.metrics();
+        let mut sampler = metrics::Sampler::default();
+        sampler.prime(metrics).unwrap();
+        let mut histories = init_histories(metrics, config.history);
+
+        assert!(run_i3bar(&config, &mut sampler, &mut histories).is_ok());
     }
 }

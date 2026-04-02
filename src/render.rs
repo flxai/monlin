@@ -25,7 +25,15 @@ pub fn render_lines(
     values: &HashMap<MetricKind, MetricValue>,
 ) -> Vec<String> {
     let headline_values = HashMap::new();
-    render_lines_with_headlines(config, width, color_enabled, histories, layout, values, &headline_values)
+    render_lines_with_headlines(
+        config,
+        width,
+        color_enabled,
+        histories,
+        layout,
+        values,
+        &headline_values,
+    )
 }
 
 pub fn render_lines_with_headlines(
@@ -138,26 +146,14 @@ fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
         return Vec::new();
     }
 
-    let bases = items
+    let floors = items
         .iter()
-        .map(|item| item.basis().unwrap_or(0))
+        .map(|item| item.basis().unwrap_or(0).max(item.min_width().unwrap_or(0)))
         .collect::<Vec<_>>();
-    let base_total = bases.iter().sum::<usize>();
+    let floor_total = floors.iter().sum::<usize>();
 
-    if base_total >= total {
-        let weights = items
-            .iter()
-            .zip(&bases)
-            .map(|(item, basis)| {
-                if *basis > 0 {
-                    *basis
-                } else if item.grow() > 0 {
-                    item.grow()
-                } else {
-                    1
-                }
-            })
-            .collect::<Vec<_>>();
+    if floor_total >= total {
+        let weights = floors;
         let total_weight = weights.iter().sum::<usize>().max(1);
         let mut widths = weights
             .iter()
@@ -165,38 +161,77 @@ fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
             .collect::<Vec<_>>();
         let allocated = widths.iter().sum::<usize>();
         let mut remaining = total.saturating_sub(allocated);
+        let active = weights
+            .iter()
+            .enumerate()
+            .filter_map(|(index, weight)| (*weight > 0).then_some(index))
+            .collect::<Vec<_>>();
         let mut index = 0;
-        let len = widths.len();
-        while remaining > 0 {
-            widths[index % len] += 1;
+        while remaining > 0 && !active.is_empty() {
+            widths[active[index % active.len()]] += 1;
             remaining -= 1;
             index += 1;
         }
         return widths;
     }
 
-    let mut widths = bases;
-    let mut remaining = total - base_total;
-    let total_grow = items.iter().map(|item| item.grow()).sum::<usize>();
-    if total_grow == 0 {
-        return widths;
-    }
-
-    for (width, item) in widths.iter_mut().zip(items.iter()) {
-        *width += remaining.saturating_mul(item.grow()) / total_grow;
-    }
-
-    let allocated = widths.iter().sum::<usize>();
-    remaining = total.saturating_sub(allocated);
-    let mut index = 0;
-    let len = widths.len();
-    while remaining > 0 {
-        if items[index % len].grow() > 0 {
-            widths[index % len] += 1;
-            remaining -= 1;
+    let mut widths = floors;
+    let mut remaining = total - floor_total;
+    loop {
+        let active = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let max_width = item.max_width().unwrap_or(usize::MAX);
+                (item.grow() > 0 && widths[index] < max_width).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        if remaining == 0 || active.is_empty() {
+            break;
         }
-        index += 1;
-        if index >= len && items.iter().all(|item| item.grow() == 0) {
+
+        let total_grow = active
+            .iter()
+            .map(|index| items[*index].grow())
+            .sum::<usize>();
+        if total_grow == 0 {
+            break;
+        }
+
+        let snapshot = remaining;
+        let mut allocated = 0;
+        for index in &active {
+            let item = &items[*index];
+            let grow_share = snapshot.saturating_mul(item.grow()) / total_grow;
+            let cap = item
+                .max_width()
+                .unwrap_or(usize::MAX)
+                .saturating_sub(widths[*index]);
+            let add = grow_share.min(cap);
+            widths[*index] += add;
+            allocated += add;
+        }
+        remaining = remaining.saturating_sub(allocated);
+
+        let mut round_robin = 0;
+        while remaining > 0 {
+            let index = active[round_robin % active.len()];
+            let max_width = items[index].max_width().unwrap_or(usize::MAX);
+            if widths[index] < max_width {
+                widths[index] += 1;
+                remaining -= 1;
+            }
+            round_robin += 1;
+            if round_robin >= active.len()
+                && active
+                    .iter()
+                    .all(|index| widths[*index] >= items[*index].max_width().unwrap_or(usize::MAX))
+            {
+                break;
+            }
+        }
+
+        if allocated == 0 && snapshot == remaining {
             break;
         }
     }
@@ -227,10 +262,14 @@ fn render_segment_with_headline(
         MetricKind::Vram => "",
         _ => " ",
     };
-    let fixed = label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
+    let fixed =
+        label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
 
     if width <= fixed {
-        return pad_or_trim_visible(&format!("{label}{label_usage_separator}{usage_text}"), width);
+        return pad_or_trim_visible(
+            &format!("{label}{label_usage_separator}{usage_text}"),
+            width,
+        );
     }
 
     let graph_width = width.saturating_sub(fixed + 1);
@@ -349,7 +388,11 @@ fn render_braille_graph(
         return render_split_braille_graph(samples, width, metric, color_enabled);
     }
 
-    let samples = resample_channel(samples, width.saturating_mul(2), MetricValue::headline_value);
+    let samples = resample_channel(
+        samples,
+        width.saturating_mul(2),
+        MetricValue::headline_value,
+    );
     let mut out = String::new();
 
     for chunk in samples.chunks(2) {
@@ -379,10 +422,7 @@ fn render_split_braille_graph(
     for index in 0..width {
         let upper = quantize_half_level(uppers.get(index).copied().unwrap_or(0.0));
         let lower = quantize_half_level(lowers.get(index).copied().unwrap_or(0.0));
-        let upper_intensity = uppers
-            .get(index)
-            .copied()
-            .unwrap_or(0.0);
+        let upper_intensity = uppers.get(index).copied().unwrap_or(0.0);
         let lower_intensity = lowers.get(index).copied().unwrap_or(0.0);
 
         out.push_str(&render_split_cell(
@@ -558,6 +598,22 @@ mod tests {
     }
 
     #[test]
+    fn block_graph_renders_requested_width() {
+        let graph = render_block_graph(
+            &[
+                MetricValue::Single(0.25),
+                MetricValue::Single(0.5),
+                MetricValue::Single(0.75),
+                MetricValue::Single(1.0),
+            ],
+            4,
+            MetricKind::Cpu,
+            false,
+        );
+        assert_eq!(graph.chars().count(), 4);
+    }
+
+    #[test]
     fn line_layout_respects_multiple_segments() {
         let config = Config {
             history: 8,
@@ -610,6 +666,41 @@ mod tests {
         let line = &lines[0];
         assert!(line.contains("cpu"));
         assert!(line.contains("gpu"));
+    }
+
+    #[test]
+    fn line_layout_supports_block_renderer() {
+        let layout = crate::layout::parse_layout_spec("cpu").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            layout: layout.clone(),
+            renderer: Renderer::Block,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(18),
+            once: true,
+            show_help: false,
+        };
+        let histories = HashMap::from([(
+            MetricKind::Cpu,
+            VecDeque::from(vec![
+                MetricValue::Single(0.0),
+                MetricValue::Single(0.25),
+                MetricValue::Single(0.5),
+                MetricValue::Single(1.0),
+            ]),
+        )]);
+        let values = HashMap::from([(MetricKind::Cpu, MetricValue::Single(1.0))]);
+
+        let lines = render_lines(&config, 18, false, &histories, &layout, &values);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("cpu"));
+        assert!(lines[0].contains("█"));
+        assert_eq!(visible_width(&lines[0]), 18);
     }
 
     #[test]
@@ -673,14 +764,7 @@ mod tests {
             (MetricKind::Gpu, MetricValue::Single(0.8)),
         ]);
 
-        let lines = render_lines(
-            &config,
-            40,
-            false,
-            &histories,
-            &config.layout,
-            &values,
-        );
+        let lines = render_lines(&config, 40, false, &histories, &config.layout, &values);
 
         let line = &lines[0];
         assert_eq!(visible_width(&line), 40);
@@ -711,6 +795,205 @@ mod tests {
         );
 
         assert_eq!(widths, vec![18, 10, 2]);
+    }
+
+    #[test]
+    fn grow_uses_slash_syntax_in_parsed_layouts() {
+        let layout = crate::layout::parse_layout_spec("cpu:12/2 ram:10 net.hum/3").unwrap();
+        let widths = split_weighted_width(30, &layout.rows()[0]);
+        assert_eq!(widths, vec![16, 10, 4]);
+    }
+
+    #[test]
+    fn width_allocation_conformance_matrix() {
+        let cases = [
+            ("cpu:12/2 ram:10 net.hum/3", 30, vec![16, 10, 4]),
+            ("cpu:12/2+14 ram:10 net.hum/3", 30, vec![14, 10, 6]),
+            ("cpu-8 ram-4", 6, vec![4, 2]),
+            ("cpu:12/2+20-8 ram+14-6", 24, vec![16, 8]),
+        ];
+
+        for (spec, total, expected) in cases {
+            let layout = crate::layout::parse_layout_spec(spec).unwrap();
+            assert_eq!(
+                split_weighted_width(total, &layout.rows()[0]),
+                expected,
+                "{spec}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_width_rows_compress_proportionally_when_too_narrow() {
+        let widths = split_weighted_width(
+            12,
+            &[
+                LayoutItem::new(MetricKind::Cpu, LayoutView::Default, Some(12), 0),
+                LayoutItem::new(MetricKind::Memory, LayoutView::Default, Some(10), 0),
+                LayoutItem::new(MetricKind::Net, LayoutView::Default, Some(8), 0),
+            ],
+        );
+
+        assert_eq!(widths, vec![5, 4, 3]);
+    }
+
+    #[test]
+    fn basis_overflow_compresses_fixed_items_before_grow_only_items() {
+        let widths = split_weighted_width(
+            18,
+            &[
+                LayoutItem::new(MetricKind::Cpu, LayoutView::Default, Some(12), 2),
+                LayoutItem::new(MetricKind::Memory, LayoutView::Default, Some(10), 0),
+                LayoutItem::new(MetricKind::Net, LayoutView::Default, None, 5),
+            ],
+        );
+
+        assert_eq!(widths, vec![10, 8, 0]);
+    }
+
+    #[test]
+    fn max_width_clamps_growth_and_redistributes_leftover_space() {
+        let widths = split_weighted_width(
+            30,
+            &[
+                LayoutItem::with_constraints(
+                    MetricKind::Cpu,
+                    LayoutView::Default,
+                    Some(12),
+                    2,
+                    Some(14),
+                    None,
+                ),
+                LayoutItem::with_constraints(
+                    MetricKind::Memory,
+                    LayoutView::Default,
+                    Some(10),
+                    1,
+                    None,
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(widths, vec![14, 16]);
+    }
+
+    #[test]
+    fn min_width_reserves_space_before_growth_when_room_exists() {
+        let widths = split_weighted_width(
+            24,
+            &[
+                LayoutItem::with_constraints(
+                    MetricKind::Cpu,
+                    LayoutView::Default,
+                    None,
+                    1,
+                    None,
+                    Some(8),
+                ),
+                LayoutItem::with_constraints(
+                    MetricKind::Memory,
+                    LayoutView::Default,
+                    None,
+                    1,
+                    None,
+                    None,
+                ),
+            ],
+        );
+
+        assert_eq!(widths, vec![16, 8]);
+    }
+
+    #[test]
+    fn min_widths_still_compress_when_a_row_is_too_narrow() {
+        let widths = split_weighted_width(
+            6,
+            &[
+                LayoutItem::with_constraints(
+                    MetricKind::Cpu,
+                    LayoutView::Default,
+                    None,
+                    1,
+                    None,
+                    Some(8),
+                ),
+                LayoutItem::with_constraints(
+                    MetricKind::Memory,
+                    LayoutView::Default,
+                    None,
+                    1,
+                    None,
+                    Some(4),
+                ),
+            ],
+        );
+
+        assert_eq!(widths, vec![4, 2]);
+    }
+
+    #[test]
+    fn very_narrow_fixed_width_rows_still_render_to_the_requested_width() {
+        let layout = crate::layout::parse_layout_spec("cpu:12 ram:12 net:16").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(16),
+            once: true,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.1), MetricValue::Single(0.2)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.3), MetricValue::Single(0.4)]),
+            ),
+            (
+                MetricKind::Net,
+                VecDeque::from(vec![
+                    MetricValue::Split {
+                        upper: 0.5,
+                        lower: 0.25,
+                    },
+                    MetricValue::Split {
+                        upper: 0.6,
+                        lower: 0.2,
+                    },
+                ]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.2)),
+            (MetricKind::Memory, MetricValue::Single(0.4)),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.6,
+                    lower: 0.2,
+                },
+            ),
+        ]);
+        let headlines = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(0.2)),
+            (MetricKind::Memory, HeadlineValue::Scalar(0.4)),
+            (MetricKind::Net, HeadlineValue::Scalar(812.0 * 1024.0)),
+        ]);
+
+        let lines = render_lines_with_headlines(
+            &config, 16, false, &histories, &layout, &values, &headlines,
+        );
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(visible_width(&lines[0]), 16);
     }
 
     #[test]
@@ -771,7 +1054,9 @@ mod tests {
             .iter()
             .map(|(metric, value)| (*metric, HeadlineValue::Scalar(value.headline_value())))
             .collect::<HashMap<_, _>>();
-        let lines = render_lines_with_headlines(&config, 80, false, &histories, &layout, &values, &headlines);
+        let lines = render_lines_with_headlines(
+            &config, 80, false, &histories, &layout, &values, &headlines,
+        );
 
         assert_eq!(lines.len(), 2);
         assert_eq!(visible_width(&lines[0]), 80);
@@ -830,10 +1115,14 @@ mod tests {
                 lower: 0.25,
             },
         )]);
-        let headlines = HashMap::from([(MetricKind::Net, HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0))]);
+        let headlines = HashMap::from([(
+            MetricKind::Net,
+            HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0),
+        )]);
 
-        let lines =
-            render_lines_with_headlines(&config, 24, false, &histories, &layout, &values, &headlines);
+        let lines = render_lines_with_headlines(
+            &config, 24, false, &histories, &layout, &values, &headlines,
+        );
 
         assert!(lines[0].contains("3.5M/s"));
     }
@@ -928,6 +1217,60 @@ mod tests {
         );
 
         assert!(segment.contains("spc 512M/2.0G"));
+    }
+
+    #[test]
+    fn explicit_view_override_segments_render_as_requested() {
+        let cases = [
+            (
+                LayoutItem::new(MetricKind::Net, LayoutView::Pct, None, 1),
+                MetricValue::Split {
+                    upper: 0.5,
+                    lower: 0.25,
+                },
+                Some(HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0)),
+                " 50%",
+            ),
+            (
+                LayoutItem::new(MetricKind::Storage, LayoutView::Pct, None, 1),
+                MetricValue::Single(0.5),
+                Some(HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                }),
+                " 50%",
+            ),
+            (
+                LayoutItem::new(MetricKind::Storage, LayoutView::Hum, None, 1),
+                MetricValue::Single(0.5),
+                Some(HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                }),
+                "512M/2.0G",
+            ),
+        ];
+
+        for (item, value, headline, expected) in cases {
+            let segment = render_segment_with_headline(
+                item,
+                &VecDeque::new(),
+                value,
+                headline,
+                18,
+                4,
+                Align::Left,
+                Renderer::Braille,
+                false,
+            );
+
+            assert!(
+                segment.contains(expected),
+                "expected {expected:?} in {segment:?} for {:?} {:?}",
+                item.metric(),
+                item.view()
+            );
+        }
     }
 
     #[test]

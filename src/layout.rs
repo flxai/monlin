@@ -77,9 +77,7 @@ impl MetricKind {
             | Self::Vram
             | Self::Gfx
             | Self::Memory
-            | Self::Storage => {
-                LayoutView::Pct
-            }
+            | Self::Storage => LayoutView::Pct,
         }
     }
 
@@ -180,6 +178,8 @@ pub struct LayoutItem {
     view: LayoutView,
     basis: Option<usize>,
     grow: usize,
+    max_width: Option<usize>,
+    min_width: Option<usize>,
 }
 
 impl LayoutItem {
@@ -189,6 +189,26 @@ impl LayoutItem {
             view,
             basis,
             grow,
+            max_width: None,
+            min_width: None,
+        }
+    }
+
+    pub fn with_constraints(
+        metric: MetricKind,
+        view: LayoutView,
+        basis: Option<usize>,
+        grow: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            metric,
+            view,
+            basis,
+            grow,
+            max_width,
+            min_width,
         }
     }
 
@@ -206,6 +226,14 @@ impl LayoutItem {
 
     pub fn grow(&self) -> usize {
         self.grow
+    }
+
+    pub fn max_width(&self) -> Option<usize> {
+        self.max_width
+    }
+
+    pub fn min_width(&self) -> Option<usize> {
+        self.min_width
     }
 }
 
@@ -278,9 +306,15 @@ pub fn all_metrics() -> &'static [MetricKind] {
 }
 
 pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
-    let explicit_rows = spec.contains(';') || spec.contains('\n');
+    if spec.contains(';') {
+        return Err(
+            "';' row separators are no longer supported; use ',' or a literal newline".to_owned(),
+        );
+    }
+
+    let explicit_rows = spec.contains(',') || spec.contains('\n');
     let mut rows = spec
-        .split(|ch| ch == ';' || ch == '\n')
+        .split(|ch| ch == ',' || ch == '\n')
         .filter_map(|row| {
             let trimmed = row.trim();
             if trimmed.is_empty() {
@@ -304,7 +338,7 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
         for token in row.split_whitespace() {
             if let Some(count) = parse_all_rows(token)? {
                 if explicit_rows {
-                    return Err("all[/N] cannot be mixed with explicit row separators".to_owned());
+                    return Err("all cannot be mixed with explicit row separators".to_owned());
                 }
                 hinted_rows = Some(count);
                 for metric in all_metrics() {
@@ -378,32 +412,17 @@ fn parse_all_rows(token: &str) -> Result<Option<usize>, String> {
     if token == "all" {
         return Ok(Some(2));
     }
-    if let Some(value) = token.strip_prefix("all/").or_else(|| token.strip_prefix("all:")) {
-        let rows = value
-            .parse::<usize>()
-            .map_err(|_| format!("invalid all row count: {value}"))?;
-        if rows == 0 {
-            return Err("all/N requires N > 0".to_owned());
-        }
-        return Ok(Some(rows));
+    if token.starts_with("all/") || token.starts_with("all:") {
+        return Err("all/N is no longer supported; use 'all' or write explicit rows".to_owned());
     }
 
     Ok(None)
 }
 
 fn parse_layout_item(token: &str) -> Result<LayoutItem, String> {
-    let (head, grow) = match token.split_once('+').or_else(|| token.split_once('*')) {
-        Some((head, grow)) => {
-            let parsed = grow
-                .parse::<usize>()
-                .map_err(|_| format!("invalid metric grow value: {grow}"))?;
-            if parsed == 0 {
-                return Err("metric grow values must be greater than zero".to_owned());
-            }
-            (head, Some(parsed))
-        }
-        None => (token, None),
-    };
+    let (head, min_width) = parse_positive_suffix(token, '-', "metric min width")?;
+    let (head, max_width) = parse_positive_suffix(head, '+', "metric max width")?;
+    let (head, grow) = parse_positive_suffix(head, '/', "metric grow value")?;
 
     let (head, basis) = match head.split_once(':') {
         Some((head, basis)) => {
@@ -428,13 +447,45 @@ fn parse_layout_item(token: &str) -> Result<LayoutItem, String> {
 
     let metric =
         MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
+    if let (Some(min_width), Some(max_width)) = (min_width, max_width) {
+        if min_width > max_width {
+            return Err("metric min width cannot exceed max width".to_owned());
+        }
+    }
+    if let (Some(basis), Some(max_width)) = (basis, max_width) {
+        if basis > max_width {
+            return Err("metric basis cannot exceed max width".to_owned());
+        }
+    }
+
     let grow = match (basis, grow) {
         (_, Some(grow)) => grow,
         (Some(_), None) => 0,
         (None, None) => 1,
     };
 
-    Ok(LayoutItem::new(metric, view, basis, grow))
+    Ok(LayoutItem::with_constraints(
+        metric, view, basis, grow, max_width, min_width,
+    ))
+}
+
+fn parse_positive_suffix<'a>(
+    token: &'a str,
+    delimiter: char,
+    label: &str,
+) -> Result<(&'a str, Option<usize>), String> {
+    match token.rsplit_once(delimiter) {
+        Some((head, value)) => {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| format!("invalid {label}: {value}"))?;
+            if parsed == 0 {
+                return Err(format!("{label}s must be greater than zero"));
+            }
+            Ok((head, Some(parsed)))
+        }
+        None => Ok((token, None)),
+    }
 }
 
 pub fn split_even_width(total: usize, count: usize) -> Vec<usize> {
@@ -597,12 +648,99 @@ mod tests {
     }
 
     #[test]
+    fn parses_known_views_and_rejects_unknown_ones() {
+        assert_eq!(LayoutView::parse("pct"), Some(LayoutView::Pct));
+        assert_eq!(LayoutView::parse("hum"), Some(LayoutView::Hum));
+        assert_eq!(LayoutView::parse("wat"), None);
+    }
+
+    #[test]
+    fn default_views_match_metric_families() {
+        assert_eq!(MetricKind::Cpu.default_view(), LayoutView::Pct);
+        assert_eq!(MetricKind::Storage.default_view(), LayoutView::Pct);
+        assert_eq!(MetricKind::Net.default_view(), LayoutView::Hum);
+        assert_eq!(MetricKind::Ingress.default_view(), LayoutView::Hum);
+    }
+
+    #[test]
+    fn humanize_bytes_uses_expected_units() {
+        assert_eq!(humanize_bytes(999.0), "999B");
+        assert_eq!(humanize_bytes(1024.0), "1.0K");
+        assert_eq!(humanize_bytes(12.0 * 1024.0 * 1024.0), "12M");
+    }
+
+    #[test]
     fn all_expands_to_the_full_metric_set() {
         let layout = parse_layout_spec("all").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
         assert_eq!(layout.rows()[0].len(), 6);
         assert_eq!(layout.rows()[1].len(), 5);
+    }
+
+    #[test]
+    fn all_macro_conformance_matrix() {
+        let cases = [
+            (
+                "all",
+                vec![
+                    MetricKind::Sys,
+                    MetricKind::Cpu,
+                    MetricKind::Memory,
+                    MetricKind::Storage,
+                    MetricKind::Gfx,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
+                    MetricKind::Io,
+                    MetricKind::Net,
+                    MetricKind::Ingress,
+                    MetricKind::Egress,
+                ],
+                vec![6, 5],
+            ),
+            (
+                "cpu all ram",
+                vec![
+                    MetricKind::Cpu,
+                    MetricKind::Sys,
+                    MetricKind::Memory,
+                    MetricKind::Storage,
+                    MetricKind::Gfx,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
+                    MetricKind::Io,
+                    MetricKind::Net,
+                    MetricKind::Ingress,
+                    MetricKind::Egress,
+                ],
+                vec![6, 5],
+            ),
+            (
+                "all cpu ram net cpu",
+                vec![
+                    MetricKind::Sys,
+                    MetricKind::Cpu,
+                    MetricKind::Memory,
+                    MetricKind::Storage,
+                    MetricKind::Gfx,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
+                    MetricKind::Io,
+                    MetricKind::Net,
+                    MetricKind::Ingress,
+                    MetricKind::Egress,
+                ],
+                vec![6, 5],
+            ),
+        ];
+
+        for (spec, expected_metrics, expected_row_lengths) in cases {
+            let layout = parse_layout_spec(spec).unwrap();
+            let row_lengths = layout.rows().iter().map(Vec::len).collect::<Vec<_>>();
+
+            assert_eq!(layout.metrics(), expected_metrics.as_slice(), "{spec}");
+            assert_eq!(row_lengths, expected_row_lengths, "{spec}");
+        }
     }
 
     #[test]
@@ -628,19 +766,17 @@ mod tests {
     }
 
     #[test]
-    fn all_with_explicit_row_count_is_balanced() {
-        let layout = parse_layout_spec("all/3").unwrap();
-        assert_eq!(layout.rows().len(), 3);
-        assert_eq!(layout.rows()[0].len(), 4);
-        assert_eq!(layout.rows()[1].len(), 4);
-        assert_eq!(layout.rows()[2].len(), 3);
+    fn all_row_count_suffix_is_rejected() {
+        let error = parse_layout_spec("all/3").unwrap_err();
+        assert!(error.contains("no longer supported"));
     }
 
     #[test]
     fn explicit_row_breaks_are_preserved() {
-        let layout = parse_layout_spec("cpu ram; gpu vram\nnet io").unwrap();
+        let layout = parse_layout_spec("cpu ram, gpu vram\nnet io").unwrap();
         assert_eq!(
-            layout.rows()
+            layout
+                .rows()
                 .iter()
                 .map(|row| row.iter().map(|item| item.metric()).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
@@ -654,9 +790,10 @@ mod tests {
 
     #[test]
     fn explicit_row_breaks_dedupe_globally() {
-        let layout = parse_layout_spec("cpu ram; ram gpu cpu").unwrap();
+        let layout = parse_layout_spec("cpu ram, ram gpu cpu").unwrap();
         assert_eq!(
-            layout.rows()
+            layout
+                .rows()
                 .iter()
                 .map(|row| row.iter().map(|item| item.metric()).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
@@ -668,14 +805,14 @@ mod tests {
     }
 
     #[test]
-    fn all_row_hint_cannot_mix_with_explicit_rows() {
-        let error = parse_layout_spec("all/2; cpu").unwrap_err();
+    fn all_cannot_mix_with_explicit_rows() {
+        let error = parse_layout_spec("all, cpu").unwrap_err();
         assert!(error.contains("explicit row separators"));
     }
 
     #[test]
     fn can_filter_unavailable_metrics_from_layout() {
-        let layout = parse_layout_spec("sys gfx io net; cpu gpu vram").unwrap();
+        let layout = parse_layout_spec("sys gfx io net, cpu gpu vram").unwrap();
         let filtered = layout.retain_available(|metric| metric != MetricKind::Vram);
 
         assert_eq!(
@@ -698,7 +835,7 @@ mod tests {
 
     #[test]
     fn parses_basis_grow_and_view_tokens() {
-        let layout = parse_layout_spec("cpu:12+2 ram.pct:10 net.hum+3").unwrap();
+        let layout = parse_layout_spec("cpu:12/2 ram.pct:10 net.hum/3").unwrap();
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(layout.rows()[0][0].metric(), MetricKind::Cpu);
         assert_eq!(layout.rows()[0][0].basis(), Some(12));
@@ -713,10 +850,119 @@ mod tests {
     }
 
     #[test]
-    fn legacy_weight_syntax_still_parses_as_grow() {
-        let layout = parse_layout_spec("cpu*3 ram*4").unwrap();
-        assert_eq!(layout.rows()[0][0].grow(), 3);
-        assert_eq!(layout.rows()[0][1].grow(), 4);
+    fn mixed_item_syntax_conformance_matrix() {
+        let cases = vec![
+            (
+                "cpu:12/2 ram:10 net.hum/3+24",
+                vec![vec![
+                    (
+                        MetricKind::Cpu,
+                        LayoutView::Default,
+                        Some(12),
+                        2,
+                        None,
+                        None,
+                    ),
+                    (
+                        MetricKind::Memory,
+                        LayoutView::Default,
+                        Some(10),
+                        0,
+                        None,
+                        None,
+                    ),
+                    (MetricKind::Net, LayoutView::Hum, None, 3, Some(24), None),
+                ]],
+            ),
+            (
+                "cpu:12/2+20-8 ram+14-6, spc.hum-9",
+                vec![
+                    vec![
+                        (
+                            MetricKind::Cpu,
+                            LayoutView::Default,
+                            Some(12),
+                            2,
+                            Some(20),
+                            Some(8),
+                        ),
+                        (
+                            MetricKind::Memory,
+                            LayoutView::Default,
+                            None,
+                            1,
+                            Some(14),
+                            Some(6),
+                        ),
+                    ],
+                    vec![(MetricKind::Storage, LayoutView::Hum, None, 1, None, Some(9))],
+                ],
+            ),
+            (
+                "spc.pct spc.hum net.pct net.hum",
+                vec![vec![
+                    (MetricKind::Storage, LayoutView::Pct, None, 1, None, None),
+                    (MetricKind::Storage, LayoutView::Hum, None, 1, None, None),
+                    (MetricKind::Net, LayoutView::Pct, None, 1, None, None),
+                    (MetricKind::Net, LayoutView::Hum, None, 1, None, None),
+                ]],
+            ),
+        ];
+
+        for (spec, expected_rows) in cases {
+            let layout = parse_layout_spec(spec).unwrap();
+            let actual_rows = layout
+                .rows()
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|item| {
+                            (
+                                item.metric(),
+                                item.view(),
+                                item.basis(),
+                                item.grow(),
+                                item.max_width(),
+                                item.min_width(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+
+            assert_eq!(actual_rows, expected_rows, "{spec}");
+        }
+    }
+
+    #[test]
+    fn parses_max_and_min_constraints() {
+        let layout = parse_layout_spec("cpu:12/2+20-8 ram+14-6").unwrap();
+        assert_eq!(layout.rows()[0][0].grow(), 2);
+        assert_eq!(layout.rows()[0][0].max_width(), Some(20));
+        assert_eq!(layout.rows()[0][0].min_width(), Some(8));
+        assert_eq!(layout.rows()[0][1].grow(), 1);
+        assert_eq!(layout.rows()[0][1].max_width(), Some(14));
+        assert_eq!(layout.rows()[0][1].min_width(), Some(6));
+    }
+
+    #[test]
+    fn rejects_old_row_separator() {
+        let error = parse_layout_spec("cpu; ram").unwrap_err();
+        assert!(error.contains("no longer supported"));
+    }
+
+    #[test]
+    fn rejects_old_grow_syntax() {
+        let error = parse_layout_spec("cpu*3").unwrap_err();
+        assert!(error.contains("unknown metric"));
+    }
+
+    #[test]
+    fn rejects_invalid_constraint_ranges() {
+        let error = parse_layout_spec("cpu:12+10").unwrap_err();
+        assert!(error.contains("basis cannot exceed max"));
+        let error = parse_layout_spec("cpu+10-12").unwrap_err();
+        assert!(error.contains("min width cannot exceed max"));
     }
 
     #[test]
@@ -736,5 +982,49 @@ mod tests {
         let layout = parse_layout_spec("spc.hum spc.hum").unwrap();
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(layout.rows()[0].len(), 1);
+    }
+
+    #[test]
+    fn explicit_view_override_matrix() {
+        let cases = [
+            (
+                MetricKind::Net,
+                LayoutView::Pct,
+                crate::metrics::HeadlineValue::Scalar(3.0 * 1024.0 * 1024.0),
+                " 50%",
+            ),
+            (
+                MetricKind::Net,
+                LayoutView::Hum,
+                crate::metrics::HeadlineValue::Scalar(3.0 * 1024.0 * 1024.0),
+                "3.0M/s",
+            ),
+            (
+                MetricKind::Storage,
+                LayoutView::Pct,
+                crate::metrics::HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+                " 50%",
+            ),
+            (
+                MetricKind::Storage,
+                LayoutView::Hum,
+                crate::metrics::HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+                "512M/2.0G",
+            ),
+        ];
+
+        for (metric, view, headline, expected) in cases {
+            assert_eq!(
+                metric.format_value(view, 0.5, &headline),
+                expected,
+                "{metric:?} {view:?}"
+            );
+        }
     }
 }

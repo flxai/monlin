@@ -1,5 +1,5 @@
 fn main() {
-    if let Err(error) = monlin::run(std::env::args()) {
+    if let Err(error) = monlin::run(std::env::args().collect()) {
         eprintln!("{error}");
         std::process::exit(1);
     }

@@ -41,12 +41,6 @@ One-shot render:
 nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0
 ```
 
-Nested i3bar test session:
-
-```sh
-bash ./scripts/test-i3bar.sh
-```
-
 ## Default Behavior
 
 With no arguments, `monlin` renders the default full layout:
@@ -59,12 +53,6 @@ This is equivalent to:
 
 ```sh
 monlin --layout "all"
-```
-
-And `all` currently defaults to two rows:
-
-```sh
-monlin --layout "all/2"
 ```
 
 ## Metrics
@@ -92,7 +80,6 @@ Combined metrics:
 Special macro:
 
 - `all`
-- `all/N`
 
 ## Headline Units
 
@@ -128,7 +115,7 @@ For combined transfer metrics:
 The canonical layout syntax is:
 
 ```text
-metric[.view][:basis][+grow]
+metric[.view][:basis][/grow][+max][-min]
 ```
 
 Where:
@@ -136,11 +123,13 @@ Where:
 - `metric` selects what to render
 - `.view` changes headline formatting
 - `:basis` reserves width for that item
-- `+grow` gives the item a share of leftover width
+- `/grow` gives the item a share of leftover width
+- `+max` caps how wide the item may expand
+- `-min` gives the item a soft minimum width when there is room
 
 Rows are separated with:
 
-- `;`
+- `,`
 - or a literal newline
 
 ### Examples
@@ -157,16 +146,14 @@ monlin --layout "spc.hum"
 Multi-row layouts:
 
 ```sh
-monlin --layout "sys gfx io net; cpu ram in out"
+monlin --layout "sys gfx io net, cpu ram in out"
 monlin --layout $'sys gfx io net\ncpu ram in out'
 ```
 
-Balanced expansion of the full metric set:
+Default full-layout expansion:
 
 ```sh
 monlin --layout "all"
-monlin --layout "all/2"
-monlin --layout "all/3"
 ```
 
 ### Views
@@ -220,15 +207,15 @@ monlin --layout "cpu:12 ram:12 net:16"
 
 ### Grow
 
-`+N` means:
+`/N` means:
 
 - this item gets `N` shares of any width left after fixed bases are reserved
 
 Examples:
 
 ```sh
-monlin --layout "cpu+2 ram+1"
-monlin --layout "net.hum+3 io.hum+2"
+monlin --layout "cpu/2 ram/1"
+monlin --layout "net.hum/3 io.hum/2"
 ```
 
 If no basis and no grow are specified, the item behaves like a default flexible
@@ -238,12 +225,12 @@ So these are effectively equivalent in spirit:
 
 ```sh
 monlin --layout "cpu ram"
-monlin --layout "cpu+1 ram+1"
+monlin --layout "cpu/1 ram/1"
 ```
 
 ### Basis Plus Grow
 
-`:N+M` means:
+`:N/M` means:
 
 - reserve `N` columns first
 - then participate in leftover width distribution with `M` shares
@@ -251,7 +238,7 @@ monlin --layout "cpu+1 ram+1"
 Example:
 
 ```sh
-monlin --layout "cpu:12+2 ram:10 net.hum+3"
+monlin --layout "cpu:12/2 ram:10 net.hum/3"
 ```
 
 Interpretation:
@@ -262,48 +249,41 @@ Interpretation:
 
 This is the preferred way to mix fixed and flexible columns in one row.
 
+### Max And Min
+
+`+N` means:
+
+- cap this item at `N` columns after growth is distributed
+
+`-N` means:
+
+- prefer at least `N` columns for this item when the row has room
+
+Examples:
+
+```sh
+monlin --layout "cpu/2+18 ram/1+14"
+monlin --layout "net.hum/3+24 in.hum-10 out.hum-10"
+monlin --layout "cpu:12/2+20-8"
+```
+
 ## Width Allocation Model
 
 Each row behaves like a tiny flexbox:
 
 1. reserve row separators
-2. reserve all explicit bases
+2. reserve explicit bases and soft minimum widths
 3. distribute remaining width across grow items
-4. if the row is too narrow to satisfy all bases, compress proportionally
-5. pad or trim the final rendered row to the requested line width
+4. clamp any items that exceed their max width and redistribute the freed space
+5. if the row is too narrow to satisfy the preferred widths, compress proportionally
+6. pad or trim the final rendered row to the requested line width
 
 This is why the following all work naturally:
 
 ```sh
 monlin --layout "cpu ram net"
-monlin --layout "cpu:12 ram:12 net+2"
-monlin --layout "cpu:12+2 ram:10 net.hum+3"
-```
-
-## Compatibility Forms
-
-The preferred syntax is:
-
-- `all/N`
-- `+grow`
-
-The parser still accepts older compatibility forms:
-
-- `all:N`
-- `*grow`
-
-Examples:
-
-```sh
-monlin --layout "all:2"
-monlin --layout "cpu*3 ram*4"
-```
-
-These still work, but new layouts should use:
-
-```sh
-monlin --layout "all/2"
-monlin --layout "cpu+3 ram+4"
+monlin --layout "cpu:12 ram:12 net/2"
+monlin --layout "cpu:12/2 ram:10 net.hum/3+24"
 ```
 
 ## Row Behavior
@@ -328,7 +308,7 @@ If you do specify row breaks:
 Example:
 
 ```sh
-monlin --layout "cpu ram; ram gpu cpu net"
+monlin --layout "cpu ram, ram gpu cpu net"
 ```
 
 This becomes effectively:
@@ -349,7 +329,6 @@ Full default monitor:
 ```sh
 monlin
 monlin --layout "all"
-monlin --layout "all/2"
 ```
 
 Compact top-level view:
@@ -368,7 +347,8 @@ monlin --layout "io.hum:14 net.hum:14 in.hum out.hum"
 Mixed fixed and flexible widths:
 
 ```sh
-monlin --layout "cpu:12+2 ram:10 net.hum+3"
+monlin --layout "cpu:12/2 ram:10 net.hum/3"
+monlin --layout "cpu:12/2+20-8 ram/1+14"
 ```
 
 Storage headline variants:
@@ -382,7 +362,7 @@ monlin --layout "spc.hum"
 Two explicit rows:
 
 ```sh
-monlin --layout "sys gfx io net; cpu ram in out"
+monlin --layout "sys gfx io net, cpu ram in out"
 ```
 
 Right-aligned headline placement:
@@ -394,13 +374,13 @@ monlin --align right --layout "sys gfx io net"
 No color:
 
 ```sh
-monlin --color never --layout "all/2"
+monlin --color never --layout "all"
 ```
 
 One-shot preview at fixed width:
 
 ```sh
-monlin --once --interval-ms 0 --width 96 --color never --layout "all/2"
+monlin --once --interval-ms 0 --width 96 --color never --layout "all"
 ```
 
 ## CLI Flags
@@ -422,10 +402,10 @@ Core flags:
 Examples:
 
 ```sh
-monlin --history 512 --interval-ms 1000 --layout "all/2"
+monlin --history 512 --interval-ms 1000 --layout "all"
 monlin --label ono --layout "sys gfx io net"
 monlin --renderer block --layout "cpu ram"
-monlin --output i3bar --layout "all/2"
+monlin --output i3bar --layout "all"
 ```
 
 ## Positional Metrics
@@ -455,26 +435,18 @@ When `--output i3bar` is used:
 - each rendered `monlin` row becomes one i3bar block
 - ANSI colors are disabled automatically in this mode
 
-To test it in a real bar without touching your main i3 config:
+To test the `i3bar` JSON protocol directly:
 
 ```sh
-bash ./scripts/test-i3bar.sh
+cargo test i3bar_once_mode_emits_i3bar_protocol
 ```
 
-Optional arguments:
+And to verify that `i3bar` mode keeps one block per rendered row without ANSI
+escapes:
 
 ```sh
-bash ./scripts/test-i3bar.sh 2 'sys gfx io net'
+cargo test i3bar_once_mode_uses_one_block_per_row_without_ansi
 ```
-
-That launches a nested Xephyr+i3 session on `:2` with `monlin` as the
-`status_command`.
-
-The helper prefers:
-
-- `MONLIN_TEST_TERM` if set
-- `i3-sensible-terminal`
-- then common terminal fallbacks like `alacritty` and `xterm`
 
 Combined metric semantics:
 
@@ -492,13 +464,22 @@ Current release line:
 Recent additions in this line:
 
 - richer layout DSL
-- basis/grow width allocation
+- basis/grow/min/max width allocation
 - rate-based transfer headlines
 - multiline layouts
 - combined metrics
 - default full-layout rendering
 
 ## Verification
+
+One local verification sequence is:
+
+```sh
+cargo fmt --check
+cargo clippy
+cargo test
+nix flake check 'path:/home/flx/pro/git/monlin'
+```
 
 The repo is intended to verify cleanly through the flake:
 
@@ -510,6 +491,6 @@ And quick smoke tests are typically:
 
 ```sh
 nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never
-nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'all/2'
-nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'cpu:12+2 ram:10 net.hum+3'
+nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'all'
+nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'cpu:12/2 ram:10 net.hum/3+24'
 ```

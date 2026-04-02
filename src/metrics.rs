@@ -1,9 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::CString;
 use std::fs;
 use std::io;
 use std::os::raw::{c_char, c_int, c_ulong};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::layout::MetricKind;
 
@@ -97,12 +97,19 @@ struct RateSample {
     lower_raw: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RatePoint {
+    at: Instant,
+    value: f64,
+}
+
 #[derive(Debug)]
 pub struct Sampler {
     cpu_prev: Option<CpuCounters>,
     disk_prev: Option<(DiskCounters, Instant)>,
     net_prev: Option<(NetCounters, Instant)>,
-    scale_maxima: HashMap<ScaleKey, f64>,
+    net_ema: Option<(f64, f64)>,
+    rate_windows: HashMap<ScaleKey, VecDeque<RatePoint>>,
 }
 
 impl Default for Sampler {
@@ -111,7 +118,8 @@ impl Default for Sampler {
             cpu_prev: None,
             disk_prev: None,
             net_prev: None,
-            scale_maxima: HashMap::new(),
+            net_ema: None,
+            rate_windows: HashMap::new(),
         }
     }
 }
@@ -137,7 +145,8 @@ impl Sampler {
         let mut values = HashMap::new();
         let mut headlines = HashMap::new();
 
-        let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys) {
+        let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys)
+        {
             Some(self.sample_cpu()?)
         } else {
             None
@@ -152,23 +161,26 @@ impl Sampler {
             None
         };
 
-        let gpu_value = if metrics.contains(&MetricKind::Gpu) || metrics.contains(&MetricKind::Gfx) {
+        let gpu_value = if metrics.contains(&MetricKind::Gpu) || metrics.contains(&MetricKind::Gfx)
+        {
             gpu_sample.unwrap_or_default().utilization
         } else {
             None
         };
 
-        let vram_value = if metrics.contains(&MetricKind::Vram) || metrics.contains(&MetricKind::Gfx) {
-            gpu_sample.unwrap_or_default().vram_fraction()
-        } else {
-            None
-        };
+        let vram_value =
+            if metrics.contains(&MetricKind::Vram) || metrics.contains(&MetricKind::Gfx) {
+                gpu_sample.unwrap_or_default().vram_fraction()
+            } else {
+                None
+            };
 
-        let memory_value = if metrics.contains(&MetricKind::Memory) || metrics.contains(&MetricKind::Sys) {
-            Some(read_memory_usage()?)
-        } else {
-            None
-        };
+        let memory_value =
+            if metrics.contains(&MetricKind::Memory) || metrics.contains(&MetricKind::Sys) {
+                Some(read_memory_usage()?)
+            } else {
+                None
+            };
 
         let storage_value = if metrics.contains(&MetricKind::Storage) {
             Some(read_storage_usage("/")?)
@@ -207,11 +219,17 @@ impl Sampler {
                     (None, None) => None,
                 },
                 MetricKind::Memory => memory_value.map(MetricValue::Single),
-                MetricKind::Storage => storage_value.map(|sample| MetricValue::Single(sample.usage_ratio)),
+                MetricKind::Storage => {
+                    storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
+                }
                 MetricKind::Io => io_value.map(|sample| sample.value),
                 MetricKind::Net => net_value.map(|sample| sample.value),
-                MetricKind::Ingress => net_value.map(|sample| MetricValue::Single(sample.value.upper())),
-                MetricKind::Egress => net_value.map(|sample| MetricValue::Single(sample.value.lower())),
+                MetricKind::Ingress => {
+                    net_value.map(|sample| MetricValue::Single(sample.value.upper()))
+                }
+                MetricKind::Egress => {
+                    net_value.map(|sample| MetricValue::Single(sample.value.lower()))
+                }
             };
             if let Some(value) = value {
                 let value = clamp_value(value);
@@ -261,8 +279,8 @@ impl Sampler {
             let write_rate = rate_from_counters(prev.write_bytes, current.write_bytes, dt);
             RateSample {
                 value: MetricValue::Split {
-                    upper: self.normalize_rate(ScaleKey::IoWrite, write_rate),
-                    lower: self.normalize_rate(ScaleKey::IoRead, read_rate),
+                    upper: self.normalize_rate(ScaleKey::IoWrite, write_rate, now),
+                    lower: self.normalize_rate(ScaleKey::IoRead, read_rate, now),
                 },
                 upper_raw: write_rate,
                 lower_raw: read_rate,
@@ -288,10 +306,11 @@ impl Sampler {
             let dt = now.duration_since(at).as_secs_f64();
             let ingress_rate = rate_from_counters(prev.rx_bytes, current.rx_bytes, dt);
             let egress_rate = rate_from_counters(prev.tx_bytes, current.tx_bytes, dt);
+            let (ingress_rate, egress_rate) = self.smooth_net_rates(ingress_rate, egress_rate);
             RateSample {
                 value: MetricValue::Split {
-                    upper: self.normalize_rate(ScaleKey::NetIngress, ingress_rate),
-                    lower: self.normalize_rate(ScaleKey::NetEgress, egress_rate),
+                    upper: self.normalize_rate(ScaleKey::NetIngress, ingress_rate, now),
+                    lower: self.normalize_rate(ScaleKey::NetEgress, egress_rate, now),
                 },
                 upper_raw: ingress_rate,
                 lower_raw: egress_rate,
@@ -310,10 +329,46 @@ impl Sampler {
         Ok(usage)
     }
 
-    fn normalize_rate(&mut self, metric: ScaleKey, rate: f64) -> f64 {
-        let entry = self.scale_maxima.entry(metric).or_insert(rate.max(1.0));
-        *entry = (entry.mul_add(0.97, 0.0)).max(rate).max(1.0);
-        (rate / *entry).clamp(0.0, 1.0)
+    fn smooth_net_rates(&mut self, ingress_rate: f64, egress_rate: f64) -> (f64, f64) {
+        const NET_EMA_ALPHA: f64 = 0.35;
+
+        let current = (ingress_rate.max(0.0), egress_rate.max(0.0));
+        let smoothed = if let Some((previous_ingress, previous_egress)) = self.net_ema {
+            (
+                (NET_EMA_ALPHA * current.0) + ((1.0 - NET_EMA_ALPHA) * previous_ingress),
+                (NET_EMA_ALPHA * current.1) + ((1.0 - NET_EMA_ALPHA) * previous_egress),
+            )
+        } else {
+            current
+        };
+        self.net_ema = Some(smoothed);
+        smoothed
+    }
+
+    fn normalize_rate(&mut self, metric: ScaleKey, rate: f64, now: Instant) -> f64 {
+        const RATE_SCALE_WINDOW: Duration = Duration::from_secs(8);
+
+        let window = self.rate_windows.entry(metric).or_default();
+        window.push_back(RatePoint {
+            at: now,
+            value: rate.max(0.0),
+        });
+        trim_rate_window(window, now, RATE_SCALE_WINDOW);
+
+        let scale = window
+            .iter()
+            .map(|point| point.value)
+            .fold(1.0_f64, f64::max);
+        (rate / scale).clamp(0.0, 1.0)
+    }
+}
+
+fn trim_rate_window(window: &mut VecDeque<RatePoint>, now: Instant, max_age: Duration) {
+    while let Some(front) = window.front() {
+        if now.duration_since(front.at) <= max_age {
+            break;
+        }
+        window.pop_front();
     }
 }
 
@@ -413,15 +468,22 @@ fn parse_memory_usage(meminfo: &str) -> io::Result<f64> {
 
     for line in meminfo.lines() {
         if line.starts_with("MemTotal:") {
-            total = line.split_whitespace().nth(1).and_then(|value| value.parse().ok());
+            total = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok());
         } else if line.starts_with("MemAvailable:") {
-            available = line.split_whitespace().nth(1).and_then(|value| value.parse().ok());
+            available = line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|value| value.parse().ok());
         }
     }
 
-    let total = total.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemTotal"))?;
-    let available =
-        available.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemAvailable"))?;
+    let total =
+        total.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemTotal"))?;
+    let available = available
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemAvailable"))?;
     if total == 0 {
         return Ok(0.0);
     }
@@ -521,10 +583,15 @@ fn is_primary_disk(name: &str) -> bool {
 
 fn read_net_counters() -> io::Result<NetCounters> {
     let netdev = fs::read_to_string("/proc/net/dev")?;
-    parse_net_counters(&netdev)
+    let routed_ifaces = read_default_route_ifaces();
+    let routed_ifaces = (!routed_ifaces.is_empty()).then_some(&routed_ifaces);
+    parse_net_counters(&netdev, routed_ifaces)
 }
 
-fn parse_net_counters(netdev: &str) -> io::Result<NetCounters> {
+fn parse_net_counters(
+    netdev: &str,
+    routed_ifaces: Option<&HashSet<String>>,
+) -> io::Result<NetCounters> {
     let mut rx = 0_u64;
     let mut tx = 0_u64;
 
@@ -535,6 +602,11 @@ fn parse_net_counters(netdev: &str) -> io::Result<NetCounters> {
         let iface = name.trim();
         if iface == "lo" {
             continue;
+        }
+        if let Some(routed_ifaces) = routed_ifaces {
+            if !routed_ifaces.contains(iface) {
+                continue;
+            }
         }
         let fields = data.split_whitespace().collect::<Vec<_>>();
         if fields.len() < 16 {
@@ -548,6 +620,43 @@ fn parse_net_counters(netdev: &str) -> io::Result<NetCounters> {
         rx_bytes: rx,
         tx_bytes: tx,
     })
+}
+
+fn read_default_route_ifaces() -> HashSet<String> {
+    let mut ifaces = HashSet::new();
+
+    if let Ok(route) = fs::read_to_string("/proc/net/route") {
+        parse_default_route_ifaces_v4(&route, &mut ifaces);
+    }
+    if let Ok(route) = fs::read_to_string("/proc/net/ipv6_route") {
+        parse_default_route_ifaces_v6(&route, &mut ifaces);
+    }
+
+    ifaces
+}
+
+fn parse_default_route_ifaces_v4(route: &str, ifaces: &mut HashSet<String>) {
+    for line in route.lines().skip(1) {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 8 {
+            continue;
+        }
+        if fields[1] == "00000000" && fields[7] == "00000000" {
+            ifaces.insert(fields[0].to_owned());
+        }
+    }
+}
+
+fn parse_default_route_ifaces_v6(route: &str, ifaces: &mut HashSet<String>) {
+    for line in route.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10 {
+            continue;
+        }
+        if fields[0] == "00000000000000000000000000000000" && fields[1] == "00000000" {
+            ifaces.insert(fields[9].to_owned());
+        }
+    }
 }
 
 fn read_gpu_sample() -> io::Result<GpuSample> {
@@ -602,7 +711,10 @@ fn parse_nvidia_smi_csv(stdout: &str) -> io::Result<GpuSample> {
         .lines()
         .find(|line| !line.trim().is_empty())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing nvidia-smi output"))?;
-    let fields = line.split(',').map(|field| field.trim()).collect::<Vec<_>>();
+    let fields = line
+        .split(',')
+        .map(|field| field.trim())
+        .collect::<Vec<_>>();
     if fields.len() < 3 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -663,12 +775,41 @@ mod tests {
     }
 
     #[test]
+    fn cpu_counters_are_parsed_from_aggregate_line() {
+        let counters = parse_cpu_counters("cpu  10 20 30 40 50 60 70 80 90 100\n").unwrap();
+        assert_eq!(counters.idle, 90);
+        assert_eq!(counters.total, 550);
+    }
+
+    #[test]
+    fn cpu_counters_require_an_aggregate_line() {
+        let error = parse_cpu_counters("cpu0  10 20 30 40 50 60 70\n").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn cpu_counters_reject_invalid_fields() {
+        let error = parse_cpu_counters("cpu  10 xx 30 40 50 60 70\n").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn memory_usage_is_parsed_from_meminfo() {
-        let value = parse_memory_usage(
-            "MemTotal:       1000 kB\nMemAvailable:    250 kB\n",
-        )
-        .unwrap();
+        let value =
+            parse_memory_usage("MemTotal:       1000 kB\nMemAvailable:    250 kB\n").unwrap();
         assert!((value - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn memory_usage_requires_memavailable() {
+        let error = parse_memory_usage("MemTotal:       1000 kB\n").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn memory_usage_handles_zero_total() {
+        let value = parse_memory_usage("MemTotal:       0 kB\nMemAvailable:    0 kB\n").unwrap();
+        assert_eq!(value, 0.0);
     }
 
     #[test]
@@ -696,6 +837,12 @@ mod tests {
     }
 
     #[test]
+    fn storage_usage_rejects_paths_with_nul_bytes() {
+        let error = read_storage_usage("/tmp/\0bad").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
     fn disk_counters_skip_loop_devices() {
         let counters = parse_disk_counters(
             "   7       0 loop0 1 2 3 4 5 6 7 8 9 10 11\n\
@@ -713,10 +860,44 @@ mod tests {
              face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
              lo: 10 0 0 0 0 0 0 0 20 0 0 0 0 0 0 0\n\
              eth0: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n",
+            None,
         )
         .unwrap();
         assert_eq!(counters.rx_bytes, 100);
         assert_eq!(counters.tx_bytes, 200);
+    }
+
+    #[test]
+    fn net_counters_prefer_routed_interfaces_when_available() {
+        let counters = parse_net_counters(
+            "Inter-|   Receive                                                |  Transmit\n\
+             face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+             wlp0s20f3: 100 0 0 0 0 0 0 0 200 0 0 0 0 0 0 0\n\
+             tailscale0: 300 0 0 0 0 0 0 0 400 0 0 0 0 0 0 0\n",
+            Some(&HashSet::from([String::from("wlp0s20f3")])),
+        )
+        .unwrap();
+        assert_eq!(counters.rx_bytes, 100);
+        assert_eq!(counters.tx_bytes, 200);
+    }
+
+    #[test]
+    fn parses_default_route_interfaces_from_procfs_views() {
+        let mut ifaces = HashSet::new();
+
+        parse_default_route_ifaces_v4(
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\n\
+             wlp0s20f3\t00000000\t01020304\t0003\t0\t0\t0\t00000000\n\
+             tailscale0\t0008FE64\t00000000\t0001\t0\t0\t0\t00FFFFFF\n",
+            &mut ifaces,
+        );
+        parse_default_route_ifaces_v6(
+            "00000000000000000000000000000000 00000000 00000000000000000000000000000000 00000000 00000000000000000000000000000000 00000000 00000000 00000000 00000000 tailscale0\n",
+            &mut ifaces,
+        );
+
+        assert!(ifaces.contains("wlp0s20f3"));
+        assert!(ifaces.contains("tailscale0"));
     }
 
     #[test]
@@ -736,6 +917,18 @@ mod tests {
     }
 
     #[test]
+    fn nvidia_parser_rejects_missing_output() {
+        let error = parse_nvidia_smi_csv("\n\n").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn nvidia_parser_rejects_truncated_rows() {
+        let error = parse_nvidia_smi_csv("35, 1024\n").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
     fn gfx_can_degrade_to_gpu_only() {
         let value = match (Some(0.35), None) {
             (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
@@ -751,5 +944,113 @@ mod tests {
                 lower: 0.0,
             })
         );
+    }
+
+    #[test]
+    fn rate_scaling_keeps_recent_spikes_in_the_window() {
+        let mut sampler = Sampler::default();
+        let start = Instant::now();
+
+        assert!(
+            (sampler.normalize_rate(ScaleKey::NetIngress, 1000.0, start) - 1.0).abs()
+                < f64::EPSILON
+        );
+
+        let normalized =
+            sampler.normalize_rate(ScaleKey::NetIngress, 100.0, start + Duration::from_secs(4));
+
+        assert!((normalized - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_scaling_recovers_after_old_spikes_age_out() {
+        let mut sampler = Sampler::default();
+        let start = Instant::now();
+
+        sampler.normalize_rate(ScaleKey::IoWrite, 1000.0, start);
+        let normalized =
+            sampler.normalize_rate(ScaleKey::IoWrite, 100.0, start + Duration::from_secs(9));
+
+        assert!((normalized - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn net_rate_smoothing_damps_spikes() {
+        let mut sampler = Sampler::default();
+
+        let first = sampler.smooth_net_rates(1000.0, 500.0);
+        assert_eq!(first, (1000.0, 500.0));
+
+        let second = sampler.smooth_net_rates(0.0, 0.0);
+        assert!((second.0 - 650.0).abs() < 1e-9);
+        assert!((second.1 - 325.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rate_from_counters_handles_zero_and_positive_intervals() {
+        assert_eq!(rate_from_counters(100, 200, 0.0), 0.0);
+        assert_eq!(rate_from_counters(100, 300, 2.0), 100.0);
+    }
+
+    #[test]
+    fn host_metric_readers_are_best_effort_successes() {
+        let mut sampler = Sampler::default();
+        let metrics = [
+            MetricKind::Memory,
+            MetricKind::Storage,
+            MetricKind::Gpu,
+            MetricKind::Io,
+            MetricKind::Net,
+        ];
+
+        sampler.prime(&metrics).unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+
+        let sample = sampler.sample(&metrics).unwrap();
+
+        assert!(sample.values.contains_key(&MetricKind::Memory));
+        assert!(sample.values.contains_key(&MetricKind::Storage));
+        assert!(sample.values.contains_key(&MetricKind::Io));
+        assert!(sample.values.contains_key(&MetricKind::Net));
+    }
+
+    #[test]
+    fn direct_host_readers_execute_successfully() {
+        let memory = read_memory_usage().unwrap();
+        let storage = read_storage_usage("/").unwrap();
+        let disk = read_disk_counters().unwrap();
+        let net = read_net_counters().unwrap();
+        let gpu = read_generic_gpu_sample().unwrap();
+
+        assert!((0.0..=1.0).contains(&memory));
+        assert!((0.0..=1.0).contains(&storage.usage_ratio));
+        assert!(storage.total_bytes >= storage.used_bytes);
+        assert!(disk.read_bytes <= u64::MAX);
+        assert!(disk.write_bytes <= u64::MAX);
+        assert!(net.rx_bytes <= u64::MAX);
+        assert!(net.tx_bytes <= u64::MAX);
+        assert!(gpu
+            .utilization
+            .is_none_or(|value| (0.0..=1.0).contains(&value)));
+    }
+
+    #[test]
+    fn nvidia_probe_executes_even_when_unavailable() {
+        match read_nvidia_gpu_sample() {
+            Ok(sample) => {
+                assert!(sample
+                    .utilization
+                    .is_none_or(|value| (0.0..=1.0).contains(&value)));
+            }
+            Err(error) => {
+                assert!(matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::Other
+                        | io::ErrorKind::PermissionDenied
+                        | io::ErrorKind::InvalidData
+                ));
+            }
+        }
     }
 }

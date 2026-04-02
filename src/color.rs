@@ -27,7 +27,10 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
                 b: 255,
             },
         },
-        MetricKind::Sys => blend_gradients(gradient_for(MetricKind::Cpu), gradient_for(MetricKind::Memory)),
+        MetricKind::Sys => blend_gradients(
+            gradient_for(MetricKind::Cpu),
+            gradient_for(MetricKind::Memory),
+        ),
         MetricKind::Gpu => Gradient {
             low: Rgb {
                 r: 17,
@@ -52,7 +55,10 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
                 b: 214,
             },
         },
-        MetricKind::Gfx => blend_gradients(gradient_for(MetricKind::Gpu), gradient_for(MetricKind::Vram)),
+        MetricKind::Gfx => blend_gradients(
+            gradient_for(MetricKind::Gpu),
+            gradient_for(MetricKind::Vram),
+        ),
         MetricKind::Memory => Gradient {
             low: Rgb {
                 r: 112,
@@ -94,11 +100,7 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
             gradient_for(MetricKind::Egress),
         ),
         MetricKind::Ingress => Gradient {
-            low: Rgb {
-                r: 8,
-                g: 68,
-                b: 84,
-            },
+            low: Rgb { r: 8, g: 68, b: 84 },
             high: Rgb {
                 r: 156,
                 g: 244,
@@ -122,9 +124,18 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
 
 pub fn split_gradients_for(metric: MetricKind) -> Option<(Gradient, Gradient)> {
     match metric {
-        MetricKind::Sys => Some((gradient_for(MetricKind::Cpu), gradient_for(MetricKind::Memory))),
-        MetricKind::Gfx => Some((gradient_for(MetricKind::Gpu), gradient_for(MetricKind::Vram))),
-        MetricKind::Net => Some((gradient_for(MetricKind::Ingress), gradient_for(MetricKind::Egress))),
+        MetricKind::Sys => Some((
+            gradient_for(MetricKind::Cpu),
+            gradient_for(MetricKind::Memory),
+        )),
+        MetricKind::Gfx => Some((
+            gradient_for(MetricKind::Gpu),
+            gradient_for(MetricKind::Vram),
+        )),
+        MetricKind::Net => Some((
+            gradient_for(MetricKind::Ingress),
+            gradient_for(MetricKind::Egress),
+        )),
         MetricKind::Io => Some((
             Gradient {
                 low: Rgb {
@@ -230,22 +241,28 @@ mod tests {
     #[test]
     fn emphasis_favors_high_usage_ranges() {
         let gradient = gradient_for(MetricKind::Cpu);
-        let low_gain =
-            i32::from(brightness(interpolate(gradient, 0.50))) - i32::from(brightness(interpolate(gradient, 0.25)));
-        let high_gain =
-            i32::from(brightness(interpolate(gradient, 1.00))) - i32::from(brightness(interpolate(gradient, 0.75)));
+        let low_gain = i32::from(brightness(interpolate(gradient, 0.50)))
+            - i32::from(brightness(interpolate(gradient, 0.25)));
+        let high_gain = i32::from(brightness(interpolate(gradient, 1.00)))
+            - i32::from(brightness(interpolate(gradient, 0.75)));
         assert!(high_gain > low_gain);
     }
 
     #[test]
     fn gpu_and_vram_have_different_gradients() {
-        assert_ne!(gradient_for(MetricKind::Gpu), gradient_for(MetricKind::Vram));
+        assert_ne!(
+            gradient_for(MetricKind::Gpu),
+            gradient_for(MetricKind::Vram)
+        );
     }
 
     #[test]
     fn combined_metric_gradients_are_midpoints() {
         assert_ne!(gradient_for(MetricKind::Sys), gradient_for(MetricKind::Cpu));
         assert_ne!(gradient_for(MetricKind::Gfx), gradient_for(MetricKind::Gpu));
-        assert_ne!(gradient_for(MetricKind::Net), gradient_for(MetricKind::Ingress));
+        assert_ne!(
+            gradient_for(MetricKind::Net),
+            gradient_for(MetricKind::Ingress)
+        );
     }
 }

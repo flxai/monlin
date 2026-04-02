@@ -184,10 +184,10 @@ Usage: monlin --layout SPEC [OPTIONS]
 
 Metrics:
   cpu sys gpu vram gfx memory spc io net ingress egress
-  all[/N]
+  all
 
 Options:
-  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all/2\"
+  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all\"
   --history N           Number of history samples to retain
   --interval-ms N       Sampling interval in milliseconds
   --align left|right    Place the percentage before or after the graph
@@ -201,8 +201,8 @@ Options:
 
 Notes:
   Layout is the canonical interface.
-  Item syntax is metric[.view][:basis][+grow], e.g. net.hum:12+2.
-  Rows can be separated with ';' or a literal newline.
+  Item syntax is metric[.view][:basis][/grow][+max][-min], e.g. net.hum:12/2+20-8.
+  Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   Positional metrics are kept only as a compatibility path for older invocations.
 "
@@ -250,8 +250,8 @@ mod tests {
     }
 
     #[test]
-    fn all_two_rows_is_accepted() {
-        let config = parse(&["monlin", "--layout", "all/2"]);
+    fn bare_all_is_accepted() {
+        let config = parse(&["monlin", "--layout", "all"]);
         assert_eq!(config.layout.rows().len(), 2);
     }
 
@@ -259,5 +259,102 @@ mod tests {
     fn parses_i3bar_output_mode() {
         let config = parse(&["monlin", "--output", "i3bar"]);
         assert_eq!(config.output_mode, OutputMode::I3bar);
+    }
+
+    #[test]
+    fn zero_history_is_clamped_to_one() {
+        let config = parse(&["monlin", "--history", "0"]);
+        assert_eq!(config.history, 1);
+    }
+
+    #[test]
+    fn rejects_zero_width() {
+        let error = parse_args(
+            ["monlin", "--width", "0"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("--width must be greater than zero"));
+    }
+
+    #[test]
+    fn rejects_invalid_align_value() {
+        let error = parse_args(
+            ["monlin", "--align", "center"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid --align value"));
+    }
+
+    #[test]
+    fn rejects_invalid_renderer_value() {
+        let error = parse_args(
+            ["monlin", "--renderer", "spark"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid --renderer value"));
+    }
+
+    #[test]
+    fn rejects_invalid_color_value() {
+        let error = parse_args(
+            ["monlin", "--color", "sometimes"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid --color value"));
+    }
+
+    #[test]
+    fn rejects_invalid_output_value() {
+        let error = parse_args(
+            ["monlin", "--output", "json"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid --output value"));
+    }
+
+    #[test]
+    fn rejects_unknown_flag() {
+        let error =
+            parse_args(["monlin", "--wat"].into_iter().map(|item| item.to_string())).unwrap_err();
+        assert!(error.contains("unknown flag"));
+    }
+
+    #[test]
+    fn rejects_missing_flag_value() {
+        let error = parse_args(
+            ["monlin", "--label"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("missing value for --label"));
+    }
+
+    #[test]
+    fn rejects_invalid_numeric_flag_value() {
+        let error = parse_args(
+            ["monlin", "--interval-ms", "fast"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid value for --interval-ms"));
+    }
+
+    #[test]
+    fn help_text_documents_current_layout_syntax() {
+        let help = help_text();
+        assert!(help.contains("metric[.view][:basis][/grow][+max][-min]"));
+        assert!(help.contains("Rows can be separated with ',' or a literal newline."));
     }
 }
