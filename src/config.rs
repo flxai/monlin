@@ -17,6 +17,12 @@ pub enum ColorMode {
     Never,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutputMode {
+    Terminal,
+    I3bar,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Config {
     pub history: usize,
@@ -26,6 +32,7 @@ pub struct Config {
     pub layout: Layout,
     pub renderer: Renderer,
     pub color_mode: ColorMode,
+    pub output_mode: OutputMode,
     pub width: Option<usize>,
     pub once: bool,
     pub show_help: bool,
@@ -43,6 +50,7 @@ where
     let mut layout_spec = None;
     let mut renderer = Renderer::Braille;
     let mut color_mode = ColorMode::Auto;
+    let mut output_mode = OutputMode::Terminal;
     let mut width = None;
     let mut once = false;
     let mut show_help = false;
@@ -87,6 +95,13 @@ where
                     "always" => ColorMode::Always,
                     "never" => ColorMode::Never,
                     other => return Err(format!("invalid --color value: {other}")),
+                };
+            }
+            "--output" => {
+                output_mode = match parse_string(&args, &mut i, "--output")?.as_str() {
+                    "terminal" => OutputMode::Terminal,
+                    "i3bar" => OutputMode::I3bar,
+                    other => return Err(format!("invalid --output value: {other}")),
                 };
             }
             "--width" => {
@@ -134,6 +149,7 @@ where
         layout,
         renderer,
         color_mode,
+        output_mode,
         width,
         once,
         show_help,
@@ -178,6 +194,7 @@ Options:
   --label TEXT          Prefix the entire rendered line
   --renderer braille|block
   --color auto|always|never
+  --output terminal|i3bar
   --width N             Override terminal width
   --once                Render once and exit
   -h, --help            Show this help text
@@ -205,6 +222,7 @@ mod tests {
         let config = parse(&["monlin"]);
         assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
         assert_eq!(config.layout.rows().len(), 2);
+        assert_eq!(config.output_mode, OutputMode::Terminal);
     }
 
     #[test]
@@ -235,5 +253,11 @@ mod tests {
     fn all_two_rows_is_accepted() {
         let config = parse(&["monlin", "--layout", "all/2"]);
         assert_eq!(config.layout.rows().len(), 2);
+    }
+
+    #[test]
+    fn parses_i3bar_output_mode() {
+        let config = parse(&["monlin", "--output", "i3bar"]);
+        assert_eq!(config.output_mode, OutputMode::I3bar);
     }
 }

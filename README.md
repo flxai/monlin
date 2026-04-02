@@ -41,6 +41,12 @@ One-shot render:
 nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0
 ```
 
+Nested i3bar test session:
+
+```sh
+bash ./scripts/test-i3bar.sh
+```
+
 ## Default Behavior
 
 With no arguments, `monlin` renders the default full layout:
@@ -408,6 +414,7 @@ Core flags:
 - `--label TEXT`
 - `--renderer braille|block`
 - `--color auto|always|never`
+- `--output terminal|i3bar`
 - `--width N`
 - `--once`
 - `-h`, `--help`
@@ -418,6 +425,7 @@ Examples:
 monlin --history 512 --interval-ms 1000 --layout "all/2"
 monlin --label ono --layout "sys gfx io net"
 monlin --renderer block --layout "cpu ram"
+monlin --output i3bar --layout "all/2"
 ```
 
 ## Positional Metrics
@@ -438,6 +446,35 @@ But `--layout` is the canonical interface, and all new examples should use it.
 - graph glyphs are colorized
 - `vram` intentionally keeps a tighter label/value join, e.g. `vram37%`
 - split metrics render upper and lower halves separately
+
+When `--output i3bar` is used:
+
+- `monlin` emits the i3bar JSON protocol, not JSONL
+- the header is printed once
+- each sampled frame becomes one i3bar status-line array
+- each rendered `monlin` row becomes one i3bar block
+- ANSI colors are disabled automatically in this mode
+
+To test it in a real bar without touching your main i3 config:
+
+```sh
+bash ./scripts/test-i3bar.sh
+```
+
+Optional arguments:
+
+```sh
+bash ./scripts/test-i3bar.sh 2 'sys gfx io net'
+```
+
+That launches a nested Xephyr+i3 session on `:2` with `monlin` as the
+`status_command`.
+
+The helper prefers:
+
+- `MONLIN_TEST_TERM` if set
+- `i3-sensible-terminal`
+- then common terminal fallbacks like `alacritty` and `xterm`
 
 Combined metric semantics:
 

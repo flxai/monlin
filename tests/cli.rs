@@ -46,3 +46,32 @@ fn all_layout_renders_multiple_rows() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.lines().count() >= 2);
 }
+
+#[test]
+fn i3bar_once_mode_emits_i3bar_protocol() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "80",
+            "--color",
+            "never",
+            "--output",
+            "i3bar",
+            "--layout",
+            "all/2",
+        ])
+        .output()
+        .expect("failed to run monlin --output i3bar");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"version\":1"));
+    assert!(stdout.contains("\"click_events\":false"));
+    assert!(stdout.contains("\"name\":\"monlin-0\""));
+    assert!(stdout.contains("\"full_text\":\"sys"));
+    assert!(stdout.contains('['));
+    assert!(stdout.trim_end().ends_with(']'));
+}

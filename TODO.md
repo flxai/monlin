@@ -2,9 +2,8 @@
 
 ## Immediate
 
-- Add per-frame structured output mode.
-  - `--output i3bar` for whole-line JSON stream compatibility.
-  - Optionally later add a single-block `i3blocks` JSON mode.
+- Decide whether to add a single-block `i3blocks` JSON mode on top of the new
+  `i3bar` output stream.
 - Lock down the layout DSL in tests.
   - more cases for `all/N`
   - more mixed `:basis+grow` cases

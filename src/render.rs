@@ -222,6 +222,7 @@ fn render_segment_with_headline(
         value.headline_value(),
         &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
     );
+    let usage_text = pad_metric_usage(metric, &usage_text);
     let label_usage_separator = match metric {
         MetricKind::Vram => "",
         _ => " ",
@@ -246,6 +247,15 @@ fn render_segment_with_headline(
         },
         width,
     )
+}
+
+fn pad_metric_usage(metric: MetricKind, usage_text: &str) -> String {
+    match metric {
+        MetricKind::Io | MetricKind::Net | MetricKind::Ingress | MetricKind::Egress => {
+            format!("{usage_text:>7}")
+        }
+        _ => usage_text.to_owned(),
+    }
 }
 
 fn pad_or_trim_visible(text: &str, width: usize) -> String {
@@ -519,7 +529,7 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ColorMode, Config};
+    use crate::config::{ColorMode, Config, OutputMode};
     use crate::layout::{Layout, LayoutView, MetricKind};
 
     fn item(metric: MetricKind) -> LayoutItem {
@@ -557,6 +567,7 @@ mod tests {
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
             width: Some(40),
             once: true,
             show_help: false,
@@ -632,6 +643,7 @@ mod tests {
             layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
             width: Some(40),
             once: true,
             show_help: false,
@@ -712,6 +724,7 @@ mod tests {
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
             width: Some(80),
             once: true,
             show_help: false,
@@ -798,6 +811,7 @@ mod tests {
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
             width: Some(24),
             once: true,
             show_help: false,
@@ -841,7 +855,7 @@ mod tests {
             false,
         );
 
-        assert!(segment.contains("net 0B/s"));
+        assert!(segment.contains("net    0B/s"));
     }
 
     #[test]
@@ -859,6 +873,41 @@ mod tests {
         );
 
         assert!(segment.contains("vram0%"));
+    }
+
+    #[test]
+    fn rate_metrics_use_fixed_width_value_fields() {
+        let io_small = render_segment_with_headline(
+            item(MetricKind::Io),
+            &VecDeque::new(),
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
+            Some(HeadlineValue::Scalar(105.0 * 1024.0)),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let io_large = render_segment_with_headline(
+            item(MetricKind::Io),
+            &VecDeque::new(),
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
+            Some(HeadlineValue::Scalar(14.0 * 1024.0 * 1024.0)),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(io_small.starts_with("io    105K/s "));
+        assert!(io_large.starts_with("io     14M/s "));
     }
 
     #[test]
