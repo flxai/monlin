@@ -37,7 +37,7 @@ Supported combined metrics are:
 
 Special layout token:
 
-- `all[:N]` expands to the full current metric set and is deduped with any explicit tokens
+- `all[/N]` expands to the full current metric set and is deduped with any explicit tokens
 
 ## Rendering Rules
 
@@ -59,8 +59,10 @@ Special layout token:
 - `monlin --layout "cpu"` forces the single CPU-only view.
 - `--layout "cpu gpu"` renders two equal-width segments on one line.
 - `--layout "all"` expands to all supported metrics in two rows by default.
-- `--layout "all:3"` expands to all supported metrics across three balanced rows.
+- `--layout "all/3"` expands to all supported metrics across three balanced rows.
 - `;` or a literal newline separates rows explicitly.
+- Item syntax is `metric[.view][:basis][+grow]`.
+- `--layout "net.hum:12+2 io.hum+2"` reserves width for `net`, then lets `net` and `io` grow.
 - Simple layout tokens split the available width evenly.
 - Flat layouts auto-wrap after 5 metrics per row.
 - Duplicate metrics in a layout are ignored after the first occurrence.

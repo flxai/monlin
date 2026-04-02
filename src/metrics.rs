@@ -36,6 +36,12 @@ pub enum MetricValue {
     Split { upper: f64, lower: f64 },
 }
 
+#[derive(Debug)]
+pub struct Sample {
+    pub values: HashMap<MetricKind, MetricValue>,
+    pub headlines: HashMap<MetricKind, f64>,
+}
+
 impl MetricValue {
     pub fn headline_value(self) -> f64 {
         match self {
@@ -65,6 +71,13 @@ enum ScaleKey {
     IoWrite,
     NetIngress,
     NetEgress,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RateSample {
+    value: MetricValue,
+    upper_raw: f64,
+    lower_raw: f64,
 }
 
 #[derive(Debug)]
@@ -103,8 +116,9 @@ impl Sampler {
         Ok(())
     }
 
-    pub fn sample(&mut self, metrics: &[MetricKind]) -> io::Result<HashMap<MetricKind, MetricValue>> {
+    pub fn sample(&mut self, metrics: &[MetricKind]) -> io::Result<Sample> {
         let mut values = HashMap::new();
+        let mut headlines = HashMap::new();
 
         let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys) {
             Some(self.sample_cpu()?)
@@ -170,17 +184,28 @@ impl Sampler {
                     (None, None) => None,
                 },
                 MetricKind::Memory => memory_value.map(MetricValue::Single),
-                MetricKind::Io => io_value,
-                MetricKind::Net => net_value,
-                MetricKind::Ingress => net_value.map(|value| MetricValue::Single(value.upper())),
-                MetricKind::Egress => net_value.map(|value| MetricValue::Single(value.lower())),
+                MetricKind::Io => io_value.map(|sample| sample.value),
+                MetricKind::Net => net_value.map(|sample| sample.value),
+                MetricKind::Ingress => net_value.map(|sample| MetricValue::Single(sample.value.upper())),
+                MetricKind::Egress => net_value.map(|sample| MetricValue::Single(sample.value.lower())),
             };
             if let Some(value) = value {
-                values.insert(*metric, clamp_value(value));
+                let value = clamp_value(value);
+                let headline = match metric {
+                    MetricKind::Io => io_value.map(|sample| sample.upper_raw + sample.lower_raw),
+                    MetricKind::Net => net_value.map(|sample| sample.upper_raw + sample.lower_raw),
+                    MetricKind::Ingress => net_value.map(|sample| sample.upper_raw),
+                    MetricKind::Egress => net_value.map(|sample| sample.lower_raw),
+                    _ => Some(value.headline_value()),
+                }
+                .unwrap_or_else(|| value.headline_value());
+
+                values.insert(*metric, value);
+                headlines.insert(*metric, headline);
             }
         }
 
-        Ok(values)
+        Ok(Sample { values, headlines })
     }
 
     fn sample_cpu(&mut self) -> io::Result<f64> {
@@ -193,42 +218,58 @@ impl Sampler {
         Ok(usage)
     }
 
-    fn sample_io(&mut self) -> io::Result<MetricValue> {
+    fn sample_io(&mut self) -> io::Result<RateSample> {
         let current = read_disk_counters()?;
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.disk_prev {
             let dt = now.duration_since(at).as_secs_f64();
             let read_rate = rate_from_counters(prev.read_bytes, current.read_bytes, dt);
             let write_rate = rate_from_counters(prev.write_bytes, current.write_bytes, dt);
-            MetricValue::Split {
-                upper: self.normalize_rate(ScaleKey::IoWrite, write_rate),
-                lower: self.normalize_rate(ScaleKey::IoRead, read_rate),
+            RateSample {
+                value: MetricValue::Split {
+                    upper: self.normalize_rate(ScaleKey::IoWrite, write_rate),
+                    lower: self.normalize_rate(ScaleKey::IoRead, read_rate),
+                },
+                upper_raw: write_rate,
+                lower_raw: read_rate,
             }
         } else {
-            MetricValue::Split {
-                upper: 0.0,
-                lower: 0.0,
+            RateSample {
+                value: MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                },
+                upper_raw: 0.0,
+                lower_raw: 0.0,
             }
         };
         self.disk_prev = Some((current, now));
         Ok(usage)
     }
 
-    fn sample_net(&mut self) -> io::Result<MetricValue> {
+    fn sample_net(&mut self) -> io::Result<RateSample> {
         let current = read_net_counters()?;
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.net_prev {
             let dt = now.duration_since(at).as_secs_f64();
             let ingress_rate = rate_from_counters(prev.rx_bytes, current.rx_bytes, dt);
             let egress_rate = rate_from_counters(prev.tx_bytes, current.tx_bytes, dt);
-            MetricValue::Split {
-                upper: self.normalize_rate(ScaleKey::NetIngress, ingress_rate),
-                lower: self.normalize_rate(ScaleKey::NetEgress, egress_rate),
+            RateSample {
+                value: MetricValue::Split {
+                    upper: self.normalize_rate(ScaleKey::NetIngress, ingress_rate),
+                    lower: self.normalize_rate(ScaleKey::NetEgress, egress_rate),
+                },
+                upper_raw: ingress_rate,
+                lower_raw: egress_rate,
             }
         } else {
-            MetricValue::Split {
-                upper: 0.0,
-                lower: 0.0,
+            RateSample {
+                value: MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                },
+                upper_raw: 0.0,
+                lower_raw: 0.0,
             }
         };
         self.net_prev = Some((current, now));

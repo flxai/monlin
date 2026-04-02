@@ -12,6 +12,23 @@ pub enum MetricKind {
     Egress,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutView {
+    Default,
+    Pct,
+    Hum,
+}
+
+impl LayoutView {
+    pub fn parse(token: &str) -> Option<Self> {
+        match token {
+            "pct" => Some(Self::Pct),
+            "hum" => Some(Self::Hum),
+            _ => None,
+        }
+    }
+}
+
 impl MetricKind {
     pub fn parse(token: &str) -> Option<Self> {
         match token {
@@ -44,37 +61,86 @@ impl MetricKind {
         }
     }
 
-    pub fn format_value(self, value: f64) -> String {
-        match self {
-            Self::Vram => format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
-            Self::Cpu
-            | Self::Sys
-            | Self::Gpu
-            | Self::Gfx
-            | Self::Memory
-            | Self::Io
-            | Self::Net
-            | Self::Ingress
-            | Self::Egress => format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0),
-        }
-    }
-
     pub fn is_split(self) -> bool {
         matches!(self, Self::Sys | Self::Gfx | Self::Io | Self::Net)
     }
+
+    pub fn default_view(self) -> LayoutView {
+        match self {
+            Self::Io | Self::Net | Self::Ingress | Self::Egress => LayoutView::Hum,
+            Self::Cpu | Self::Sys | Self::Gpu | Self::Vram | Self::Gfx | Self::Memory => {
+                LayoutView::Pct
+            }
+        }
+    }
+
+    pub fn format_value(self, view: LayoutView, normalized: f64, headline: f64) -> String {
+        let resolved = match view {
+            LayoutView::Default => self.default_view(),
+            other => other,
+        };
+
+        match resolved {
+            LayoutView::Pct => format_percent(self, normalized),
+            LayoutView::Hum => match self {
+                Self::Io | Self::Net | Self::Ingress | Self::Egress => humanize_rate(headline),
+                _ => format_percent(self, normalized),
+            },
+            LayoutView::Default => unreachable!(),
+        }
+    }
+}
+
+fn format_percent(metric: MetricKind, value: f64) -> String {
+    match metric {
+        MetricKind::Vram => format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
+        MetricKind::Cpu
+        | MetricKind::Sys
+        | MetricKind::Gpu
+        | MetricKind::Gfx
+        | MetricKind::Memory
+        | MetricKind::Io
+        | MetricKind::Net
+        | MetricKind::Ingress
+        | MetricKind::Egress => format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0),
+    }
+}
+
+fn humanize_rate(bytes_per_second: f64) -> String {
+    const UNITS: [&str; 5] = ["B/s", "K/s", "M/s", "G/s", "T/s"];
+
+    let mut value = bytes_per_second.max(0.0);
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        return format!("{:.0}{}", value, UNITS[unit]);
+    }
+    if value >= 10.0 {
+        return format!("{:.0}{}", value, UNITS[unit]);
+    }
+
+    format!("{:.1}{}", value, UNITS[unit])
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LayoutItem {
     metric: MetricKind,
-    weight: usize,
+    view: LayoutView,
+    basis: Option<usize>,
+    grow: usize,
 }
 
 impl LayoutItem {
-    pub fn new(metric: MetricKind, weight: usize) -> Self {
+    pub fn new(metric: MetricKind, view: LayoutView, basis: Option<usize>, grow: usize) -> Self {
         Self {
             metric,
-            weight: weight.max(1),
+            view,
+            basis,
+            grow,
         }
     }
 
@@ -82,8 +148,16 @@ impl LayoutItem {
         self.metric
     }
 
-    pub fn weight(&self) -> usize {
-        self.weight
+    pub fn view(&self) -> LayoutView {
+        self.view
+    }
+
+    pub fn basis(&self) -> Option<usize> {
+        self.basis
+    }
+
+    pub fn grow(&self) -> usize {
+        self.grow
     }
 }
 
@@ -181,12 +255,12 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
         for token in row.split_whitespace() {
             if let Some(count) = parse_all_rows(token)? {
                 if explicit_rows {
-                    return Err("all[:N] cannot be mixed with explicit row separators".to_owned());
+                    return Err("all[/N] cannot be mixed with explicit row separators".to_owned());
                 }
                 hinted_rows = Some(count);
                 for metric in all_metrics() {
                     push_unique(&mut flat, *metric);
-                    let item = LayoutItem::new(*metric, 1);
+                    let item = LayoutItem::new(*metric, LayoutView::Default, None, 1);
                     push_unique_item(&mut flat_items, item);
                     push_unique_item(&mut parsed_row, item);
                 }
@@ -255,12 +329,12 @@ fn parse_all_rows(token: &str) -> Result<Option<usize>, String> {
     if token == "all" {
         return Ok(Some(2));
     }
-    if let Some(value) = token.strip_prefix("all:") {
+    if let Some(value) = token.strip_prefix("all/").or_else(|| token.strip_prefix("all:")) {
         let rows = value
             .parse::<usize>()
             .map_err(|_| format!("invalid all row count: {value}"))?;
         if rows == 0 {
-            return Err("all:N requires N > 0".to_owned());
+            return Err("all/N requires N > 0".to_owned());
         }
         return Ok(Some(rows));
     }
@@ -269,22 +343,49 @@ fn parse_all_rows(token: &str) -> Result<Option<usize>, String> {
 }
 
 fn parse_layout_item(token: &str) -> Result<LayoutItem, String> {
-    let (metric_token, weight) = match token.split_once('*') {
-        Some((metric, weight)) => {
-            let parsed = weight
+    let (head, grow) = match token.split_once('+').or_else(|| token.split_once('*')) {
+        Some((head, grow)) => {
+            let parsed = grow
                 .parse::<usize>()
-                .map_err(|_| format!("invalid metric weight: {weight}"))?;
+                .map_err(|_| format!("invalid metric grow value: {grow}"))?;
             if parsed == 0 {
-                return Err("metric weights must be greater than zero".to_owned());
+                return Err("metric grow values must be greater than zero".to_owned());
             }
-            (metric, parsed)
+            (head, Some(parsed))
         }
-        None => (token, 1),
+        None => (token, None),
+    };
+
+    let (head, basis) = match head.split_once(':') {
+        Some((head, basis)) => {
+            let parsed = basis
+                .parse::<usize>()
+                .map_err(|_| format!("invalid metric basis: {basis}"))?;
+            if parsed == 0 {
+                return Err("metric bases must be greater than zero".to_owned());
+            }
+            (head, Some(parsed))
+        }
+        None => (head, None),
+    };
+
+    let (metric_token, view) = match head.split_once('.') {
+        Some((metric, view)) => (
+            metric,
+            LayoutView::parse(view).ok_or_else(|| format!("unknown metric view: {view}"))?,
+        ),
+        None => (head, LayoutView::Default),
     };
 
     let metric =
         MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
-    Ok(LayoutItem::new(metric, weight))
+    let grow = match (basis, grow) {
+        (_, Some(grow)) => grow,
+        (Some(_), None) => 0,
+        (None, None) => 1,
+    };
+
+    Ok(LayoutItem::new(metric, view, basis, grow))
 }
 
 pub fn split_even_width(total: usize, count: usize) -> Vec<usize> {
@@ -310,7 +411,7 @@ fn split_even_rows(metrics: &[MetricKind], rows: usize) -> Vec<Vec<LayoutItem>> 
             let row = metrics[start..end]
                 .iter()
                 .copied()
-                .map(|metric| LayoutItem::new(metric, 1))
+                .map(|metric| LayoutItem::new(metric, LayoutView::Default, None, 1))
                 .collect::<Vec<_>>();
             start = end;
             row
@@ -387,7 +488,30 @@ mod tests {
 
     #[test]
     fn memory_values_are_formatted_as_percent() {
-        assert_eq!(MetricKind::Memory.format_value(0.375), " 38%");
+        assert_eq!(
+            MetricKind::Memory.format_value(LayoutView::Default, 0.375, 0.375),
+            " 38%"
+        );
+    }
+
+    #[test]
+    fn ingress_values_are_humanized_as_rates() {
+        assert_eq!(
+            MetricKind::Ingress.format_value(LayoutView::Default, 0.0, 1536.0),
+            "1.5K/s"
+        );
+    }
+
+    #[test]
+    fn net_values_are_humanized_as_rates() {
+        assert_eq!(
+            MetricKind::Net.format_value(
+                LayoutView::Default,
+                0.0,
+                3.0 * 1024.0 * 1024.0
+            ),
+            "3.0M/s"
+        );
     }
 
     #[test]
@@ -431,7 +555,7 @@ mod tests {
 
     #[test]
     fn all_with_explicit_row_count_is_balanced() {
-        let layout = parse_layout_spec("all:3").unwrap();
+        let layout = parse_layout_spec("all/3").unwrap();
         assert_eq!(layout.rows().len(), 3);
         assert_eq!(layout.rows()[0].len(), 4);
         assert_eq!(layout.rows()[1].len(), 3);
@@ -471,7 +595,7 @@ mod tests {
 
     #[test]
     fn all_row_hint_cannot_mix_with_explicit_rows() {
-        let error = parse_layout_spec("all:2; cpu").unwrap_err();
+        let error = parse_layout_spec("all/2; cpu").unwrap_err();
         assert!(error.contains("explicit row separators"));
     }
 
@@ -499,12 +623,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_metric_weights() {
-        let layout = parse_layout_spec("cpu*3 ram*4").unwrap();
+    fn parses_basis_grow_and_view_tokens() {
+        let layout = parse_layout_spec("cpu:12+2 ram.pct:10 net.hum+3").unwrap();
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(layout.rows()[0][0].metric(), MetricKind::Cpu);
-        assert_eq!(layout.rows()[0][0].weight(), 3);
+        assert_eq!(layout.rows()[0][0].basis(), Some(12));
+        assert_eq!(layout.rows()[0][0].grow(), 2);
         assert_eq!(layout.rows()[0][1].metric(), MetricKind::Memory);
-        assert_eq!(layout.rows()[0][1].weight(), 4);
+        assert_eq!(layout.rows()[0][1].view(), LayoutView::Pct);
+        assert_eq!(layout.rows()[0][1].basis(), Some(10));
+        assert_eq!(layout.rows()[0][1].grow(), 0);
+        assert_eq!(layout.rows()[0][2].metric(), MetricKind::Net);
+        assert_eq!(layout.rows()[0][2].view(), LayoutView::Hum);
+        assert_eq!(layout.rows()[0][2].grow(), 3);
+    }
+
+    #[test]
+    fn legacy_weight_syntax_still_parses_as_grow() {
+        let layout = parse_layout_spec("cpu*3 ram*4").unwrap();
+        assert_eq!(layout.rows()[0][0].grow(), 3);
+        assert_eq!(layout.rows()[0][1].grow(), 4);
     }
 }

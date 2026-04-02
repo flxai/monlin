@@ -24,6 +24,19 @@ pub fn render_lines(
     layout: &Layout,
     values: &HashMap<MetricKind, MetricValue>,
 ) -> Vec<String> {
+    let headline_values = HashMap::new();
+    render_lines_with_headlines(config, width, color_enabled, histories, layout, values, &headline_values)
+}
+
+pub fn render_lines_with_headlines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, f64>,
+) -> Vec<String> {
     let label_width = layout
         .metrics()
         .iter()
@@ -42,6 +55,7 @@ pub fn render_lines(
                 histories,
                 items,
                 values,
+                headline_values,
                 label_width,
             )
         })
@@ -55,6 +69,7 @@ fn render_row(
     histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
     items: &[LayoutItem],
     values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, f64>,
     label_width: usize,
 ) -> String {
     let prefix = config
@@ -78,10 +93,11 @@ fn render_row(
                 .get(&metric)
                 .copied()
                 .unwrap_or(MetricValue::Single(0.0));
-            render_segment(
-                metric,
+            render_segment_with_headline(
+                *item,
                 &history,
                 value,
+                headline_values.get(&metric).copied(),
                 width,
                 label_width,
                 config.align,
@@ -91,35 +107,11 @@ fn render_row(
         })
         .collect::<Vec<_>>();
 
-    format!("{prefix}{}", segments.join(" "))
-}
-
-fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-
-    let total_weight = items.iter().map(|item| item.weight()).sum::<usize>().max(1);
-    let mut widths = items
-        .iter()
-        .map(|item| total.saturating_mul(item.weight()) / total_weight)
-        .collect::<Vec<_>>();
-
-    let allocated = widths.iter().sum::<usize>();
-    let mut remaining = total.saturating_sub(allocated);
-    let mut index = 0;
-    let len = widths.len();
-    while remaining > 0 {
-        widths[index % len] += 1;
-        remaining -= 1;
-        index += 1;
-    }
-
-    widths
+    pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
 }
 
 fn render_segment(
-    metric: MetricKind,
+    item: LayoutItem,
     history: &VecDeque<MetricValue>,
     value: MetricValue,
     width: usize,
@@ -128,9 +120,112 @@ fn render_segment(
     renderer: Renderer,
     color_enabled: bool,
 ) -> String {
+    render_segment_with_headline(
+        item,
+        history,
+        value,
+        None,
+        width,
+        label_width,
+        align,
+        renderer,
+        color_enabled,
+    )
+}
+
+fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
+    if items.is_empty() {
+        return Vec::new();
+    }
+
+    let bases = items
+        .iter()
+        .map(|item| item.basis().unwrap_or(0))
+        .collect::<Vec<_>>();
+    let base_total = bases.iter().sum::<usize>();
+
+    if base_total >= total {
+        let weights = items
+            .iter()
+            .zip(&bases)
+            .map(|(item, basis)| {
+                if *basis > 0 {
+                    *basis
+                } else if item.grow() > 0 {
+                    item.grow()
+                } else {
+                    1
+                }
+            })
+            .collect::<Vec<_>>();
+        let total_weight = weights.iter().sum::<usize>().max(1);
+        let mut widths = weights
+            .iter()
+            .map(|weight| total.saturating_mul(*weight) / total_weight)
+            .collect::<Vec<_>>();
+        let allocated = widths.iter().sum::<usize>();
+        let mut remaining = total.saturating_sub(allocated);
+        let mut index = 0;
+        let len = widths.len();
+        while remaining > 0 {
+            widths[index % len] += 1;
+            remaining -= 1;
+            index += 1;
+        }
+        return widths;
+    }
+
+    let mut widths = bases;
+    let mut remaining = total - base_total;
+    let total_grow = items.iter().map(|item| item.grow()).sum::<usize>();
+    if total_grow == 0 {
+        return widths;
+    }
+
+    for (width, item) in widths.iter_mut().zip(items.iter()) {
+        *width += remaining.saturating_mul(item.grow()) / total_grow;
+    }
+
+    let allocated = widths.iter().sum::<usize>();
+    remaining = total.saturating_sub(allocated);
+    let mut index = 0;
+    let len = widths.len();
+    while remaining > 0 {
+        if items[index % len].grow() > 0 {
+            widths[index % len] += 1;
+            remaining -= 1;
+        }
+        index += 1;
+        if index >= len && items.iter().all(|item| item.grow() == 0) {
+            break;
+        }
+    }
+
+    widths
+}
+
+fn render_segment_with_headline(
+    item: LayoutItem,
+    history: &VecDeque<MetricValue>,
+    value: MetricValue,
+    headline_value: Option<f64>,
+    width: usize,
+    label_width: usize,
+    align: Align,
+    renderer: Renderer,
+    color_enabled: bool,
+) -> String {
+    let metric = item.metric();
     let label = format!("{:<label_width$}", metric.short_label());
-    let usage_text = metric.format_value(value.headline_value());
-    let label_usage_separator = "";
+    let usage_text = metric.format_value(
+        item.view(),
+        value.headline_value(),
+        headline_value.unwrap_or_else(|| value.headline_value()),
+    );
+    let label_usage_separator = match metric {
+        MetricKind::Vram => "",
+        _ => " ",
+    };
     let fixed = label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
 
     if width <= fixed {
@@ -425,7 +520,11 @@ unsafe extern "C" {
 mod tests {
     use super::*;
     use crate::config::{ColorMode, Config};
-    use crate::layout::{Layout, MetricKind};
+    use crate::layout::{Layout, LayoutView, MetricKind};
+
+    fn item(metric: MetricKind) -> LayoutItem {
+        LayoutItem::new(metric, LayoutView::Default, None, 1)
+    }
 
     #[test]
     fn full_braille_cell_is_filled() {
@@ -505,7 +604,7 @@ mod tests {
     #[test]
     fn segment_rendering_uses_exact_requested_width() {
         let segment = render_segment(
-            MetricKind::Cpu,
+            item(MetricKind::Cpu),
             &VecDeque::from(vec![
                 MetricValue::Single(0.1),
                 MetricValue::Single(0.2),
@@ -580,12 +679,26 @@ mod tests {
         let widths = split_weighted_width(
             14,
             &[
-                LayoutItem::new(MetricKind::Cpu, 3),
-                LayoutItem::new(MetricKind::Memory, 4),
+                LayoutItem::new(MetricKind::Cpu, LayoutView::Default, None, 3),
+                LayoutItem::new(MetricKind::Memory, LayoutView::Default, None, 4),
             ],
         );
 
         assert_eq!(widths, vec![6, 8]);
+    }
+
+    #[test]
+    fn basis_and_grow_split_width_as_expected() {
+        let widths = split_weighted_width(
+            30,
+            &[
+                LayoutItem::new(MetricKind::Cpu, LayoutView::Default, Some(12), 2),
+                LayoutItem::new(MetricKind::Memory, LayoutView::Default, Some(10), 0),
+                LayoutItem::new(MetricKind::Net, LayoutView::Default, None, 1),
+            ],
+        );
+
+        assert_eq!(widths, vec![18, 10, 2]);
     }
 
     #[test]
@@ -641,7 +754,11 @@ mod tests {
             (MetricKind::Egress, MetricValue::Single(0.8)),
         ]);
 
-        let lines = render_lines(&config, 80, false, &histories, &layout, &values);
+        let headlines = values
+            .iter()
+            .map(|(metric, value)| (*metric, value.headline_value()))
+            .collect::<HashMap<_, _>>();
+        let lines = render_lines_with_headlines(&config, 80, false, &histories, &layout, &values, &headlines);
 
         assert_eq!(lines.len(), 2);
         assert_eq!(visible_width(&lines[0]), 80);
@@ -651,7 +768,7 @@ mod tests {
     #[test]
     fn memory_segment_displays_percent_value() {
         let segment = render_segment(
-            MetricKind::Memory,
+            item(MetricKind::Memory),
             &VecDeque::from(vec![
                 MetricValue::Single(0.1),
                 MetricValue::Single(0.2),
@@ -671,6 +788,80 @@ mod tests {
     }
 
     #[test]
+    fn combined_net_uses_summed_rate_headline() {
+        let layout = crate::layout::parse_layout_spec("net").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            width: Some(24),
+            once: true,
+            show_help: false,
+        };
+        let histories = HashMap::from([(
+            MetricKind::Net,
+            VecDeque::from(vec![MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            }]),
+        )]);
+        let values = HashMap::from([(
+            MetricKind::Net,
+            MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            },
+        )]);
+        let headlines = HashMap::from([(MetricKind::Net, 3.5 * 1024.0 * 1024.0)]);
+
+        let lines =
+            render_lines_with_headlines(&config, 24, false, &histories, &layout, &values, &headlines);
+
+        assert!(lines[0].contains("3.5M/s"));
+    }
+
+    #[test]
+    fn non_vram_metrics_keep_a_space_before_rate_units() {
+        let segment = render_segment_with_headline(
+            item(MetricKind::Net),
+            &VecDeque::new(),
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
+            Some(0.0),
+            16,
+            3,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(segment.contains("net 0B/s"));
+    }
+
+    #[test]
+    fn vram_keeps_compact_label_value_spacing() {
+        let segment = render_segment_with_headline(
+            item(MetricKind::Vram),
+            &VecDeque::new(),
+            MetricValue::Single(0.0),
+            Some(0.0),
+            16,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(segment.contains("vram0%"));
+    }
+
+    #[test]
     fn braille_cell_coloring_prefers_spike_over_average() {
         let graph = render_braille_graph(
             &[MetricValue::Single(0.05), MetricValue::Single(1.0)],
@@ -684,7 +875,7 @@ mod tests {
     #[test]
     fn colored_segment_keeps_label_uncolored() {
         let segment = render_segment(
-            MetricKind::Cpu,
+            item(MetricKind::Cpu),
             &VecDeque::from(vec![
                 MetricValue::Single(0.1),
                 MetricValue::Single(0.2),
@@ -699,7 +890,7 @@ mod tests {
             true,
         );
 
-        assert!(segment.starts_with("cpu 100% "));
+        assert!(segment.starts_with("cpu  100% "));
         assert_eq!(visible_width(&segment), 18);
     }
 
@@ -785,7 +976,7 @@ mod tests {
     #[test]
     fn renamed_labels_show_up_in_segments() {
         let sys = render_segment(
-            MetricKind::Sys,
+            item(MetricKind::Sys),
             &VecDeque::from(vec![MetricValue::Split {
                 upper: 0.5,
                 lower: 0.25,
@@ -801,7 +992,7 @@ mod tests {
             false,
         );
         let gpu = render_segment(
-            MetricKind::Gpu,
+            item(MetricKind::Gpu),
             &VecDeque::from(vec![MetricValue::Single(0.5)]),
             MetricValue::Single(0.5),
             18,
@@ -811,7 +1002,7 @@ mod tests {
             false,
         );
         let gfx = render_segment(
-            MetricKind::Gfx,
+            item(MetricKind::Gfx),
             &VecDeque::from(vec![MetricValue::Split {
                 upper: 0.5,
                 lower: 0.25,
@@ -827,7 +1018,7 @@ mod tests {
             false,
         );
         let vram = render_segment(
-            MetricKind::Vram,
+            item(MetricKind::Vram),
             &VecDeque::from(vec![MetricValue::Single(0.5)]),
             MetricValue::Single(0.5),
             18,
@@ -837,7 +1028,7 @@ mod tests {
             false,
         );
         let ram = render_segment(
-            MetricKind::Memory,
+            item(MetricKind::Memory),
             &VecDeque::from(vec![MetricValue::Single(0.5)]),
             MetricValue::Single(0.5),
             18,
@@ -857,7 +1048,7 @@ mod tests {
     #[test]
     fn shorter_labels_are_padded_to_match_vram_width() {
         let gpu = render_segment(
-            MetricKind::Gpu,
+            item(MetricKind::Gpu),
             &VecDeque::from(vec![MetricValue::Single(0.5)]),
             MetricValue::Single(0.5),
             18,
@@ -867,7 +1058,7 @@ mod tests {
             false,
         );
         let vram = render_segment(
-            MetricKind::Vram,
+            item(MetricKind::Vram),
             &VecDeque::from(vec![MetricValue::Single(0.5)]),
             MetricValue::Single(0.5),
             18,
@@ -877,14 +1068,14 @@ mod tests {
             false,
         );
 
-        assert!(gpu.starts_with("gpu  50% "));
+        assert!(gpu.starts_with("gpu   50% "));
         assert!(vram.starts_with("vram50% "));
     }
 
     #[test]
     fn vram_omits_label_value_separator() {
         let vram = render_segment(
-            MetricKind::Vram,
+            item(MetricKind::Vram),
             &VecDeque::from(vec![MetricValue::Single(1.0)]),
             MetricValue::Single(1.0),
             18,

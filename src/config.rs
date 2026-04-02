@@ -168,10 +168,10 @@ Usage: monlin --layout SPEC [OPTIONS]
 
 Metrics:
   cpu sys gpu vram gfx memory io net ingress egress
-  all[:N]
+  all[/N]
 
 Options:
-  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all:2\"
+  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all/2\"
   --history N           Number of history samples to retain
   --interval-ms N       Sampling interval in milliseconds
   --align left|right    Place the percentage before or after the graph
@@ -184,6 +184,7 @@ Options:
 
 Notes:
   Layout is the canonical interface.
+  Item syntax is metric[.view][:basis][+grow], e.g. net.hum:12+2.
   Rows can be separated with ';' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   Positional metrics are kept only as a compatibility path for older invocations.
@@ -232,7 +233,7 @@ mod tests {
 
     #[test]
     fn all_two_rows_is_accepted() {
-        let config = parse(&["monlin", "--layout", "all:2"]);
+        let config = parse(&["monlin", "--layout", "all/2"]);
         assert_eq!(config.layout.rows().len(), 2);
     }
 }

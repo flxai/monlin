@@ -38,9 +38,11 @@ where
             thread::sleep(Duration::from_millis(config.interval_ms));
         }
 
-        let values = sampler
+        let sample = sampler
             .sample(requested_metrics)
             .map_err(|error| format!("monlin: {error}"))?;
+        let values = &sample.values;
+        let headlines = &sample.headlines;
 
         for metric in requested_metrics {
             if let Some(history) = histories.get_mut(metric) {
@@ -64,13 +66,14 @@ where
         let active_layout = config
             .layout
             .retain_available(|metric| values.contains_key(&metric));
-        let mut lines = render::render_lines(
+        let mut lines = render::render_lines_with_headlines(
             &config,
             width,
             color_enabled,
             &histories,
             &active_layout,
-            &values,
+            values,
+            headlines,
         );
         if lines.is_empty() {
             lines.push(String::new());
