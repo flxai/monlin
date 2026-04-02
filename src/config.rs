@@ -200,9 +200,10 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_cpu_layout() {
+    fn defaults_to_all_layout() {
         let config = parse(&["monlin"]);
-        assert_eq!(config.layout.metrics(), &[MetricKind::Cpu]);
+        assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
+        assert_eq!(config.layout.rows().len(), 2);
     }
 
     #[test]

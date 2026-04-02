@@ -15,9 +15,9 @@ drives the design:
 `monlin` should render compact live monitors for system activity in one or more
 compact terminal lines.
 
-The simplest invocation should show a CPU history bar. The canonical interface
-is a layout specification which determines the active metrics. More advanced
-invocations should lay out multiple metrics across one or more lines.
+The simplest invocation should show the default full monitor layout. The canonical
+interface is a layout specification which determines the active metrics. More
+advanced invocations should lay out multiple metrics across one or more lines.
 
 Supported single metrics are:
 
@@ -55,8 +55,8 @@ Special layout token:
 
 ## Layout Rules
 
-- `monlin` with no layout renders a single CPU segment.
-- `monlin --layout "cpu"` behaves the same.
+- `monlin` with no layout behaves like `monlin --layout "all"`.
+- `monlin --layout "cpu"` forces the single CPU-only view.
 - `--layout "cpu gpu"` renders two equal-width segments on one line.
 - `--layout "all"` expands to all supported metrics in two rows by default.
 - `--layout "all:3"` expands to all supported metrics across three balanced rows.

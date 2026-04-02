@@ -95,7 +95,7 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Self::from_rows(vec![vec![LayoutItem::new(MetricKind::Cpu, 1)]])
+        Self::from_rows(split_even_rows(all_metrics(), 2))
     }
 }
 
@@ -367,6 +367,11 @@ mod tests {
                 MetricKind::Vram,
             ]
         );
+    }
+
+    #[test]
+    fn default_layout_matches_all() {
+        assert_eq!(Layout::default(), parse_layout_spec("all").unwrap());
     }
 
     #[test]

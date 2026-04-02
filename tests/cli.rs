@@ -21,7 +21,8 @@ fn once_mode_exits_successfully() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("cpu"));
+    assert!(stdout.contains("sys"));
+    assert!(stdout.lines().count() >= 2);
 }
 
 #[test]
