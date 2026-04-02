@@ -1,127 +1,70 @@
 # TODO
 
-## 0. Settle Repo Identity
+## Immediate
 
-- Add a short `README.md` explaining what the tool does, who uses it, and how it fits into `nxu`.
+- Add per-frame structured output mode.
+  - `--output i3bar` for whole-line JSON stream compatibility.
+  - Optionally later add a single-block `i3blocks` JSON mode.
+- Lock down the layout DSL in tests.
+  - more cases for `all/N`
+  - more mixed `:basis+grow` cases
+  - explicit `.pct` / `.hum` behavior tests
 
-## 1. Clean Packaging
+## Rendering
 
-- Keep the flake output stable:
-  - `packages.<system>.default`
-  - `packages.<system>.monlin`
-- Decide whether `flake.lock` should be committed long-term or omitted for this tiny crate.
-- Add `checks` to the flake:
-  - build the package
-  - run formatting/linting if added
+- Revisit fixed-width rendering edge cases.
+  - very narrow rows
+  - rows with only fixed-width items
+  - rows with a mix of fixed and high-grow items
+- Decide whether more metrics should use compact label/value joins like `vram`.
+- Add explicit tests for multiline repaint behavior in the live loop.
 
-## 2. Preserve Compatibility
+## Metrics
 
-- Keep the current CLI stable for now:
-  - `--history`
-  - `--interval-ms`
-  - `--align`
-  - `--label`
-- Treat `nxu` integration as the compatibility boundary.
-- Avoid renaming flags until `nixos-configuration` has been updated deliberately.
+- Improve GPU backends beyond the current best-effort probes.
+  - better non-NVIDIA utilization
+  - non-NVIDIA VRAM
+- Revisit network and I/O scaling.
+  - consider windowed maxima or decay tuning
+  - keep spike visibility without washing out sustained activity
+- Decide whether storage metrics should include:
+  - `spc`
+  - `free`
+  - filesystem selection
 
-## 3. Improve the Program Itself
+## Layout DSL
 
-- Add `--help`.
-- Add basic argument validation and clearer error messages.
-- Consider terminal resize handling instead of only sampling width opportunistically.
+- Decide whether to drop old compatibility syntax eventually.
+  - `all:N`
+  - `*grow`
+- Consider whether explicit min/max width constraints are worth adding later.
+- Keep the current grammar small unless a real need appears:
+  - `metric[.view][:basis][+grow]`
+  - `;`
+  - `all/N`
 
-## 4. Build the Real Display Model
+## Output Modes
 
-- Add multiple metrics:
-  - `cpu`
-  - `gpu`
-  - `memory`
-  - `io`
-  - `ingress`
-  - `egress`
-- Keep the simplest invocation trivial:
-  - `monlin` renders one CPU line by default
-  - `monlin cpu` behaves the same
-- Add a layout option that composes multiple monitors on one line.
-- Start with the simple layout grammar first:
-  - `--layout "cpu gpu"`
-  - tokens split the available width evenly
-  - `cpu gpu` means 50% / 50%
-- Later, extend layouting to explicit ratios or templates if still needed.
+- Add JSON output for machine consumption.
+- Decide whether the default JSON mode should emit:
+  - rendered text only
+  - rendered text plus normalized values
+  - rendered text plus raw headline values
+- Keep the plain terminal renderer as the primary mode.
 
-## 5. Rendering Upgrades
+## Packaging And Release Hygiene
 
-- Replace the current block-based sparkline with braille glyph rendering like `btop`.
-- Treat braille as the primary renderer, not an optional afterthought.
-- Keep a simpler block renderer only as a compatibility fallback if necessary.
-- Make the renderer width-aware so the denser braille mode actually uses the extra horizontal resolution.
-
-## 6. Color Model
-
-- Add semantic default colors:
-  - CPU: blue
-  - GPU: green
-  - memory: red
-  - IO: yellow
-  - ingress: cyan
-  - egress: magenta
-- Render gradients within each metric:
-  - low usage = lighter shade
-  - high usage = darker / stronger shade
-- Prefer 24-bit truecolor output first.
-- Only add a 256-color fallback if terminal compatibility actually requires it.
-- Keep colors overridable later, but ship strong defaults first.
-
-## 7. CLI / Config Shape
-
-- Keep current flags working:
-  - `--history`
-  - `--interval-ms`
-  - `--align`
-  - `--label`
-- Add new flags carefully:
-  - `--layout`
-  - `--metrics` or positional metric tokens
-  - possibly `--renderer braille|block`
-- Avoid a config file until the CLI shape has stabilized.
-
-## 8. Add Tests
-
-- Extract pure logic into testable functions where useful.
-- Add unit tests for:
-  - CPU delta calculation
-  - braille rendering
-  - alignment behavior
-  - argument parsing
-  - layout splitting
-  - color interpolation
-- Add at least one smoke test that the binary starts successfully.
-
-## 9. Improve Release Hygiene
-
-- Add `rustfmt.toml` only if you want non-default formatting.
-- Add CI or a minimal local check script for:
-  - `nix build`
-  - `cargo test`
+- Add a `.gitignore` for `target/` and `result/`.
+- Consider adding:
   - `cargo fmt --check`
-- `cargo clippy`
-- Decide whether releases matter, or whether this stays an internal utility.
+  - `cargo clippy`
+  - `cargo test`
+  - `nix flake check`
+  as one documented local verification sequence.
+- Decide whether to tag releases or keep version bumps lightweight.
 
-## 10. Tighten Nix Integration
+## Integration
 
-- Consider exposing a small `nixosModule` or overlay only if another repo needs it.
-- Keep the current flake output minimal until there is a real second consumer.
-- Once the repo path is final, update `nixos-configuration` to reference the canonical location only.
-
-## 11. Near-Term Sequence
-
-- Write `README.md`.
-- Add `--help`.
-- Refactor the renderer so metrics, colors, and layout are separate concepts.
-- Implement braille rendering.
-- Implement truecolor gradients.
-- Add `--layout`.
-- Add memory, IO, ingress, and egress.
-- Add a first test module.
-- Add flake `checks`.
-- Run `nxu` end-to-end using the external `monlin` package on at least one host.
+- Update `nixos-configuration` to relock to the latest `monlin` commit cleanly.
+- Keep `nxu` and `nxc` on the canonical layout syntax (`all/2`).
+- Consider whether any status-bar integrations should use `monlin` directly.
