@@ -481,6 +481,15 @@ cargo test
 nix flake check 'path:/home/flx/pro/git/monlin'
 ```
 
+`nix flake check` now evaluates the package build plus explicit `fmt`, `clippy`,
+and `test` checks from the flake.
+
+For an interactive pinned toolchain shell, use:
+
+```sh
+nix develop 'path:/home/flx/pro/git/monlin'
+```
+
 The repo is intended to verify cleanly through the flake:
 
 ```sh

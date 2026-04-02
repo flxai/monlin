@@ -118,6 +118,7 @@ fn render_row(
     pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
 }
 
+#[cfg(test)]
 fn render_segment(
     item: LayoutItem,
     history: &VecDeque<MetricValue>,
@@ -767,7 +768,7 @@ mod tests {
         let lines = render_lines(&config, 40, false, &histories, &config.layout, &values);
 
         let line = &lines[0];
-        assert_eq!(visible_width(&line), 40);
+        assert_eq!(visible_width(line), 40);
     }
 
     #[test]

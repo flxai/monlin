@@ -4,20 +4,17 @@
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
   outputs = {self, nixpkgs}: let
-    eachSystem = nixpkgs.lib.genAttrs [
+    systems = [
       "x86_64-linux"
       "aarch64-linux"
     ];
-  in {
-    packages = eachSystem (system: let
+    eachSystem = nixpkgs.lib.genAttrs systems;
+    forSystem = system: let
       pkgs = nixpkgs.legacyPackages.${system};
-      monlin = pkgs.rustPlatform.buildRustPackage {
-        pname = "monlin";
+      commonArgs = {
         version = "0.2.0";
-
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
-        doCheck = true;
 
         meta = with pkgs.lib; {
           description = "Compact terminal monitor for nxu panes and shells";
@@ -26,12 +23,87 @@
           platforms = platforms.linux;
         };
       };
+      monlin = pkgs.rustPlatform.buildRustPackage (commonArgs // {
+        pname = "monlin";
+        doCheck = true;
+      });
+      fmt = pkgs.runCommand "monlin-fmt-check" {
+        nativeBuildInputs = [pkgs.cargo pkgs.rustfmt];
+        src = self;
+      } ''
+        cp -r "$src" source
+        chmod -R +w source
+        cd source
+        cargo fmt --check
+        touch "$out"
+      '';
+      clippy = pkgs.rustPlatform.buildRustPackage (commonArgs // {
+        pname = "monlin-clippy";
+        doCheck = true;
+        nativeBuildInputs = [pkgs.clippy];
+        buildPhase = ''
+          runHook preBuild
+          touch monlin-clippy
+          runHook postBuild
+        '';
+        checkPhase = ''
+          runHook preCheck
+          cargo clippy --offline --workspace --all-targets
+          runHook postCheck
+        '';
+        installPhase = ''
+          runHook preInstall
+          touch "$out"
+          runHook postInstall
+        '';
+      });
+      tests = pkgs.rustPlatform.buildRustPackage (commonArgs // {
+        pname = "monlin-test";
+        doCheck = true;
+        buildPhase = ''
+          runHook preBuild
+          touch monlin-test
+          runHook postBuild
+        '';
+        checkPhase = ''
+          runHook preCheck
+          cargo test --offline --quiet
+          runHook postCheck
+        '';
+        installPhase = ''
+          runHook preInstall
+          touch "$out"
+          runHook postInstall
+        '';
+      });
     in {
-      default = monlin;
-      monlin = monlin;
-    });
-    checks = eachSystem (system: {
-      default = self.packages.${system}.default;
-    });
+      packages = {
+        default = monlin;
+        monlin = monlin;
+      };
+      checks = {
+        default = monlin;
+        fmt = fmt;
+        clippy = clippy;
+        test = tests;
+      };
+      devShells = {
+        default = pkgs.mkShell {
+          inputsFrom = [
+            monlin
+            clippy
+          ];
+          packages = with pkgs; [
+            cargo-llvm-cov
+            llvmPackages_21.llvm
+            rust-analyzer
+          ];
+        };
+      };
+    };
+  in {
+    packages = eachSystem (system: (forSystem system).packages);
+    checks = eachSystem (system: (forSystem system).checks);
+    devShells = eachSystem (system: (forSystem system).devShells);
   };
 }

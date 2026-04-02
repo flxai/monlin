@@ -1047,10 +1047,8 @@ mod tests {
         assert!((0.0..=1.0).contains(&memory));
         assert!((0.0..=1.0).contains(&storage.usage_ratio));
         assert!(storage.total_bytes >= storage.used_bytes);
-        assert!(disk.read_bytes <= u64::MAX);
-        assert!(disk.write_bytes <= u64::MAX);
-        assert!(net.rx_bytes <= u64::MAX);
-        assert!(net.tx_bytes <= u64::MAX);
+        let _ = disk;
+        let _ = net;
         assert!(gpu
             .utilization
             .is_none_or(|value| (0.0..=1.0).contains(&value)));
