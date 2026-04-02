@@ -27,7 +27,7 @@ where
     let mut sampler = metrics::Sampler::default();
     sampler
         .prime(requested_metrics)
-        .map_err(|error| format!("nxu-cpu: {error}"))?;
+        .map_err(|error| format!("monlin: {error}"))?;
 
     let mut histories = init_histories(requested_metrics, config.history);
     let mut stdout = io::stdout().lock();
@@ -40,7 +40,7 @@ where
 
         let values = sampler
             .sample(requested_metrics)
-            .map_err(|error| format!("nxu-cpu: {error}"))?;
+            .map_err(|error| format!("monlin: {error}"))?;
 
         for metric in requested_metrics {
             if let Some(history) = histories.get_mut(metric) {

@@ -2,10 +2,10 @@ use std::process::Command;
 
 #[test]
 fn help_exits_successfully() {
-    let output = Command::new(env!("CARGO_BIN_EXE_nxu-cpu"))
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .arg("--help")
         .output()
-        .expect("failed to run nxu-cpu --help");
+        .expect("failed to run monlin --help");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -14,10 +14,10 @@ fn help_exits_successfully() {
 
 #[test]
 fn once_mode_exits_successfully() {
-    let output = Command::new(env!("CARGO_BIN_EXE_nxu-cpu"))
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args(["--once", "--interval-ms", "0", "--width", "48", "--color", "never"])
         .output()
-        .expect("failed to run nxu-cpu --once");
+        .expect("failed to run monlin --once");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -26,7 +26,7 @@ fn once_mode_exits_successfully() {
 
 #[test]
 fn all_layout_renders_multiple_rows() {
-    let output = Command::new(env!("CARGO_BIN_EXE_nxu-cpu"))
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([
             "--once",
             "--interval-ms",
@@ -39,7 +39,7 @@ fn all_layout_renders_multiple_rows() {
             "all",
         ])
         .output()
-        .expect("failed to run nxu-cpu --layout all");
+        .expect("failed to run monlin --layout all");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);

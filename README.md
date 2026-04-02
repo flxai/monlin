@@ -66,16 +66,16 @@ Special layout token:
 - Duplicate metrics in a layout are ignored after the first occurrence.
 - More elaborate ratios or templates can come later if needed.
 
-## Compatibility Rules
+## CLI Rules
 
-The existing `nxu-cpu` CLI surface must keep working for now:
+`monlin` is the CLI surface:
 
 - `--history`
 - `--interval-ms`
 - `--align`
 - `--label`
 
-`--layout` is the primary interface now. Positional metrics remain only as a compatibility path so the existing `nxu` integration does not break during migration.
+`--layout` is the primary interface. Positional metrics remain as a short compatibility path for concise shell use.
 
 ## Immediate Implementation Order
 

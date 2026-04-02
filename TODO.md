@@ -2,15 +2,13 @@
 
 ## 0. Settle Repo Identity
 
-- Decide whether the project name is `monlin` or `nxu-cpu`.
-- If `monlin` is the repo/project name, decide whether the binary should stay `nxu-cpu` for compatibility.
 - Add a short `README.md` explaining what the tool does, who uses it, and how it fits into `nxu`.
 
 ## 1. Clean Packaging
 
 - Keep the flake output stable:
   - `packages.<system>.default`
-  - `packages.<system>.nxu-cpu`
+  - `packages.<system>.monlin`
 - Decide whether `flake.lock` should be committed long-term or omitted for this tiny crate.
 - Add `checks` to the flake:
   - build the package

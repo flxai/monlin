@@ -163,8 +163,8 @@ fn parse_string(args: &[String], i: &mut usize, flag: &str) -> Result<String, St
 
 pub fn help_text() -> &'static str {
     "\
-Usage: nxu-cpu --layout SPEC [OPTIONS]
-       nxu-cpu [LEGACY_METRIC...]
+Usage: monlin --layout SPEC [OPTIONS]
+       monlin [LEGACY_METRIC...]
 
 Metrics:
   cpu sys gpu vram gfx memory io net ingress egress
@@ -186,7 +186,7 @@ Notes:
   Layout is the canonical interface.
   Rows can be separated with ';' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
-  Positional metrics are kept only as a compatibility path for old nxu-cpu usage.
+  Positional metrics are kept only as a compatibility path for older invocations.
 "
 }
 
@@ -201,20 +201,20 @@ mod tests {
 
     #[test]
     fn defaults_to_cpu_layout() {
-        let config = parse(&["nxu-cpu"]);
+        let config = parse(&["monlin"]);
         assert_eq!(config.layout.metrics(), &[MetricKind::Cpu]);
     }
 
     #[test]
     fn parses_positional_metrics() {
-        let config = parse(&["nxu-cpu", "cpu", "net"]);
+        let config = parse(&["monlin", "cpu", "net"]);
         assert_eq!(config.layout.metrics(), &[MetricKind::Cpu, MetricKind::Net]);
     }
 
     #[test]
     fn rejects_layout_and_positionals_together() {
         let error = parse_args(
-            ["nxu-cpu", "--layout", "cpu gpu", "memory"]
+            ["monlin", "--layout", "cpu gpu", "memory"]
                 .into_iter()
                 .map(|item| item.to_string()),
         )
@@ -224,14 +224,14 @@ mod tests {
 
     #[test]
     fn accepts_short_layout_flag() {
-        let config = parse(&["nxu-cpu", "-l", "all"]);
+        let config = parse(&["monlin", "-l", "all"]);
         assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
         assert_eq!(config.layout.rows().len(), 2);
     }
 
     #[test]
     fn all_two_rows_is_accepted() {
-        let config = parse(&["nxu-cpu", "--layout", "all:2"]);
+        let config = parse(&["monlin", "--layout", "all:2"]);
         assert_eq!(config.layout.rows().len(), 2);
     }
 }
