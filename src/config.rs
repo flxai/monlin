@@ -71,7 +71,7 @@ where
             "--label" => {
                 label = Some(parse_string(&args, &mut i, "--label")?);
             }
-            "--layout" => {
+            "-l" | "--layout" => {
                 layout_spec = Some(parse_string(&args, &mut i, "--layout")?);
             }
             "--renderer" => {
@@ -163,22 +163,30 @@ fn parse_string(args: &[String], i: &mut usize, flag: &str) -> Result<String, St
 
 pub fn help_text() -> &'static str {
     "\
-Usage: nxu-cpu [OPTIONS] [METRIC...]
+Usage: nxu-cpu --layout SPEC [OPTIONS]
+       nxu-cpu [LEGACY_METRIC...]
 
 Metrics:
-  cpu gpu memory io ingress egress
+  cpu sys gpu vram gfx memory io net ingress egress
+  all[:N]
 
 Options:
+  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all:2\"
   --history N           Number of history samples to retain
   --interval-ms N       Sampling interval in milliseconds
   --align left|right    Place the percentage before or after the graph
   --label TEXT          Prefix the entire rendered line
-  --layout SPEC         Layout specification, e.g. \"cpu gpu\"
   --renderer braille|block
   --color auto|always|never
   --width N             Override terminal width
   --once                Render once and exit
   -h, --help            Show this help text
+
+Notes:
+  Layout is the canonical interface.
+  Rows can be separated with ';' or a literal newline.
+  Flat layouts auto-wrap after 5 metrics per row.
+  Positional metrics are kept only as a compatibility path for old nxu-cpu usage.
 "
 }
 
@@ -199,8 +207,8 @@ mod tests {
 
     #[test]
     fn parses_positional_metrics() {
-        let config = parse(&["nxu-cpu", "cpu", "gpu"]);
-        assert_eq!(config.layout.metrics(), &[MetricKind::Cpu, MetricKind::Gpu]);
+        let config = parse(&["nxu-cpu", "cpu", "net"]);
+        assert_eq!(config.layout.metrics(), &[MetricKind::Cpu, MetricKind::Net]);
     }
 
     #[test]
@@ -212,5 +220,18 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("either positional metrics or --layout"));
+    }
+
+    #[test]
+    fn accepts_short_layout_flag() {
+        let config = parse(&["nxu-cpu", "-l", "all"]);
+        assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
+        assert_eq!(config.layout.rows().len(), 2);
+    }
+
+    #[test]
+    fn all_two_rows_is_accepted() {
+        let config = parse(&["nxu-cpu", "--layout", "all:2"]);
+        assert_eq!(config.layout.rows().len(), 2);
     }
 }

@@ -1,6 +1,6 @@
 # monlin
 
-`monlin` is a small terminal monitor for compact one-line status bars.
+`monlin` is a small terminal monitor for compact status bars.
 
 The first consumer is `nxu`, where it runs in narrow tmux side panes. That
 drives the design:
@@ -12,20 +12,32 @@ drives the design:
 
 ## Problem Statement
 
-`monlin` should render compact live monitors for system activity in a single
-terminal line.
+`monlin` should render compact live monitors for system activity in one or more
+compact terminal lines.
 
-The simplest invocation should show a CPU history bar. More advanced
-invocations should lay out multiple metrics on the same line.
+The simplest invocation should show a CPU history bar. The canonical interface
+is a layout specification which determines the active metrics. More advanced
+invocations should lay out multiple metrics across one or more lines.
 
-The first supported metrics are:
+Supported single metrics are:
 
 - `cpu`
 - `gpu`
-- `memory`
-- `io`
-- `ingress`
-- `egress`
+- `vram`
+- `ram`
+- `in`
+- `out`
+
+Supported combined metrics are:
+
+- `sys` = `cpu` / `ram`
+- `gfx` = `gpu` / `vram`
+- `io` = write / read
+- `net` = ingress / egress
+
+Special layout token:
+
+- `all[:N]` expands to the full current metric set and is deduped with any explicit tokens
 
 ## Rendering Rules
 
@@ -43,10 +55,15 @@ The first supported metrics are:
 
 ## Layout Rules
 
-- `monlin` with no positional metric renders a single CPU segment.
-- `monlin cpu` behaves the same.
+- `monlin` with no layout renders a single CPU segment.
+- `monlin --layout "cpu"` behaves the same.
 - `--layout "cpu gpu"` renders two equal-width segments on one line.
+- `--layout "all"` expands to all supported metrics in two rows by default.
+- `--layout "all:3"` expands to all supported metrics across three balanced rows.
+- `;` or a literal newline separates rows explicitly.
 - Simple layout tokens split the available width evenly.
+- Flat layouts auto-wrap after 5 metrics per row.
+- Duplicate metrics in a layout are ignored after the first occurrence.
 - More elaborate ratios or templates can come later if needed.
 
 ## Compatibility Rules
@@ -58,7 +75,7 @@ The existing `nxu-cpu` CLI surface must keep working for now:
 - `--align`
 - `--label`
 
-Additive flags are fine, but the existing `nxu` integration should not break.
+`--layout` is the primary interface now. Positional metrics remain only as a compatibility path so the existing `nxu` integration does not break during migration.
 
 ## Immediate Implementation Order
 

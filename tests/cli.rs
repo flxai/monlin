@@ -23,3 +23,25 @@ fn once_mode_exits_successfully() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("cpu"));
 }
+
+#[test]
+fn all_layout_renders_multiple_rows() {
+    let output = Command::new(env!("CARGO_BIN_EXE_nxu-cpu"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "80",
+            "--color",
+            "never",
+            "--layout",
+            "all",
+        ])
+        .output()
+        .expect("failed to run nxu-cpu --layout all");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.lines().count() >= 2);
+}
