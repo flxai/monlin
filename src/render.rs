@@ -4,7 +4,7 @@ use std::env;
 use crate::color::{gradient_for, interpolate, paint, split_gradients_for};
 use crate::config::{Align, Config};
 use crate::layout::{Layout, LayoutItem, MetricKind};
-use crate::metrics::MetricValue;
+use crate::metrics::{HeadlineValue, MetricValue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Renderer {
@@ -35,7 +35,7 @@ pub fn render_lines_with_headlines(
     histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
     layout: &Layout,
     values: &HashMap<MetricKind, MetricValue>,
-    headline_values: &HashMap<MetricKind, f64>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let label_width = layout
         .metrics()
@@ -69,7 +69,7 @@ fn render_row(
     histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
     items: &[LayoutItem],
     values: &HashMap<MetricKind, MetricValue>,
-    headline_values: &HashMap<MetricKind, f64>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
     label_width: usize,
 ) -> String {
     let prefix = config
@@ -208,7 +208,7 @@ fn render_segment_with_headline(
     item: LayoutItem,
     history: &VecDeque<MetricValue>,
     value: MetricValue,
-    headline_value: Option<f64>,
+    headline_value: Option<HeadlineValue>,
     width: usize,
     label_width: usize,
     align: Align,
@@ -220,7 +220,7 @@ fn render_segment_with_headline(
     let usage_text = metric.format_value(
         item.view(),
         value.headline_value(),
-        headline_value.unwrap_or_else(|| value.headline_value()),
+        &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
     );
     let label_usage_separator = match metric {
         MetricKind::Vram => "",
@@ -756,7 +756,7 @@ mod tests {
 
         let headlines = values
             .iter()
-            .map(|(metric, value)| (*metric, value.headline_value()))
+            .map(|(metric, value)| (*metric, HeadlineValue::Scalar(value.headline_value())))
             .collect::<HashMap<_, _>>();
         let lines = render_lines_with_headlines(&config, 80, false, &histories, &layout, &values, &headlines);
 
@@ -816,7 +816,7 @@ mod tests {
                 lower: 0.25,
             },
         )]);
-        let headlines = HashMap::from([(MetricKind::Net, 3.5 * 1024.0 * 1024.0)]);
+        let headlines = HashMap::from([(MetricKind::Net, HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0))]);
 
         let lines =
             render_lines_with_headlines(&config, 24, false, &histories, &layout, &values, &headlines);
@@ -833,7 +833,7 @@ mod tests {
                 upper: 0.0,
                 lower: 0.0,
             },
-            Some(0.0),
+            Some(HeadlineValue::Scalar(0.0)),
             16,
             3,
             Align::Left,
@@ -850,7 +850,7 @@ mod tests {
             item(MetricKind::Vram),
             &VecDeque::new(),
             MetricValue::Single(0.0),
-            Some(0.0),
+            Some(HeadlineValue::Scalar(0.0)),
             16,
             4,
             Align::Left,
@@ -859,6 +859,26 @@ mod tests {
         );
 
         assert!(segment.contains("vram0%"));
+    }
+
+    #[test]
+    fn storage_human_segment_displays_used_over_total() {
+        let segment = render_segment_with_headline(
+            LayoutItem::new(MetricKind::Storage, LayoutView::Hum, None, 1),
+            &VecDeque::new(),
+            MetricValue::Single(0.5),
+            Some(HeadlineValue::Storage {
+                used_bytes: 512 * 1024 * 1024,
+                total_bytes: 2 * 1024 * 1024 * 1024,
+            }),
+            22,
+            3,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(segment.contains("spc 512M/2.0G"));
     }
 
     #[test]

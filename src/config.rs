@@ -167,7 +167,7 @@ Usage: monlin --layout SPEC [OPTIONS]
        monlin [LEGACY_METRIC...]
 
 Metrics:
-  cpu sys gpu vram gfx memory io net ingress egress
+  cpu sys gpu vram gfx memory spc io net ingress egress
   all[/N]
 
 Options:

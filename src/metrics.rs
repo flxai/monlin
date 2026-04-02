@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::fs;
 use std::io;
+use std::os::raw::{c_char, c_int, c_ulong};
 use std::time::Instant;
 
 use crate::layout::MetricKind;
@@ -39,7 +41,22 @@ pub enum MetricValue {
 #[derive(Debug)]
 pub struct Sample {
     pub values: HashMap<MetricKind, MetricValue>,
-    pub headlines: HashMap<MetricKind, f64>,
+    pub headlines: HashMap<MetricKind, HeadlineValue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HeadlineValue {
+    Scalar(f64),
+    Storage { used_bytes: u64, total_bytes: u64 },
+}
+
+impl HeadlineValue {
+    pub fn scalar(self) -> Option<f64> {
+        match self {
+            Self::Scalar(value) => Some(value),
+            Self::Storage { .. } => None,
+        }
+    }
 }
 
 impl MetricValue {
@@ -153,6 +170,12 @@ impl Sampler {
             None
         };
 
+        let storage_value = if metrics.contains(&MetricKind::Storage) {
+            Some(read_storage_usage("/")?)
+        } else {
+            None
+        };
+
         let io_value = if metrics.contains(&MetricKind::Io) {
             Some(self.sample_io()?)
         } else {
@@ -184,6 +207,7 @@ impl Sampler {
                     (None, None) => None,
                 },
                 MetricKind::Memory => memory_value.map(MetricValue::Single),
+                MetricKind::Storage => storage_value.map(|sample| MetricValue::Single(sample.usage_ratio)),
                 MetricKind::Io => io_value.map(|sample| sample.value),
                 MetricKind::Net => net_value.map(|sample| sample.value),
                 MetricKind::Ingress => net_value.map(|sample| MetricValue::Single(sample.value.upper())),
@@ -192,13 +216,23 @@ impl Sampler {
             if let Some(value) = value {
                 let value = clamp_value(value);
                 let headline = match metric {
-                    MetricKind::Io => io_value.map(|sample| sample.upper_raw + sample.lower_raw),
-                    MetricKind::Net => net_value.map(|sample| sample.upper_raw + sample.lower_raw),
-                    MetricKind::Ingress => net_value.map(|sample| sample.upper_raw),
-                    MetricKind::Egress => net_value.map(|sample| sample.lower_raw),
-                    _ => Some(value.headline_value()),
+                    MetricKind::Io => io_value
+                        .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
+                    MetricKind::Net => net_value
+                        .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
+                    MetricKind::Ingress => {
+                        net_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw))
+                    }
+                    MetricKind::Egress => {
+                        net_value.map(|sample| HeadlineValue::Scalar(sample.lower_raw))
+                    }
+                    MetricKind::Storage => storage_value.map(|sample| HeadlineValue::Storage {
+                        used_bytes: sample.used_bytes,
+                        total_bytes: sample.total_bytes,
+                    }),
+                    _ => Some(HeadlineValue::Scalar(value.headline_value())),
                 }
-                .unwrap_or_else(|| value.headline_value());
+                .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value()));
 
                 values.insert(*metric, value);
                 headlines.insert(*metric, headline);
@@ -281,6 +315,13 @@ impl Sampler {
         *entry = (entry.mul_add(0.97, 0.0)).max(rate).max(1.0);
         (rate / *entry).clamp(0.0, 1.0)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StorageSample {
+    usage_ratio: f64,
+    used_bytes: u64,
+    total_bytes: u64,
 }
 
 impl GpuSample {
@@ -385,6 +426,58 @@ fn parse_memory_usage(meminfo: &str) -> io::Result<f64> {
         return Ok(0.0);
     }
     Ok(((total - available) as f64 / total as f64).clamp(0.0, 1.0))
+}
+
+fn read_storage_usage(path: &str) -> io::Result<StorageSample> {
+    let path = CString::new(path)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid storage path"))?;
+    let mut stat = StatVfs {
+        f_bsize: 0,
+        f_frsize: 0,
+        f_blocks: 0,
+        f_bfree: 0,
+        f_bavail: 0,
+        f_files: 0,
+        f_ffree: 0,
+        f_favail: 0,
+        f_fsid: 0,
+        f_unused: 0,
+        f_flag: 0,
+        f_namemax: 0,
+        f_spare: [0; 6],
+    };
+
+    let rc = unsafe { statvfs(path.as_ptr(), &mut stat) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    storage_usage_from_stat(&stat).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid filesystem statistics for storage usage",
+        )
+    })
+}
+
+fn storage_usage_from_stat(stat: &StatVfs) -> Option<StorageSample> {
+    let block_size = stat.f_frsize.max(1);
+    let total_blocks = stat.f_blocks;
+    let available_blocks = stat.f_bavail.min(total_blocks);
+    if total_blocks == 0 {
+        return None;
+    }
+
+    let total_bytes = total_blocks.saturating_mul(block_size);
+    let available_bytes = available_blocks.saturating_mul(block_size);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    let usage_ratio = (used_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0);
+
+    Some(StorageSample {
+        usage_ratio,
+        used_bytes,
+        total_bytes,
+    })
 }
 
 fn read_disk_counters() -> io::Result<DiskCounters> {
@@ -531,6 +624,27 @@ fn parse_nvidia_smi_csv(stdout: &str) -> io::Result<GpuSample> {
     })
 }
 
+#[repr(C)]
+struct StatVfs {
+    f_bsize: c_ulong,
+    f_frsize: c_ulong,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: c_ulong,
+    f_unused: c_ulong,
+    f_flag: c_ulong,
+    f_namemax: c_ulong,
+    f_spare: [c_int; 6],
+}
+
+unsafe extern "C" {
+    fn statvfs(path: *const c_char, buf: *mut StatVfs) -> c_int;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +669,30 @@ mod tests {
         )
         .unwrap();
         assert!((value - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn storage_usage_is_computed_from_statvfs_values() {
+        let stat = StatVfs {
+            f_bsize: 4096,
+            f_frsize: 4096,
+            f_blocks: 100,
+            f_bfree: 0,
+            f_bavail: 25,
+            f_files: 0,
+            f_ffree: 0,
+            f_favail: 0,
+            f_fsid: 0,
+            f_unused: 0,
+            f_flag: 0,
+            f_namemax: 0,
+            f_spare: [0; 6],
+        };
+
+        let sample = storage_usage_from_stat(&stat).unwrap();
+        assert!((sample.usage_ratio - 0.75).abs() < f64::EPSILON);
+        assert_eq!(sample.used_bytes, 75 * 4096);
+        assert_eq!(sample.total_bytes, 100 * 4096);
     }
 
     #[test]

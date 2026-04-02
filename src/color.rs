@@ -65,6 +65,18 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
                 b: 176,
             },
         },
+        MetricKind::Storage => Gradient {
+            low: Rgb {
+                r: 96,
+                g: 69,
+                b: 22,
+            },
+            high: Rgb {
+                r: 255,
+                g: 208,
+                b: 140,
+            },
+        },
         MetricKind::Io => Gradient {
             low: Rgb {
                 r: 136,

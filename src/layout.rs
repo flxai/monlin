@@ -6,6 +6,7 @@ pub enum MetricKind {
     Vram,
     Gfx,
     Memory,
+    Storage,
     Io,
     Net,
     Ingress,
@@ -38,6 +39,7 @@ impl MetricKind {
             "vram" => Some(Self::Vram),
             "gfx" => Some(Self::Gfx),
             "memory" | "mem" | "ram" => Some(Self::Memory),
+            "storage" | "disk" | "space" | "spc" => Some(Self::Storage),
             "io" => Some(Self::Io),
             "net" => Some(Self::Net),
             "ingress" | "in" => Some(Self::Ingress),
@@ -54,6 +56,7 @@ impl MetricKind {
             Self::Vram => "vram",
             Self::Gfx => "gfx",
             Self::Memory => "ram",
+            Self::Storage => "spc",
             Self::Io => "io",
             Self::Net => "net",
             Self::Ingress => "in",
@@ -68,13 +71,24 @@ impl MetricKind {
     pub fn default_view(self) -> LayoutView {
         match self {
             Self::Io | Self::Net | Self::Ingress | Self::Egress => LayoutView::Hum,
-            Self::Cpu | Self::Sys | Self::Gpu | Self::Vram | Self::Gfx | Self::Memory => {
+            Self::Cpu
+            | Self::Sys
+            | Self::Gpu
+            | Self::Vram
+            | Self::Gfx
+            | Self::Memory
+            | Self::Storage => {
                 LayoutView::Pct
             }
         }
     }
 
-    pub fn format_value(self, view: LayoutView, normalized: f64, headline: f64) -> String {
+    pub fn format_value(
+        self,
+        view: LayoutView,
+        normalized: f64,
+        headline: &crate::metrics::HeadlineValue,
+    ) -> String {
         let resolved = match view {
             LayoutView::Default => self.default_view(),
             other => other,
@@ -83,7 +97,20 @@ impl MetricKind {
         match resolved {
             LayoutView::Pct => format_percent(self, normalized),
             LayoutView::Hum => match self {
-                Self::Io | Self::Net | Self::Ingress | Self::Egress => humanize_rate(headline),
+                Self::Io | Self::Net | Self::Ingress | Self::Egress => {
+                    humanize_rate(headline.scalar().unwrap_or(0.0))
+                }
+                Self::Storage => match headline {
+                    crate::metrics::HeadlineValue::Storage {
+                        used_bytes,
+                        total_bytes,
+                    } => format!(
+                        "{}/{}",
+                        humanize_bytes(*used_bytes as f64),
+                        humanize_bytes(*total_bytes as f64)
+                    ),
+                    _ => format_percent(self, normalized),
+                },
                 _ => format_percent(self, normalized),
             },
             LayoutView::Default => unreachable!(),
@@ -99,6 +126,7 @@ fn format_percent(metric: MetricKind, value: f64) -> String {
         | MetricKind::Gpu
         | MetricKind::Gfx
         | MetricKind::Memory
+        | MetricKind::Storage
         | MetricKind::Io
         | MetricKind::Net
         | MetricKind::Ingress
@@ -110,6 +138,26 @@ fn humanize_rate(bytes_per_second: f64) -> String {
     const UNITS: [&str; 5] = ["B/s", "K/s", "M/s", "G/s", "T/s"];
 
     let mut value = bytes_per_second.max(0.0);
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+
+    if unit == 0 {
+        return format!("{:.0}{}", value, UNITS[unit]);
+    }
+    if value >= 10.0 {
+        return format!("{:.0}{}", value, UNITS[unit]);
+    }
+
+    format!("{:.1}{}", value, UNITS[unit])
+}
+
+fn humanize_bytes(bytes: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+
+    let mut value = bytes.max(0.0);
     let mut unit = 0;
     while value >= 1024.0 && unit + 1 < UNITS.len() {
         value /= 1024.0;
@@ -218,6 +266,7 @@ pub fn all_metrics() -> &'static [MetricKind] {
         MetricKind::Sys,
         MetricKind::Cpu,
         MetricKind::Memory,
+        MetricKind::Storage,
         MetricKind::Gfx,
         MetricKind::Gpu,
         MetricKind::Vram,
@@ -288,10 +337,10 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
             .map(|row| {
                 row.into_iter()
                     .filter(|item| {
-                        if seen.contains(&item.metric()) {
+                        if seen.contains(item) {
                             false
                         } else {
-                            seen.push(item.metric());
+                            seen.push(*item);
                             true
                         }
                     })
@@ -320,7 +369,7 @@ fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
 }
 
 fn push_unique_item(items: &mut Vec<LayoutItem>, item: LayoutItem) {
-    if !items.iter().any(|existing| existing.metric() == item.metric()) {
+    if !items.contains(&item) {
         items.push(item);
     }
 }
@@ -489,7 +538,11 @@ mod tests {
     #[test]
     fn memory_values_are_formatted_as_percent() {
         assert_eq!(
-            MetricKind::Memory.format_value(LayoutView::Default, 0.375, 0.375),
+            MetricKind::Memory.format_value(
+                LayoutView::Default,
+                0.375,
+                &crate::metrics::HeadlineValue::Scalar(0.375),
+            ),
             " 38%"
         );
     }
@@ -497,7 +550,11 @@ mod tests {
     #[test]
     fn ingress_values_are_humanized_as_rates() {
         assert_eq!(
-            MetricKind::Ingress.format_value(LayoutView::Default, 0.0, 1536.0),
+            MetricKind::Ingress.format_value(
+                LayoutView::Default,
+                0.0,
+                &crate::metrics::HeadlineValue::Scalar(1536.0),
+            ),
             "1.5K/s"
         );
     }
@@ -508,15 +565,31 @@ mod tests {
             MetricKind::Net.format_value(
                 LayoutView::Default,
                 0.0,
-                3.0 * 1024.0 * 1024.0
+                &crate::metrics::HeadlineValue::Scalar(3.0 * 1024.0 * 1024.0),
             ),
             "3.0M/s"
         );
     }
 
     #[test]
+    fn storage_human_view_formats_used_over_total() {
+        assert_eq!(
+            MetricKind::Storage.format_value(
+                LayoutView::Hum,
+                0.5,
+                &crate::metrics::HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+            ),
+            "512M/2.0G"
+        );
+    }
+
+    #[test]
     fn memory_and_gpu_use_new_labels() {
         assert_eq!(MetricKind::Memory.short_label(), "ram");
+        assert_eq!(MetricKind::Storage.short_label(), "spc");
         assert_eq!(MetricKind::Sys.short_label(), "sys");
         assert_eq!(MetricKind::Gpu.short_label(), "gpu");
         assert_eq!(MetricKind::Vram.short_label(), "vram");
@@ -528,7 +601,7 @@ mod tests {
         let layout = parse_layout_spec("all").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 5);
+        assert_eq!(layout.rows()[0].len(), 6);
         assert_eq!(layout.rows()[1].len(), 5);
     }
 
@@ -541,6 +614,7 @@ mod tests {
                 MetricKind::Cpu,
                 MetricKind::Sys,
                 MetricKind::Memory,
+                MetricKind::Storage,
                 MetricKind::Gfx,
                 MetricKind::Gpu,
                 MetricKind::Vram,
@@ -558,7 +632,7 @@ mod tests {
         let layout = parse_layout_spec("all/3").unwrap();
         assert_eq!(layout.rows().len(), 3);
         assert_eq!(layout.rows()[0].len(), 4);
-        assert_eq!(layout.rows()[1].len(), 3);
+        assert_eq!(layout.rows()[1].len(), 4);
         assert_eq!(layout.rows()[2].len(), 3);
     }
 
@@ -643,5 +717,24 @@ mod tests {
         let layout = parse_layout_spec("cpu*3 ram*4").unwrap();
         assert_eq!(layout.rows()[0][0].grow(), 3);
         assert_eq!(layout.rows()[0][1].grow(), 4);
+    }
+
+    #[test]
+    fn same_metric_with_different_views_can_coexist() {
+        let layout = parse_layout_spec("spc.pct spc.hum").unwrap();
+        assert_eq!(layout.rows().len(), 1);
+        assert_eq!(layout.rows()[0].len(), 2);
+        assert_eq!(layout.rows()[0][0].metric(), MetricKind::Storage);
+        assert_eq!(layout.rows()[0][0].view(), LayoutView::Pct);
+        assert_eq!(layout.rows()[0][1].metric(), MetricKind::Storage);
+        assert_eq!(layout.rows()[0][1].view(), LayoutView::Hum);
+        assert_eq!(layout.metrics(), &[MetricKind::Storage]);
+    }
+
+    #[test]
+    fn exact_duplicate_items_are_still_deduped() {
+        let layout = parse_layout_spec("spc.hum spc.hum").unwrap();
+        assert_eq!(layout.rows().len(), 1);
+        assert_eq!(layout.rows()[0].len(), 1);
     }
 }
