@@ -5,6 +5,8 @@ pub mod metrics;
 pub mod render;
 
 use std::collections::{HashMap, VecDeque};
+#[cfg(unix)]
+use std::ffi::c_void;
 use std::io::{self, IsTerminal, Write};
 use std::thread;
 use std::time::Duration;
@@ -13,6 +15,14 @@ use config::{ColorMode, OutputMode};
 use layout::MetricKind;
 use metrics::MetricValue;
 use serde_json::json;
+
+const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
+
+#[cfg(unix)]
+const CURSOR_RESTORE_SIGNALS: [i32; 4] = [1, 2, 3, 15];
+#[cfg(unix)]
+const STDOUT_FILENO: i32 = 1;
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let config = config::parse_args(args)?;
@@ -37,7 +47,10 @@ fn run_terminal(
     sampler: &mut metrics::Sampler,
     histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
 ) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
     let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
     let mut rendered_rows = 0;
 
     loop {
@@ -58,6 +71,96 @@ fn run_terminal(
     }
 
     Ok(())
+}
+
+struct CursorVisibilityGuard {
+    restore: bool,
+    #[cfg(unix)]
+    previous_handlers: Option<[SignalHandler; CURSOR_RESTORE_SIGNALS.len()]>,
+}
+
+impl CursorVisibilityGuard {
+    fn new<W: Write>(stdout: &mut W, hide_cursor: bool) -> io::Result<Self> {
+        #[cfg(unix)]
+        let previous_handlers = hide_cursor.then(install_cursor_restore_signal_handlers);
+
+        if hide_cursor {
+            write_cursor_visibility(stdout, false)?;
+            stdout.flush()?;
+        }
+
+        Ok(Self {
+            restore: hide_cursor,
+            #[cfg(unix)]
+            previous_handlers,
+        })
+    }
+}
+
+impl Drop for CursorVisibilityGuard {
+    fn drop(&mut self) {
+        if !self.restore {
+            return;
+        }
+
+        #[cfg(unix)]
+        if let Some(previous_handlers) = self.previous_handlers {
+            restore_signal_handlers(previous_handlers);
+        }
+
+        let mut stdout = io::stdout().lock();
+        let _ = write_cursor_visibility(&mut stdout, true);
+        let _ = stdout.flush();
+    }
+}
+
+#[cfg(unix)]
+type SignalHandler = usize;
+
+#[cfg(unix)]
+const SIG_DFL: SignalHandler = 0;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn signal(signum: i32, handler: SignalHandler) -> SignalHandler;
+    fn write(fd: i32, buf: *const c_void, count: usize) -> isize;
+    fn _exit(status: i32) -> !;
+}
+
+#[cfg(unix)]
+unsafe extern "C" fn restore_cursor_and_exit(signum: i32) {
+    let bytes = SHOW_CURSOR.as_bytes();
+    let _ = unsafe { write(STDOUT_FILENO, bytes.as_ptr().cast(), bytes.len()) };
+    unsafe { _exit(128 + signum) }
+}
+
+#[cfg(unix)]
+fn install_cursor_restore_signal_handlers() -> [SignalHandler; CURSOR_RESTORE_SIGNALS.len()] {
+    let mut previous_handlers = [SIG_DFL; CURSOR_RESTORE_SIGNALS.len()];
+
+    for (index, signal_number) in CURSOR_RESTORE_SIGNALS.iter().copied().enumerate() {
+        previous_handlers[index] = unsafe {
+            signal(
+                signal_number,
+                restore_cursor_and_exit as *const () as SignalHandler,
+            )
+        };
+    }
+
+    previous_handlers
+}
+
+#[cfg(unix)]
+fn restore_signal_handlers(previous_handlers: [SignalHandler; CURSOR_RESTORE_SIGNALS.len()]) {
+    for (signal_number, previous_handler) in CURSOR_RESTORE_SIGNALS
+        .iter()
+        .copied()
+        .zip(previous_handlers)
+    {
+        unsafe {
+            signal(signal_number, previous_handler);
+        }
+    }
 }
 
 fn write_terminal_frame<W: Write>(
@@ -89,6 +192,11 @@ fn write_terminal_frame<W: Write>(
     }
 
     Ok(lines.len())
+}
+
+fn write_cursor_visibility<W: Write>(stdout: &mut W, visible: bool) -> io::Result<()> {
+    let sequence = if visible { SHOW_CURSOR } else { HIDE_CURSOR };
+    write!(stdout, "{sequence}")
 }
 
 fn run_i3bar(
@@ -280,6 +388,17 @@ mod tests {
             String::from_utf8(output).unwrap(),
             "sys  40% ....\x1b[K\ngfx  22% ....\x1b[K\nnet 1.5M/s ....\x1b[K\r\x1b[2Acpu  12% ....\x1b[K\n\x1b[K\n\x1b[K\r\x1b[2A"
         );
+    }
+
+    #[test]
+    fn write_cursor_visibility_emits_expected_escape_sequences() {
+        let mut hidden = Vec::new();
+        write_cursor_visibility(&mut hidden, false).unwrap();
+        assert_eq!(String::from_utf8(hidden).unwrap(), HIDE_CURSOR);
+
+        let mut shown = Vec::new();
+        write_cursor_visibility(&mut shown, true).unwrap();
+        assert_eq!(String::from_utf8(shown).unwrap(), SHOW_CURSOR);
     }
 
     #[test]
