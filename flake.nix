@@ -13,7 +13,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       monlin = pkgs.rustPlatform.buildRustPackage {
         pname = "monlin";
-        version = "0.1.0";
+        version = "0.2.0";
 
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
