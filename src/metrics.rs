@@ -13,7 +13,8 @@ struct CpuCounters {
 
 #[derive(Clone, Copy, Debug)]
 struct DiskCounters {
-    bytes: u64,
+    read_bytes: u64,
+    write_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -22,12 +23,56 @@ struct NetCounters {
     tx_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct GpuSample {
+    utilization: Option<f64>,
+    vram_used_bytes: Option<u64>,
+    vram_total_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MetricValue {
+    Single(f64),
+    Split { upper: f64, lower: f64 },
+}
+
+impl MetricValue {
+    pub fn headline_value(self) -> f64 {
+        match self {
+            Self::Single(value) => value,
+            Self::Split { upper, lower } => upper.max(lower),
+        }
+    }
+
+    pub fn upper(self) -> f64 {
+        match self {
+            Self::Single(value) => value,
+            Self::Split { upper, .. } => upper,
+        }
+    }
+
+    pub fn lower(self) -> f64 {
+        match self {
+            Self::Single(value) => value,
+            Self::Split { lower, .. } => lower,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ScaleKey {
+    IoRead,
+    IoWrite,
+    NetIngress,
+    NetEgress,
+}
+
 #[derive(Debug)]
 pub struct Sampler {
     cpu_prev: Option<CpuCounters>,
     disk_prev: Option<(DiskCounters, Instant)>,
     net_prev: Option<(NetCounters, Instant)>,
-    scale_maxima: HashMap<MetricKind, f64>,
+    scale_maxima: HashMap<ScaleKey, f64>,
 }
 
 impl Default for Sampler {
@@ -49,25 +94,106 @@ impl Sampler {
         if metrics.contains(&MetricKind::Io) {
             self.disk_prev = Some((read_disk_counters()?, Instant::now()));
         }
-        if metrics.contains(&MetricKind::Ingress) || metrics.contains(&MetricKind::Egress) {
+        if metrics.contains(&MetricKind::Ingress)
+            || metrics.contains(&MetricKind::Egress)
+            || metrics.contains(&MetricKind::Net)
+        {
             self.net_prev = Some((read_net_counters()?, Instant::now()));
         }
         Ok(())
     }
 
-    pub fn sample(&mut self, metrics: &[MetricKind]) -> io::Result<HashMap<MetricKind, f64>> {
+    pub fn sample(&mut self, metrics: &[MetricKind]) -> io::Result<HashMap<MetricKind, MetricValue>> {
         let mut values = HashMap::new();
+
+        let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys) {
+            Some(self.sample_cpu()?)
+        } else {
+            None
+        };
+
+        let gpu_sample = if metrics.contains(&MetricKind::Gpu)
+            || metrics.contains(&MetricKind::Vram)
+            || metrics.contains(&MetricKind::Gfx)
+        {
+            Some(read_gpu_sample().unwrap_or_default())
+        } else {
+            None
+        };
+
+        let gpu_value = if metrics.contains(&MetricKind::Gpu) || metrics.contains(&MetricKind::Gfx) {
+            Some(gpu_sample.unwrap_or_default().utilization.unwrap_or(0.0))
+        } else {
+            None
+        };
+
+        let vram_value = if metrics.contains(&MetricKind::Vram) || metrics.contains(&MetricKind::Gfx) {
+            Some(gpu_sample.unwrap_or_default().vram_fraction().unwrap_or(0.0))
+        } else {
+            None
+        };
+
+        let memory_value = if metrics.contains(&MetricKind::Memory) || metrics.contains(&MetricKind::Sys) {
+            Some(read_memory_usage()?)
+        } else {
+            None
+        };
+
+        let io_value = if metrics.contains(&MetricKind::Io) {
+            Some(self.sample_io()?)
+        } else {
+            None
+        };
+
+        let net_value = if metrics.contains(&MetricKind::Ingress)
+            || metrics.contains(&MetricKind::Egress)
+            || metrics.contains(&MetricKind::Net)
+        {
+            Some(self.sample_net()?)
+        } else {
+            None
+        };
 
         for metric in metrics {
             let value = match metric {
-                MetricKind::Cpu => self.sample_cpu()?,
-                MetricKind::Gpu => read_gpu_usage().unwrap_or(0.0),
-                MetricKind::Memory => read_memory_usage()?,
-                MetricKind::Io => self.sample_io()?,
-                MetricKind::Ingress => self.sample_net(true)?,
-                MetricKind::Egress => self.sample_net(false)?,
+                MetricKind::Cpu => MetricValue::Single(cpu_value.unwrap_or(0.0)),
+                MetricKind::Sys => MetricValue::Split {
+                    upper: cpu_value.unwrap_or(0.0),
+                    lower: memory_value.unwrap_or(0.0),
+                },
+                MetricKind::Gpu => MetricValue::Single(gpu_value.unwrap_or(0.0)),
+                MetricKind::Vram => MetricValue::Single(vram_value.unwrap_or(0.0)),
+                MetricKind::Gfx => MetricValue::Split {
+                    upper: gpu_value.unwrap_or(0.0),
+                    lower: vram_value.unwrap_or(0.0),
+                },
+                MetricKind::Memory => MetricValue::Single(memory_value.unwrap_or(0.0)),
+                MetricKind::Io => io_value.unwrap_or(MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                }),
+                MetricKind::Net => net_value.unwrap_or(MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                }),
+                MetricKind::Ingress => MetricValue::Single(
+                    net_value
+                        .unwrap_or(MetricValue::Split {
+                            upper: 0.0,
+                            lower: 0.0,
+                        })
+                        .upper(),
+                ),
+                MetricKind::Egress => MetricValue::Single(
+                    net_value
+                        .unwrap_or(MetricValue::Split {
+                            upper: 0.0,
+                            lower: 0.0,
+                        })
+                        .lower(),
+                ),
             };
-            values.insert(*metric, value.clamp(0.0, 1.0));
+            values.insert(*metric, clamp_value(value));
         }
 
         Ok(values)
@@ -83,51 +209,73 @@ impl Sampler {
         Ok(usage)
     }
 
-    fn sample_io(&mut self) -> io::Result<f64> {
+    fn sample_io(&mut self) -> io::Result<MetricValue> {
         let current = read_disk_counters()?;
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.disk_prev {
             let dt = now.duration_since(at).as_secs_f64();
-            let rate = rate_from_counters(prev.bytes, current.bytes, dt);
-            self.normalize_rate(MetricKind::Io, rate)
+            let read_rate = rate_from_counters(prev.read_bytes, current.read_bytes, dt);
+            let write_rate = rate_from_counters(prev.write_bytes, current.write_bytes, dt);
+            MetricValue::Split {
+                upper: self.normalize_rate(ScaleKey::IoWrite, write_rate),
+                lower: self.normalize_rate(ScaleKey::IoRead, read_rate),
+            }
         } else {
-            0.0
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            }
         };
         self.disk_prev = Some((current, now));
         Ok(usage)
     }
 
-    fn sample_net(&mut self, ingress: bool) -> io::Result<f64> {
+    fn sample_net(&mut self) -> io::Result<MetricValue> {
         let current = read_net_counters()?;
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.net_prev {
             let dt = now.duration_since(at).as_secs_f64();
-            let current_value = if ingress {
-                current.rx_bytes
-            } else {
-                current.tx_bytes
-            };
-            let prev_value = if ingress { prev.rx_bytes } else { prev.tx_bytes };
-            let rate = rate_from_counters(prev_value, current_value, dt);
-            self.normalize_rate(
-                if ingress {
-                    MetricKind::Ingress
-                } else {
-                    MetricKind::Egress
-                },
-                rate,
-            )
+            let ingress_rate = rate_from_counters(prev.rx_bytes, current.rx_bytes, dt);
+            let egress_rate = rate_from_counters(prev.tx_bytes, current.tx_bytes, dt);
+            MetricValue::Split {
+                upper: self.normalize_rate(ScaleKey::NetIngress, ingress_rate),
+                lower: self.normalize_rate(ScaleKey::NetEgress, egress_rate),
+            }
         } else {
-            0.0
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            }
         };
         self.net_prev = Some((current, now));
         Ok(usage)
     }
 
-    fn normalize_rate(&mut self, metric: MetricKind, rate: f64) -> f64 {
+    fn normalize_rate(&mut self, metric: ScaleKey, rate: f64) -> f64 {
         let entry = self.scale_maxima.entry(metric).or_insert(rate.max(1.0));
         *entry = (entry.mul_add(0.97, 0.0)).max(rate).max(1.0);
         (rate / *entry).clamp(0.0, 1.0)
+    }
+}
+
+impl GpuSample {
+    fn vram_fraction(self) -> Option<f64> {
+        let used = self.vram_used_bytes?;
+        let total = self.vram_total_bytes?;
+        if total == 0 {
+            return Some(0.0);
+        }
+        Some((used as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
+fn clamp_value(value: MetricValue) -> MetricValue {
+    match value {
+        MetricValue::Single(value) => MetricValue::Single(value.clamp(0.0, 1.0)),
+        MetricValue::Split { upper, lower } => MetricValue::Split {
+            upper: upper.clamp(0.0, 1.0),
+            lower: lower.clamp(0.0, 1.0),
+        },
     }
 }
 
@@ -220,7 +368,8 @@ fn read_disk_counters() -> io::Result<DiskCounters> {
 }
 
 fn parse_disk_counters(diskstats: &str) -> io::Result<DiskCounters> {
-    let mut sectors = 0_u64;
+    let mut read_sectors = 0_u64;
+    let mut write_sectors = 0_u64;
 
     for line in diskstats.lines() {
         let fields = line.split_whitespace().collect::<Vec<_>>();
@@ -233,11 +382,13 @@ fn parse_disk_counters(diskstats: &str) -> io::Result<DiskCounters> {
         }
         let sectors_read = fields[5].parse::<u64>().unwrap_or(0);
         let sectors_written = fields[9].parse::<u64>().unwrap_or(0);
-        sectors = sectors.saturating_add(sectors_read.saturating_add(sectors_written));
+        read_sectors = read_sectors.saturating_add(sectors_read);
+        write_sectors = write_sectors.saturating_add(sectors_written);
     }
 
     Ok(DiskCounters {
-        bytes: sectors.saturating_mul(512),
+        read_bytes: read_sectors.saturating_mul(512),
+        write_bytes: write_sectors.saturating_mul(512),
     })
 }
 
@@ -281,7 +432,14 @@ fn parse_net_counters(netdev: &str) -> io::Result<NetCounters> {
     })
 }
 
-fn read_gpu_usage() -> io::Result<f64> {
+fn read_gpu_sample() -> io::Result<GpuSample> {
+    if let Ok(sample) = read_nvidia_gpu_sample() {
+        return Ok(sample);
+    }
+    read_generic_gpu_sample()
+}
+
+fn read_generic_gpu_sample() -> io::Result<GpuSample> {
     let entries = fs::read_dir("/sys/class/drm")?;
     for entry in entries {
         let entry = entry?;
@@ -296,11 +454,56 @@ fn read_gpu_usage() -> io::Result<f64> {
         }
         let value = fs::read_to_string(path)?;
         if let Ok(percent) = value.trim().parse::<f64>() {
-            return Ok((percent / 100.0).clamp(0.0, 1.0));
+            return Ok(GpuSample {
+                utilization: Some((percent / 100.0).clamp(0.0, 1.0)),
+                ..GpuSample::default()
+            });
         }
     }
 
-    Ok(0.0)
+    Ok(GpuSample::default())
+}
+
+fn read_nvidia_gpu_sample() -> io::Result<GpuSample> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(io::Error::other("nvidia-smi failed"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_nvidia_smi_csv(&stdout)
+}
+
+fn parse_nvidia_smi_csv(stdout: &str) -> io::Result<GpuSample> {
+    let line = stdout
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing nvidia-smi output"))?;
+    let fields = line.split(',').map(|field| field.trim()).collect::<Vec<_>>();
+    if fields.len() < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid nvidia-smi output",
+        ));
+    }
+
+    let utilization = fields[0]
+        .parse::<f64>()
+        .map(|value| (value / 100.0).clamp(0.0, 1.0))
+        .ok();
+    let memory_used_mib = fields[1].parse::<u64>().ok();
+    let memory_total_mib = fields[2].parse::<u64>().ok();
+
+    Ok(GpuSample {
+        utilization,
+        vram_used_bytes: memory_used_mib.map(|mib| mib.saturating_mul(1024 * 1024)),
+        vram_total_bytes: memory_total_mib.map(|mib| mib.saturating_mul(1024 * 1024)),
+    })
 }
 
 #[cfg(test)]
@@ -336,7 +539,8 @@ mod tests {
                8       0 sda   1 2 3 4 5 6 7 8 9 10 11\n",
         )
         .unwrap();
-        assert_eq!(counters.bytes, (3 + 7) * 512);
+        assert_eq!(counters.read_bytes, 3 * 512);
+        assert_eq!(counters.write_bytes, 7 * 512);
     }
 
     #[test]
@@ -350,5 +554,21 @@ mod tests {
         .unwrap();
         assert_eq!(counters.rx_bytes, 100);
         assert_eq!(counters.tx_bytes, 200);
+    }
+
+    #[test]
+    fn split_values_headline_on_the_stronger_side() {
+        let value = MetricValue::Split {
+            upper: 0.2,
+            lower: 0.8,
+        };
+        assert!((value.headline_value() - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parses_nvidia_gpu_and_vram_separately() {
+        let sample = parse_nvidia_smi_csv("35, 1024, 4096\n").unwrap();
+        assert_eq!(sample.utilization, Some(0.35));
+        assert_eq!(sample.vram_fraction(), Some(0.25));
     }
 }

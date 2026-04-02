@@ -1,9 +1,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 
-use crate::color::{gradient_for, interpolate, paint};
+use crate::color::{gradient_for, interpolate, paint, split_gradients_for};
 use crate::config::{Align, Config};
-use crate::layout::{split_even_width, MetricKind};
+use crate::layout::{split_even_width, Layout, MetricKind};
+use crate::metrics::MetricValue;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Renderer {
@@ -15,13 +16,46 @@ const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', 
 const BRAILLE_LEFT_BITS: [u8; 4] = [6, 2, 1, 0];
 const BRAILLE_RIGHT_BITS: [u8; 4] = [7, 5, 4, 3];
 
-pub fn render_line(
+pub fn render_lines(
     config: &Config,
     width: usize,
     color_enabled: bool,
-    histories: &HashMap<MetricKind, VecDeque<f64>>,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+) -> Vec<String> {
+    let label_width = layout
+        .metrics()
+        .iter()
+        .map(|metric| metric.short_label().chars().count())
+        .max()
+        .unwrap_or(0);
+
+    layout
+        .rows()
+        .iter()
+        .map(|metrics| {
+            render_row(
+                config,
+                width,
+                color_enabled,
+                histories,
+                metrics,
+                values,
+                label_width,
+            )
+        })
+        .collect()
+}
+
+fn render_row(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
     metrics: &[MetricKind],
-    values: &HashMap<MetricKind, f64>,
+    values: &HashMap<MetricKind, MetricValue>,
+    label_width: usize,
 ) -> String {
     let prefix = config
         .label
@@ -39,12 +73,16 @@ pub fn render_line(
         .zip(widths)
         .map(|(metric, width)| {
             let history = histories.get(metric).cloned().unwrap_or_default();
-            let value = values.get(metric).copied().unwrap_or(0.0);
+            let value = values
+                .get(metric)
+                .copied()
+                .unwrap_or(MetricValue::Single(0.0));
             render_segment(
                 *metric,
                 &history,
                 value,
                 width,
+                label_width,
                 config.align,
                 config.renderer,
                 color_enabled,
@@ -57,45 +95,109 @@ pub fn render_line(
 
 fn render_segment(
     metric: MetricKind,
-    history: &VecDeque<f64>,
-    value: f64,
+    history: &VecDeque<MetricValue>,
+    value: MetricValue,
     width: usize,
+    label_width: usize,
     align: Align,
     renderer: Renderer,
     color_enabled: bool,
 ) -> String {
-    let label = metric.short_label();
-    let usage_text = format!("{:>3.0}%", value * 100.0);
-    let fixed = label.chars().count() + 1 + usage_text.chars().count();
+    let label = format!("{:<label_width$}", metric.short_label());
+    let usage_text = metric.format_value(value.headline_value());
+    let label_usage_separator = "";
+    let fixed = label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
 
-    if width <= fixed + 1 {
-        return truncate_visible(&format!("{label} {usage_text}"), width);
+    if width <= fixed {
+        return pad_or_trim_visible(&format!("{label}{label_usage_separator}{usage_text}"), width);
     }
 
-    let graph_width = width.saturating_sub(fixed + 2);
+    let graph_width = width.saturating_sub(fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
         Renderer::Braille => render_braille_graph(&samples, graph_width, metric, color_enabled),
         Renderer::Block => render_block_graph(&samples, graph_width, metric, color_enabled),
     };
 
-    match align {
-        Align::Left => format!("{label} {usage_text} {graph}"),
-        Align::Right => format!("{label} {graph} {usage_text}"),
-    }
+    pad_or_trim_visible(
+        &match align {
+            Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
+            Align::Right => format!("{label} {graph} {usage_text}"),
+        },
+        width,
+    )
 }
 
-fn truncate_visible(text: &str, width: usize) -> String {
-    text.chars().take(width).collect()
+fn pad_or_trim_visible(text: &str, width: usize) -> String {
+    let visible = visible_width(text);
+    if visible >= width {
+        return trim_visible(text, width);
+    }
+
+    let mut out = String::with_capacity(text.len() + width.saturating_sub(visible));
+    out.push_str(text);
+    out.push_str(&" ".repeat(width - visible));
+    out
+}
+
+fn trim_visible(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut visible = 0;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            out.push(ch);
+            out.push(chars.next().unwrap());
+            for next in chars.by_ref() {
+                out.push(next);
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if visible >= width {
+            break;
+        }
+
+        out.push(ch);
+        visible += 1;
+    }
+
+    if out.contains('\x1b') && !out.ends_with("\x1b[0m") {
+        out.push_str("\x1b[0m");
+    }
+
+    out
+}
+
+fn visible_width(text: &str) -> usize {
+    let mut width = 0;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+    }
+    width
 }
 
 fn render_block_graph(
-    samples: &[f64],
+    samples: &[MetricValue],
     width: usize,
     metric: MetricKind,
     color_enabled: bool,
 ) -> String {
-    let samples = resample(samples, width);
+    let samples = resample_channel(samples, width, MetricValue::headline_value);
     samples
         .into_iter()
         .map(|sample| {
@@ -108,19 +210,23 @@ fn render_block_graph(
 }
 
 fn render_braille_graph(
-    samples: &[f64],
+    samples: &[MetricValue],
     width: usize,
     metric: MetricKind,
     color_enabled: bool,
 ) -> String {
-    let samples = resample(samples, width.saturating_mul(2));
+    if metric.is_split() {
+        return render_split_braille_graph(samples, width, metric, color_enabled);
+    }
+
+    let samples = resample_channel(samples, width.saturating_mul(2), MetricValue::headline_value);
     let mut out = String::new();
 
     for chunk in samples.chunks(2) {
         let left = quantize_level(chunk.first().copied().unwrap_or(0.0));
         let right = quantize_level(chunk.get(1).copied().unwrap_or(0.0));
         let cell = braille_cell(left, right);
-        let intensity = chunk.iter().copied().sum::<f64>() / chunk.len().max(1) as f64;
+        let intensity = chunk.iter().copied().reduce(f64::max).unwrap_or(0.0);
         let color = interpolate(gradient_for(metric), intensity);
         out.push_str(&paint(&cell.to_string(), color, color_enabled));
     }
@@ -128,7 +234,46 @@ fn render_braille_graph(
     out
 }
 
-fn resample(samples: &[f64], target: usize) -> Vec<f64> {
+fn render_split_braille_graph(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    color_enabled: bool,
+) -> String {
+    let uppers = resample_channel(samples, width, MetricValue::upper);
+    let lowers = resample_channel(samples, width, MetricValue::lower);
+    let (upper_gradient, lower_gradient) =
+        split_gradients_for(metric).unwrap_or((gradient_for(metric), gradient_for(metric)));
+    let mut out = String::new();
+
+    for index in 0..width {
+        let upper = quantize_half_level(uppers.get(index).copied().unwrap_or(0.0));
+        let lower = quantize_half_level(lowers.get(index).copied().unwrap_or(0.0));
+        let upper_intensity = uppers
+            .get(index)
+            .copied()
+            .unwrap_or(0.0);
+        let lower_intensity = lowers.get(index).copied().unwrap_or(0.0);
+
+        out.push_str(&render_split_cell(
+            upper,
+            lower,
+            upper_intensity,
+            lower_intensity,
+            upper_gradient,
+            lower_gradient,
+            color_enabled,
+        ));
+    }
+
+    out
+}
+
+fn resample_channel(
+    samples: &[MetricValue],
+    target: usize,
+    channel: fn(MetricValue) -> f64,
+) -> Vec<f64> {
     if target == 0 {
         return Vec::new();
     }
@@ -137,7 +282,7 @@ fn resample(samples: &[f64], target: usize) -> Vec<f64> {
     }
     if samples.len() <= target {
         let mut out = vec![0.0; target - samples.len()];
-        out.extend_from_slice(samples);
+        out.extend(samples.iter().copied().map(channel));
         return out;
     }
 
@@ -146,12 +291,16 @@ fn resample(samples: &[f64], target: usize) -> Vec<f64> {
             let start = index * samples.len() / target;
             let end = ((index + 1) * samples.len() / target).max(start + 1);
             let slice = &samples[start..end];
-            slice.iter().sum::<f64>() / slice.len() as f64
+            slice.iter().copied().map(channel).sum::<f64>() / slice.len() as f64
         })
         .collect()
 }
 
 fn quantize_level(sample: f64) -> usize {
+    (sample.clamp(0.0, 1.0) * 4.0).round() as usize
+}
+
+fn quantize_half_level(sample: f64) -> usize {
     (sample.clamp(0.0, 1.0) * 4.0).round() as usize
 }
 
@@ -166,6 +315,47 @@ fn braille_cell(left_level: usize, right_level: usize) -> char {
     }
 
     char::from_u32(0x2800 + bits).unwrap_or(' ')
+}
+
+fn braille_half_cell(upper_level: usize, lower_level: usize) -> char {
+    const UPPER_BITS: [u8; 4] = [1, 4, 0, 3];
+    const LOWER_BITS: [u8; 4] = [2, 5, 6, 7];
+    let mut bits = 0_u32;
+
+    for bit in UPPER_BITS.iter().take(upper_level.min(4)) {
+        bits |= 1 << u32::from(*bit);
+    }
+    for bit in LOWER_BITS.iter().take(lower_level.min(4)) {
+        bits |= 1 << u32::from(*bit);
+    }
+
+    char::from_u32(0x2800 + bits).unwrap_or(' ')
+}
+
+fn render_split_cell(
+    upper_level: usize,
+    lower_level: usize,
+    upper_intensity: f64,
+    lower_intensity: f64,
+    upper_gradient: crate::color::Gradient,
+    lower_gradient: crate::color::Gradient,
+    color_enabled: bool,
+) -> String {
+    let mut out = String::new();
+    if upper_level > 0 {
+        let ch = braille_half_cell(upper_level, 0).to_string();
+        let color = interpolate(upper_gradient, upper_intensity);
+        out.push_str(&paint(&ch, color, color_enabled));
+    }
+    if lower_level > 0 {
+        let ch = braille_half_cell(0, lower_level).to_string();
+        let color = interpolate(lower_gradient, lower_intensity);
+        out.push_str(&paint(&ch, color, color_enabled));
+    }
+    if out.is_empty() {
+        out.push('⠀');
+    }
+    out
 }
 
 pub fn terminal_width() -> Option<usize> {
@@ -219,7 +409,17 @@ mod tests {
 
     #[test]
     fn braille_graph_renders_requested_width() {
-        let graph = render_braille_graph(&[0.25, 0.5, 0.75, 1.0], 2, MetricKind::Cpu, false);
+        let graph = render_braille_graph(
+            &[
+                MetricValue::Single(0.25),
+                MetricValue::Single(0.5),
+                MetricValue::Single(0.75),
+                MetricValue::Single(1.0),
+            ],
+            2,
+            MetricKind::Cpu,
+            false,
+        );
         assert_eq!(graph.chars().count(), 2);
     }
 
@@ -238,23 +438,424 @@ mod tests {
             show_help: false,
         };
         let mut histories = HashMap::new();
-        histories.insert(MetricKind::Cpu, VecDeque::from(vec![0.1, 0.2, 0.3]));
-        histories.insert(MetricKind::Gpu, VecDeque::from(vec![0.4, 0.5, 0.6]));
-        let values = HashMap::from([(MetricKind::Cpu, 0.3), (MetricKind::Gpu, 0.6)]);
+        histories.insert(
+            MetricKind::Cpu,
+            VecDeque::from(vec![
+                MetricValue::Single(0.1),
+                MetricValue::Single(0.2),
+                MetricValue::Single(0.3),
+            ]),
+        );
+        histories.insert(
+            MetricKind::Gpu,
+            VecDeque::from(vec![
+                MetricValue::Single(0.4),
+                MetricValue::Single(0.5),
+                MetricValue::Single(0.6),
+            ]),
+        );
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.3)),
+            (MetricKind::Gpu, MetricValue::Single(0.6)),
+        ]);
 
-        let line = render_line(
+        let layout = crate::layout::parse_layout_spec("cpu gpu").unwrap();
+        let lines = render_lines(
             &Config {
-                layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
+                layout: layout.clone(),
                 ..config
             },
             40,
             false,
             &histories,
-            &[MetricKind::Cpu, MetricKind::Gpu],
+            &layout,
             &values,
         );
 
+        let line = &lines[0];
         assert!(line.contains("cpu"));
         assert!(line.contains("gpu"));
+    }
+
+    #[test]
+    fn segment_rendering_uses_exact_requested_width() {
+        let segment = render_segment(
+            MetricKind::Cpu,
+            &VecDeque::from(vec![
+                MetricValue::Single(0.1),
+                MetricValue::Single(0.2),
+                MetricValue::Single(0.3),
+                MetricValue::Single(0.4),
+            ]),
+            MetricValue::Single(0.4),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert_eq!(visible_width(&segment), 18);
+    }
+
+    #[test]
+    fn whole_line_respects_requested_width() {
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: Some("host".to_owned()),
+            layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            width: Some(40),
+            once: true,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![
+                    MetricValue::Single(0.1),
+                    MetricValue::Single(0.2),
+                    MetricValue::Single(0.3),
+                    MetricValue::Single(0.4),
+                ]),
+            ),
+            (
+                MetricKind::Gpu,
+                VecDeque::from(vec![
+                    MetricValue::Single(0.5),
+                    MetricValue::Single(0.6),
+                    MetricValue::Single(0.7),
+                    MetricValue::Single(0.8),
+                ]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.4)),
+            (MetricKind::Gpu, MetricValue::Single(0.8)),
+        ]);
+
+        let lines = render_lines(
+            &config,
+            40,
+            false,
+            &histories,
+            &config.layout,
+            &values,
+        );
+
+        let line = &lines[0];
+        assert_eq!(visible_width(&line), 40);
+    }
+
+    #[test]
+    fn multiline_layout_renders_multiple_rows() {
+        let layout = crate::layout::parse_layout_spec("all").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            width: Some(80),
+            once: true,
+            show_help: false,
+        };
+        let histories = HashMap::new();
+        let values = HashMap::from([
+            (
+                MetricKind::Sys,
+                MetricValue::Split {
+                    upper: 0.1,
+                    lower: 0.2,
+                },
+            ),
+            (MetricKind::Cpu, MetricValue::Single(0.1)),
+            (MetricKind::Memory, MetricValue::Single(0.2)),
+            (
+                MetricKind::Gfx,
+                MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.4,
+                },
+            ),
+            (MetricKind::Gpu, MetricValue::Single(0.3)),
+            (MetricKind::Vram, MetricValue::Single(0.4)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.5,
+                    lower: 0.6,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.7,
+                    lower: 0.8,
+                },
+            ),
+            (MetricKind::Ingress, MetricValue::Single(0.7)),
+            (MetricKind::Egress, MetricValue::Single(0.8)),
+        ]);
+
+        let lines = render_lines(&config, 80, false, &histories, &layout, &values);
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(visible_width(&lines[0]), 80);
+        assert_eq!(visible_width(&lines[1]), 80);
+    }
+
+    #[test]
+    fn memory_segment_displays_percent_value() {
+        let segment = render_segment(
+            MetricKind::Memory,
+            &VecDeque::from(vec![
+                MetricValue::Single(0.1),
+                MetricValue::Single(0.2),
+                MetricValue::Single(0.3),
+                MetricValue::Single(0.375),
+            ]),
+            MetricValue::Single(0.375),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(segment.contains("ram"));
+        assert!(segment.contains(" 38%"));
+    }
+
+    #[test]
+    fn braille_cell_coloring_prefers_spike_over_average() {
+        let graph = render_braille_graph(
+            &[MetricValue::Single(0.05), MetricValue::Single(1.0)],
+            1,
+            MetricKind::Cpu,
+            true,
+        );
+        assert!(graph.contains("\x1b[38;2;169;219;255m"));
+    }
+
+    #[test]
+    fn colored_segment_keeps_label_uncolored() {
+        let segment = render_segment(
+            MetricKind::Cpu,
+            &VecDeque::from(vec![
+                MetricValue::Single(0.1),
+                MetricValue::Single(0.2),
+                MetricValue::Single(0.9),
+                MetricValue::Single(1.0),
+            ]),
+            MetricValue::Single(1.0),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            true,
+        );
+
+        assert!(segment.starts_with("cpu 100% "));
+        assert_eq!(visible_width(&segment), 18);
+    }
+
+    #[test]
+    fn split_metric_uses_top_and_bottom_halves() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 0.0,
+            }],
+            1,
+            MetricKind::Net,
+            false,
+        );
+        assert_eq!(graph.chars().count(), 1);
+        assert_ne!(graph, " ");
+    }
+
+    #[test]
+    fn net_uses_different_colors_for_upper_and_lower_halves() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            }],
+            1,
+            MetricKind::Net,
+            true,
+        );
+
+        assert!(graph.contains("\x1b[38;2;156;244;255m"));
+        assert!(graph.contains("\x1b[38;2;239;173;255m"));
+    }
+
+    #[test]
+    fn io_uses_different_colors_for_write_and_read_halves() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            }],
+            1,
+            MetricKind::Io,
+            true,
+        );
+
+        assert!(graph.contains("\x1b[38;2;255;224;120m"));
+        assert!(graph.contains("\x1b[38;2;235;255;143m"));
+    }
+
+    #[test]
+    fn sys_uses_cpu_and_ram_colors_for_upper_and_lower_halves() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            }],
+            1,
+            MetricKind::Sys,
+            true,
+        );
+
+        assert!(graph.contains("\x1b[38;2;169;219;255m"));
+        assert!(graph.contains("\x1b[38;2;255;176;176m"));
+    }
+
+    #[test]
+    fn gfx_uses_gpu_and_vram_colors_for_upper_and_lower_halves() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            }],
+            1,
+            MetricKind::Gfx,
+            true,
+        );
+
+        assert!(graph.contains("\x1b[38;2;173;255;191m"));
+        assert!(graph.contains("\x1b[38;2;181;255;214m"));
+    }
+
+    #[test]
+    fn renamed_labels_show_up_in_segments() {
+        let sys = render_segment(
+            MetricKind::Sys,
+            &VecDeque::from(vec![MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            }]),
+            MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            },
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let gpu = render_segment(
+            MetricKind::Gpu,
+            &VecDeque::from(vec![MetricValue::Single(0.5)]),
+            MetricValue::Single(0.5),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let gfx = render_segment(
+            MetricKind::Gfx,
+            &VecDeque::from(vec![MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            }]),
+            MetricValue::Split {
+                upper: 0.5,
+                lower: 0.25,
+            },
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let vram = render_segment(
+            MetricKind::Vram,
+            &VecDeque::from(vec![MetricValue::Single(0.5)]),
+            MetricValue::Single(0.5),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let ram = render_segment(
+            MetricKind::Memory,
+            &VecDeque::from(vec![MetricValue::Single(0.5)]),
+            MetricValue::Single(0.5),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(sys.contains("sys"));
+        assert!(gpu.contains("gpu"));
+        assert!(gfx.contains("gfx"));
+        assert!(vram.contains("vram"));
+        assert!(ram.contains("ram"));
+    }
+
+    #[test]
+    fn shorter_labels_are_padded_to_match_vram_width() {
+        let gpu = render_segment(
+            MetricKind::Gpu,
+            &VecDeque::from(vec![MetricValue::Single(0.5)]),
+            MetricValue::Single(0.5),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+        let vram = render_segment(
+            MetricKind::Vram,
+            &VecDeque::from(vec![MetricValue::Single(0.5)]),
+            MetricValue::Single(0.5),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(gpu.starts_with("gpu  50% "));
+        assert!(vram.starts_with("vram50% "));
+    }
+
+    #[test]
+    fn vram_omits_label_value_separator() {
+        let vram = render_segment(
+            MetricKind::Vram,
+            &VecDeque::from(vec![MetricValue::Single(1.0)]),
+            MetricValue::Single(1.0),
+            18,
+            4,
+            Align::Left,
+            Renderer::Braille,
+            false,
+        );
+
+        assert!(vram.starts_with("vram100% "));
     }
 }

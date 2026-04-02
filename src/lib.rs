@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use config::ColorMode;
 use layout::MetricKind;
+use metrics::MetricValue;
 
 pub fn run<I>(args: I) -> Result<(), String>
 where
@@ -30,6 +31,7 @@ where
 
     let mut histories = init_histories(requested_metrics, config.history);
     let mut stdout = io::stdout().lock();
+    let mut rendered_rows = 0;
 
     loop {
         if config.interval_ms > 0 {
@@ -41,7 +43,10 @@ where
             .map_err(|error| format!("nxu-cpu: {error}"))?;
 
         for metric in requested_metrics {
-            let value = values.get(metric).copied().unwrap_or(0.0);
+            let value = values
+                .get(metric)
+                .copied()
+                .unwrap_or(MetricValue::Single(0.0));
             if let Some(history) = histories.get_mut(metric) {
                 if history.len() == config.history.max(1) {
                     history.pop_front();
@@ -56,17 +61,31 @@ where
             .unwrap_or(80)
             .max(16);
         let color_enabled = colors_enabled(config.color_mode);
-        let line = render::render_line(
+        let lines = render::render_lines(
             &config,
             width,
             color_enabled,
             &histories,
-            requested_metrics,
+            &config.layout,
             &values,
         );
 
-        write!(stdout, "\r{line}\x1b[K").map_err(|error| error.to_string())?;
+        if rendered_rows > 0 {
+            write!(stdout, "\r").map_err(|error| error.to_string())?;
+            if rendered_rows > 1 {
+                write!(stdout, "\x1b[{}A", rendered_rows - 1)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+
+        for (index, line) in lines.iter().enumerate() {
+            write!(stdout, "{line}\x1b[K").map_err(|error| error.to_string())?;
+            if index + 1 < lines.len() {
+                writeln!(stdout).map_err(|error| error.to_string())?;
+            }
+        }
         stdout.flush().map_err(|error| error.to_string())?;
+        rendered_rows = lines.len();
 
         if config.once {
             writeln!(stdout).map_err(|error| error.to_string())?;
@@ -80,7 +99,7 @@ where
 fn init_histories(
     metrics: &[MetricKind],
     history_len: usize,
-) -> HashMap<MetricKind, VecDeque<f64>> {
+) -> HashMap<MetricKind, VecDeque<MetricValue>> {
     metrics
         .iter()
         .copied()
