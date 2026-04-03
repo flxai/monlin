@@ -52,7 +52,7 @@ monlin
 This is equivalent to:
 
 ```sh
-monlin --layout "all"
+monlin "all"
 ```
 
 ## Metrics
@@ -137,23 +137,23 @@ Rows are separated with:
 Simple one-row layouts:
 
 ```sh
-monlin --layout "cpu"
-monlin --layout "cpu ram"
-monlin --layout "sys gfx io net"
-monlin --layout "spc.hum"
+monlin "cpu"
+monlin "cpu ram"
+monlin "sys gfx io net"
+monlin "spc.hum"
 ```
 
 Multi-row layouts:
 
 ```sh
-monlin --layout "sys gfx io net, cpu ram in out"
-monlin --layout $'sys gfx io net\ncpu ram in out'
+monlin "sys gfx io net, cpu ram in out"
+monlin $'sys gfx io net\ncpu ram in out'
 ```
 
 Default full-layout expansion:
 
 ```sh
-monlin --layout "all"
+monlin "all"
 ```
 
 ### Views
@@ -166,9 +166,9 @@ Current views:
 Examples:
 
 ```sh
-monlin --layout "cpu.pct ram.pct"
-monlin --layout "net.hum io.hum"
-monlin --layout "in.hum out.hum"
+monlin "cpu.pct ram.pct"
+monlin "net.hum io.hum"
+monlin "in.hum out.hum"
 ```
 
 Rules:
@@ -180,8 +180,8 @@ Rules:
 Examples:
 
 ```sh
-monlin --layout "cpu.pct gpu.pct"
-monlin --layout "net.hum:14 io.hum:14"
+monlin "cpu.pct gpu.pct"
+monlin "net.hum:14 io.hum:14"
 ```
 
 ### Basis
@@ -193,8 +193,8 @@ monlin --layout "net.hum:14 io.hum:14"
 Examples:
 
 ```sh
-monlin --layout "cpu:12 ram:12 net"
-monlin --layout "net.hum:14 io.hum:14"
+monlin "cpu:12 ram:12 net"
+monlin "net.hum:14 io.hum:14"
 ```
 
 If an item has a basis but no grow value, it is treated as fixed-width.
@@ -202,7 +202,7 @@ If an item has a basis but no grow value, it is treated as fixed-width.
 Example:
 
 ```sh
-monlin --layout "cpu:12 ram:12 net:16"
+monlin "cpu:12 ram:12 net:16"
 ```
 
 ### Grow
@@ -214,8 +214,8 @@ monlin --layout "cpu:12 ram:12 net:16"
 Examples:
 
 ```sh
-monlin --layout "cpu/2 ram/1"
-monlin --layout "net.hum/3 io.hum/2"
+monlin "cpu/2 ram/1"
+monlin "net.hum/3 io.hum/2"
 ```
 
 If no basis and no grow are specified, the item behaves like a default flexible
@@ -224,8 +224,8 @@ item with grow `1`.
 So these are effectively equivalent in spirit:
 
 ```sh
-monlin --layout "cpu ram"
-monlin --layout "cpu/1 ram/1"
+monlin "cpu ram"
+monlin "cpu/1 ram/1"
 ```
 
 ### Basis Plus Grow
@@ -238,7 +238,7 @@ monlin --layout "cpu/1 ram/1"
 Example:
 
 ```sh
-monlin --layout "cpu:12/2 ram:10 net.hum/3"
+monlin "cpu:12/2 ram:10 net.hum/3"
 ```
 
 Interpretation:
@@ -262,9 +262,9 @@ This is the preferred way to mix fixed and flexible columns in one row.
 Examples:
 
 ```sh
-monlin --layout "cpu/2+18 ram/1+14"
-monlin --layout "net.hum/3+24 in.hum-10 out.hum-10"
-monlin --layout "cpu:12/2+20-8"
+monlin "cpu/2+18 ram/1+14"
+monlin "net.hum/3+24 in.hum-10 out.hum-10"
+monlin "cpu:12/2+20-8"
 ```
 
 ## Width Allocation Model
@@ -281,9 +281,9 @@ Each row behaves like a tiny flexbox:
 This is why the following all work naturally:
 
 ```sh
-monlin --layout "cpu ram net"
-monlin --layout "cpu:12 ram:12 net/2"
-monlin --layout "cpu:12/2 ram:10 net.hum/3+24"
+monlin "cpu ram net"
+monlin "cpu:12 ram:12 net/2"
+monlin "cpu:12/2 ram:10 net.hum/3+24"
 ```
 
 ## Row Behavior
@@ -296,8 +296,8 @@ If you do not specify explicit row breaks:
 Examples:
 
 ```sh
-monlin --layout "cpu ram gpu vram io net"
-monlin --layout "all"
+monlin "cpu ram gpu vram io net"
+monlin "all"
 ```
 
 If you do specify row breaks:
@@ -308,7 +308,7 @@ If you do specify row breaks:
 Example:
 
 ```sh
-monlin --layout "cpu ram, ram gpu cpu net"
+monlin "cpu ram, ram gpu cpu net"
 ```
 
 This becomes effectively:
@@ -321,73 +321,73 @@ This becomes effectively:
 CPU only:
 
 ```sh
-monlin --layout "cpu"
+monlin "cpu"
 ```
 
 Full default monitor:
 
 ```sh
 monlin
-monlin --layout "all"
+monlin "all"
 ```
 
 Compact top-level view:
 
 ```sh
-monlin --layout "sys gfx io net"
+monlin "sys gfx io net"
 ```
 
 Show only network and I/O:
 
 ```sh
-monlin --layout "io net in out"
-monlin --layout "io.hum:14 net.hum:14 in.hum out.hum"
+monlin "io net in out"
+monlin "io.hum:14 net.hum:14 in.hum out.hum"
 ```
 
 Mixed fixed and flexible widths:
 
 ```sh
-monlin --layout "cpu:12/2 ram:10 net.hum/3"
-monlin --layout "cpu:12/2+20-8 ram/1+14"
+monlin "cpu:12/2 ram:10 net.hum/3"
+monlin "cpu:12/2+20-8 ram/1+14"
 ```
 
 Storage headline variants:
 
 ```sh
-monlin --layout "spc"
-monlin --layout "spc.pct"
-monlin --layout "spc.hum"
+monlin "spc"
+monlin "spc.pct"
+monlin "spc.hum"
 ```
 
 Two explicit rows:
 
 ```sh
-monlin --layout "sys gfx io net, cpu ram in out"
+monlin "sys gfx io net, cpu ram in out"
 ```
 
 Right-aligned headline placement:
 
 ```sh
-monlin --align right --layout "sys gfx io net"
+monlin "sys gfx io net" --align right
 ```
 
 No color:
 
 ```sh
-monlin --color never --layout "all"
+monlin "all" --color never
 ```
 
 One-shot preview at fixed width:
 
 ```sh
-monlin --once --interval-ms 0 --width 96 --color never --layout "all"
+monlin "all" --once --interval-ms 0 --width 96 --color never
 ```
 
 ## CLI Flags
 
 Core flags:
 
-- `-l`, `--layout SPEC`
+- `LAYOUT` as positional arguments, e.g. `monlin "sys gfx io net"`
 - `--history N`
 - `--interval-ms N`
 - `--align left|right`
@@ -402,21 +402,21 @@ Core flags:
 Examples:
 
 ```sh
-monlin --history 512 --interval-ms 1000 --layout "all"
-monlin --label ono --layout "sys gfx io net"
-monlin --renderer block --layout "cpu ram"
-monlin --output i3bar --layout "all"
+monlin "all" --history 512 --interval-ms 1000
+monlin "sys gfx io net" --label ono
+monlin "cpu ram" --renderer block
+monlin "all" --output i3bar
 ```
 
 ## Positional Metrics
 
-Positional metrics still work as a short compatibility path:
+Short positional forms still work:
 
 ```sh
 monlin cpu ram net
 ```
 
-But `--layout` is the canonical interface, and all new examples should use it.
+Positional layout arguments are the canonical interface.
 
 ## Rendering Notes
 
@@ -500,6 +500,6 @@ And quick smoke tests are typically:
 
 ```sh
 nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never
-nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'all'
-nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never --layout 'cpu:12/2 ram:10 net.hum/3+24'
+nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never 'all'
+nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0 --width 96 --color never 'cpu:12/2 ram:10 net.hum/3+24'
 ```

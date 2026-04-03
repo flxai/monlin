@@ -50,7 +50,6 @@ where
     let mut align = Align::Left;
     let mut label = None;
     let mut stream_labels = None;
-    let mut layout_spec = None;
     let mut renderer = Renderer::Braille;
     let mut color_mode = ColorMode::Auto;
     let mut output_mode = OutputMode::Terminal;
@@ -95,9 +94,6 @@ where
                         .to_owned());
                 }
                 stream_labels = Some(labels);
-            }
-            "-l" | "--layout" => {
-                layout_spec = Some(parse_string(&args, &mut i, "--layout")?);
             }
             "--renderer" => {
                 renderer = match parse_string(&args, &mut i, "--renderer")?.as_str() {
@@ -150,13 +146,7 @@ where
             return Err("--width must be greater than zero".to_owned());
         }
     }
-    if layout_spec.is_some() && !positionals.is_empty() {
-        return Err("use either positional metrics or --layout, not both".to_owned());
-    }
-
-    let layout = if let Some(spec) = layout_spec {
-        parse_layout_spec(&spec)?
-    } else if positionals.is_empty() {
+    let layout = if positionals.is_empty() {
         Layout::default()
     } else {
         parse_layout_spec(&positionals.join(" "))?
@@ -202,8 +192,7 @@ fn parse_string(args: &[String], i: &mut usize, flag: &str) -> Result<String, St
 
 pub fn help_text() -> &'static str {
     "\
-Usage: monlin --layout SPEC [OPTIONS]
-       monlin [LEGACY_METRIC...]
+Usage: monlin [LAYOUT] [OPTIONS]
        producer | monlin
        producer | monlin -
 
@@ -212,7 +201,6 @@ Metrics:
   all
 
 Options:
-  -l, --layout SPEC     Primary layout specification, e.g. \"sys gfx io net\" or \"all\"
   --history N           Number of history samples to retain
   --interval-ms N       Sampling interval in milliseconds
   --align left|right    Place the percentage before or after the graph
@@ -231,7 +219,6 @@ Notes:
   Item syntax is metric[.view][:basis][/grow][+max][-min], e.g. net.hum:12/2+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
-  Positional metrics are kept only as a compatibility path for older invocations.
   If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
 "
 }
@@ -254,32 +241,25 @@ mod tests {
     }
 
     #[test]
-    fn parses_positional_metrics() {
+    fn parses_layout_from_positionals() {
         let config = parse(&["monlin", "cpu", "net"]);
         assert_eq!(config.layout.metrics(), &[MetricKind::Cpu, MetricKind::Net]);
     }
 
     #[test]
-    fn rejects_layout_and_positionals_together() {
+    fn rejects_removed_layout_flag() {
         let error = parse_args(
-            ["monlin", "--layout", "cpu gpu", "memory"]
+            ["monlin", "--layout", "cpu gpu"]
                 .into_iter()
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("either positional metrics or --layout"));
-    }
-
-    #[test]
-    fn accepts_short_layout_flag() {
-        let config = parse(&["monlin", "-l", "all"]);
-        assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
-        assert_eq!(config.layout.rows().len(), 2);
+        assert!(error.contains("unknown flag: --layout"));
     }
 
     #[test]
     fn bare_all_is_accepted() {
-        let config = parse(&["monlin", "--layout", "all"]);
+        let config = parse(&["monlin", "all"]);
         assert_eq!(config.layout.rows().len(), 2);
     }
 

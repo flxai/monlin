@@ -625,7 +625,6 @@ mod tests {
         let config = config::parse_args(
             [
                 "monlin",
-                "--layout",
                 "cpu",
                 "--history",
                 "1",
@@ -661,9 +660,7 @@ mod tests {
     #[test]
     fn run_terminal_once_executes_successfully() {
         let config = config::parse_args(
-            [
-                "monlin", "--layout", "cpu", "--width", "16", "--color", "never", "--once",
-            ]
+            ["monlin", "cpu", "--width", "16", "--color", "never", "--once"]
             .into_iter()
             .map(|item| item.to_string()),
         )
@@ -680,8 +677,15 @@ mod tests {
     fn run_i3bar_once_executes_successfully() {
         let config = config::parse_args(
             [
-                "monlin", "--layout", "cpu", "--width", "16", "--color", "always", "--output",
-                "i3bar", "--once",
+                "monlin",
+                "cpu",
+                "--width",
+                "16",
+                "--color",
+                "always",
+                "--output",
+                "i3bar",
+                "--once",
             ]
             .into_iter()
             .map(|item| item.to_string()),

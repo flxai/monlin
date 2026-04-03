@@ -12,7 +12,7 @@ fn help_exits_successfully() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("--layout"));
+    assert!(stdout.contains("Usage: monlin [LAYOUT] [OPTIONS]"));
 }
 
 #[test]
@@ -47,11 +47,10 @@ fn all_layout_renders_multiple_rows() {
             "80",
             "--color",
             "never",
-            "--layout",
             "all",
         ])
         .output()
-        .expect("failed to run monlin --layout all");
+        .expect("failed to run monlin all");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -71,7 +70,6 @@ fn i3bar_once_mode_emits_i3bar_protocol() {
             "never",
             "--output",
             "i3bar",
-            "--layout",
             "all",
         ])
         .output()
@@ -119,11 +117,10 @@ fn i3bar_once_mode_uses_one_block_per_row_without_ansi() {
             "always",
             "--output",
             "i3bar",
-            "--layout",
             "cpu, ram",
         ])
         .output()
-        .expect("failed to run monlin --output i3bar --layout 'cpu, ram'");
+        .expect("failed to run monlin --output i3bar 'cpu, ram'");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
