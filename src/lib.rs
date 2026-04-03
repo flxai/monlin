@@ -11,6 +11,7 @@ use std::io::{self, BufRead, IsTerminal, Write};
 use std::thread;
 use std::time::Duration;
 
+use clap_complete::{generate, Generator, Shell};
 use config::{ColorMode, OutputMode};
 use layout::MetricKind;
 use metrics::MetricValue;
@@ -30,12 +31,248 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         print!("{}", config::help_text());
         return Ok(());
     }
+    if let Some(shell) = config.print_completion {
+        print_completion(shell);
+        return Ok(());
+    }
+    if let Some(steps) = config.debug_colors_steps {
+        print_debug_colors(
+            steps,
+            config.colors.as_deref(),
+            colors_enabled(config.color_mode),
+        );
+        return Ok(());
+    }
 
     if let Some(result) = maybe_run_stream(&config)? {
         return result;
     }
 
     run_native(&config)
+}
+
+fn print_completion(shell: config::CompletionShell) {
+    let mut command = config::clap_command();
+    match shell {
+        config::CompletionShell::Bash => generate_to_stdout(Shell::Bash, &mut command),
+        config::CompletionShell::Elvish => generate_to_stdout(Shell::Elvish, &mut command),
+        config::CompletionShell::Fish => generate_to_stdout(Shell::Fish, &mut command),
+        config::CompletionShell::PowerShell => {
+            generate_to_stdout(Shell::PowerShell, &mut command)
+        }
+        config::CompletionShell::Zsh => print!("{}", zsh_completion_script()),
+    }
+}
+
+fn generate_to_stdout<G: Generator>(generator: G, command: &mut clap::Command) {
+    generate(generator, command, "monlin", &mut io::stdout());
+}
+
+fn zsh_completion_script() -> &'static str {
+    r#"#compdef monlin
+
+_monlin_layout() {
+  local cur token prefix base
+  local -a metrics
+  metrics=(
+    cpu
+    sys
+    gpu
+    vram
+    gfx
+    memory
+    mem
+    ram
+    storage
+    disk
+    space
+    spc
+    io
+    net
+    ingress
+    in
+    egress
+    out
+    all
+  )
+
+  cur="${words[CURRENT]}"
+  token="${cur##*,}"
+  prefix="${cur%$token}"
+
+  if [[ "$token" == *.* ]]; then
+    base="${token%%.*}"
+    case "$base" in
+      cpu|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out)
+        compadd -Q -P "${prefix}${base}." -- pct hum free
+        return
+        ;;
+    esac
+  fi
+
+  if [[ -n "$prefix" ]]; then
+    compadd -Q -P "$prefix" -- $metrics
+    return
+  fi
+
+  _describe -t metrics 'layout item' \
+    'cpu:CPU usage' \
+    'sys:CPU and RAM split' \
+    'gpu:GPU utilization' \
+    'vram:VRAM usage' \
+    'gfx:GPU and VRAM split' \
+    'memory:RAM usage' \
+    'mem:RAM usage' \
+    'ram:RAM usage' \
+    'storage:Storage usage' \
+    'disk:Storage usage' \
+    'space:Storage usage' \
+    'spc:Storage usage' \
+    'io:Disk I/O split' \
+    'net:Network traffic split' \
+    'ingress:Network ingress' \
+    'in:Network ingress' \
+    'egress:Network egress' \
+    'out:Network egress' \
+    'all:Canonical multi-row layout'
+}
+
+_monlin() {
+  local cur prev
+  cur="${words[CURRENT]}"
+  prev="${words[CURRENT-1]}"
+
+  local -a opts commands debug_commands shells
+  opts=(
+    '--history:Number of history samples to retain'
+    '--interval-ms:Sampling interval in milliseconds'
+    '--align:Place the value before or after the graph'
+    '--label:Prefix every rendered line with a label'
+    '--labels:Comma-separated labels for stdin stream columns'
+    '--stream-layout:Render streamed stdin as columns or lines'
+    '--space:How streamed columns allocate width'
+    '--renderer:Graph renderer to use'
+    '-c:Comma-separated visible-order colors: angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
+    '--colors:Comma-separated visible-order colors: angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
+    '--color:When to emit ANSI colors'
+    '--output:Output protocol to render'
+    '--width:Override the render width'
+    '--once:Render one frame and exit'
+    '-h:Show help text'
+    '--help:Show help text'
+    '--steps:Number of glyph samples to print per metric'
+  )
+  commands=(completion debug)
+  debug_commands=(colors)
+  shells=(bash elvish fish powershell zsh)
+
+  case "$prev" in
+    --align)
+      compadd left right
+      return
+      ;;
+    --stream-layout)
+      compadd columns lines
+      return
+      ;;
+    --space)
+      compadd graph segment
+      return
+      ;;
+    --renderer)
+      compadd braille block
+      return
+      ;;
+    --color)
+      compadd auto always never
+      return
+      ;;
+    --output)
+      compadd terminal i3bar
+      return
+      ;;
+    completion)
+      compadd $shells
+      return
+      ;;
+    debug)
+      compadd $debug_commands
+      return
+      ;;
+  esac
+
+  if [[ "${words[2]}" == "completion" ]]; then
+    if (( CURRENT == 3 )); then
+      compadd $shells
+    fi
+    return
+  fi
+
+  if [[ "${words[2]}" == "debug" ]]; then
+    if (( CURRENT == 3 )); then
+      compadd $debug_commands
+      return
+    fi
+    if [[ "$cur" == -* ]]; then
+      _describe -t options 'option' $opts
+    fi
+    return
+  fi
+
+  if [[ "$cur" == -* ]]; then
+    _describe -t options 'option' $opts
+    return
+  fi
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'command' \
+      'completion:Generate shell completion scripts' \
+      'debug:Debug rendering helpers'
+  fi
+  _monlin_layout
+}
+
+_monlin "$@"
+"#
+}
+
+fn print_debug_colors(
+    steps: usize,
+    colors: Option<&[crate::color::ColorSpec]>,
+    color_enabled: bool,
+) {
+    const METRICS: &[(MetricKind, &str)] = &[
+        (MetricKind::Cpu, "cpu"),
+        (MetricKind::Sys, "sys"),
+        (MetricKind::Memory, "ram"),
+        (MetricKind::Gpu, "gpu"),
+        (MetricKind::Gfx, "gfx"),
+        (MetricKind::Storage, "spc"),
+        (MetricKind::Io, "io"),
+        (MetricKind::Ingress, "in"),
+        (MetricKind::Egress, "out"),
+        (MetricKind::Net, "net"),
+    ];
+
+    let width = steps.max(1);
+    let effective_hues = crate::color::visible_hues(METRICS.len(), colors);
+    for (index, (metric, label)) in METRICS.iter().enumerate() {
+        let samples = (0..width)
+            .map(|index| {
+                if width == 1 {
+                    1.0
+                } else {
+                    index as f64 / (width - 1) as f64
+                }
+            })
+            .map(MetricValue::Single)
+            .collect::<Vec<_>>();
+        let item_hues =
+            crate::color::metric_hues_for_visible_hue(*metric, effective_hues[index]);
+        let graph =
+            render::render_braille_graph(&samples, width, *metric, Some(&item_hues), color_enabled);
+        println!("{label:<4} {graph}");
+    }
 }
 
 fn run_native(config: &config::Config) -> Result<(), String> {
@@ -613,6 +850,64 @@ mod tests {
         assert!(colors_enabled(ColorMode::Always));
         assert!(!colors_enabled(ColorMode::Never));
         assert_eq!(colors_enabled(ColorMode::Auto), io::stdout().is_terminal());
+    }
+
+    #[test]
+    fn zsh_completion_script_mentions_layout_views_and_space_option() {
+        let script = zsh_completion_script();
+        assert!(script.contains("pct hum free"));
+        assert!(script.contains("--space:How streamed columns allocate width"));
+    }
+
+    #[test]
+    fn validate_stream_labels_accepts_absent_labels_and_rejects_mismatches() {
+        let config = config::parse_args(["monlin"].into_iter().map(str::to_owned)).unwrap();
+        assert!(validate_stream_labels(&config, 2).is_ok());
+
+        let labeled = config::parse_args(
+            ["monlin", "--labels", "a,b"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        let error = validate_stream_labels(&labeled, 3).unwrap_err();
+        assert!(error.contains("--labels expected 3 entries"));
+    }
+
+    #[test]
+    fn update_stream_histories_clamps_and_truncates() {
+        let mut histories = init_stream_histories(2, 2);
+        update_stream_histories(&mut histories, &[1.2, -0.5], 2);
+        update_stream_histories(&mut histories, &[0.4, 0.6], 2);
+        update_stream_histories(&mut histories, &[0.8, 0.2], 2);
+
+        assert_eq!(histories[0].iter().copied().collect::<Vec<_>>(), vec![0.4, 0.8]);
+        assert_eq!(histories[1].iter().copied().collect::<Vec<_>>(), vec![0.6, 0.2]);
+    }
+
+    #[test]
+    fn read_next_stream_frame_skips_blank_lines_and_parses_percentages() {
+        let mut reader = io::Cursor::new(b"\n\n10 20 30\n".as_slice());
+        let frame = read_next_stream_frame(&mut reader, None).unwrap().unwrap();
+        assert_eq!(frame, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn read_next_stream_frame_rejects_invalid_values_and_column_changes() {
+        let mut invalid = io::Cursor::new(b"10 nope\n".as_slice());
+        let error = read_next_stream_frame(&mut invalid, None).unwrap_err();
+        assert!(error.contains("invalid stream value"));
+
+        let mut mismatch = io::Cursor::new(b"10 20 30\n".as_slice());
+        let error = read_next_stream_frame(&mut mismatch, Some(2)).unwrap_err();
+        assert!(error.contains("stream column count changed"));
+    }
+
+    #[test]
+    fn io_error_strings_use_expected_formatting() {
+        let error = io::Error::other("boom");
+        assert_eq!(io_to_string(io::Error::other("boom")), "boom");
+        assert_eq!(monlin_error(error), "monlin: boom");
     }
 
     #[test]

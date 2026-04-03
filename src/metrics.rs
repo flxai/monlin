@@ -32,6 +32,14 @@ struct GpuSample {
     vram_total_bytes: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MemorySample {
+    usage_ratio: f64,
+    used_bytes: u64,
+    available_bytes: u64,
+    total_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MetricValue {
     Single(f64),
@@ -47,6 +55,11 @@ pub struct Sample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeadlineValue {
     Scalar(f64),
+    Memory {
+        used_bytes: u64,
+        available_bytes: u64,
+        total_bytes: u64,
+    },
     Storage { used_bytes: u64, total_bytes: u64 },
 }
 
@@ -54,6 +67,7 @@ impl HeadlineValue {
     pub fn scalar(self) -> Option<f64> {
         match self {
             Self::Scalar(value) => Some(value),
+            Self::Memory { .. } => None,
             Self::Storage { .. } => None,
         }
     }
@@ -208,7 +222,7 @@ impl Sampler {
                 MetricKind::Cpu => cpu_value.map(MetricValue::Single),
                 MetricKind::Sys => Some(MetricValue::Split {
                     upper: cpu_value.unwrap_or(0.0),
-                    lower: memory_value.unwrap_or(0.0),
+                    lower: memory_value.map(|sample| sample.usage_ratio).unwrap_or(0.0),
                 }),
                 MetricKind::Gpu => gpu_value.map(MetricValue::Single),
                 MetricKind::Vram => vram_value.map(MetricValue::Single),
@@ -218,7 +232,7 @@ impl Sampler {
                     (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
                     (None, None) => None,
                 },
-                MetricKind::Memory => memory_value.map(MetricValue::Single),
+                MetricKind::Memory => memory_value.map(|sample| MetricValue::Single(sample.usage_ratio)),
                 MetricKind::Storage => {
                     storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
                 }
@@ -246,6 +260,11 @@ impl Sampler {
                     }
                     MetricKind::Storage => storage_value.map(|sample| HeadlineValue::Storage {
                         used_bytes: sample.used_bytes,
+                        total_bytes: sample.total_bytes,
+                    }),
+                    MetricKind::Memory => memory_value.map(|sample| HeadlineValue::Memory {
+                        used_bytes: sample.used_bytes,
+                        available_bytes: sample.available_bytes,
                         total_bytes: sample.total_bytes,
                     }),
                     _ => Some(HeadlineValue::Scalar(value.headline_value())),
@@ -457,12 +476,12 @@ fn cpu_usage(previous: CpuCounters, current: CpuCounters) -> f64 {
     (active_delta as f64 / total_delta as f64).clamp(0.0, 1.0)
 }
 
-fn read_memory_usage() -> io::Result<f64> {
+fn read_memory_usage() -> io::Result<MemorySample> {
     let meminfo = fs::read_to_string("/proc/meminfo")?;
     parse_memory_usage(&meminfo)
 }
 
-fn parse_memory_usage(meminfo: &str) -> io::Result<f64> {
+fn parse_memory_usage(meminfo: &str) -> io::Result<MemorySample> {
     let mut total: Option<u64> = None;
     let mut available: Option<u64> = None;
 
@@ -485,9 +504,22 @@ fn parse_memory_usage(meminfo: &str) -> io::Result<f64> {
     let available = available
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing MemAvailable"))?;
     if total == 0 {
-        return Ok(0.0);
+        return Ok(MemorySample {
+            usage_ratio: 0.0,
+            used_bytes: 0,
+            available_bytes: 0,
+            total_bytes: 0,
+        });
     }
-    Ok(((total - available) as f64 / total as f64).clamp(0.0, 1.0))
+    let total_bytes = total.saturating_mul(1024);
+    let available_bytes = available.min(total).saturating_mul(1024);
+    let used_bytes = total_bytes.saturating_sub(available_bytes);
+    Ok(MemorySample {
+        usage_ratio: (used_bytes as f64 / total_bytes as f64).clamp(0.0, 1.0),
+        used_bytes,
+        available_bytes,
+        total_bytes,
+    })
 }
 
 fn read_storage_usage(path: &str) -> io::Result<StorageSample> {
@@ -819,7 +851,10 @@ mod tests {
     fn memory_usage_is_parsed_from_meminfo() {
         let value =
             parse_memory_usage("MemTotal:       1000 kB\nMemAvailable:    250 kB\n").unwrap();
-        assert!((value - 0.75).abs() < f64::EPSILON);
+        assert!((value.usage_ratio - 0.75).abs() < f64::EPSILON);
+        assert_eq!(value.total_bytes, 1000 * 1024);
+        assert_eq!(value.available_bytes, 250 * 1024);
+        assert_eq!(value.used_bytes, 750 * 1024);
     }
 
     #[test]
@@ -831,7 +866,10 @@ mod tests {
     #[test]
     fn memory_usage_handles_zero_total() {
         let value = parse_memory_usage("MemTotal:       0 kB\nMemAvailable:    0 kB\n").unwrap();
-        assert_eq!(value, 0.0);
+        assert_eq!(value.usage_ratio, 0.0);
+        assert_eq!(value.total_bytes, 0);
+        assert_eq!(value.available_bytes, 0);
+        assert_eq!(value.used_bytes, 0);
     }
 
     #[test]
@@ -1044,7 +1082,9 @@ mod tests {
         let net = read_net_counters().unwrap();
         let gpu = read_generic_gpu_sample().unwrap();
 
-        assert!((0.0..=1.0).contains(&memory));
+        assert!((0.0..=1.0).contains(&memory.usage_ratio));
+        assert!(memory.total_bytes >= memory.used_bytes);
+        assert!(memory.total_bytes >= memory.available_bytes);
         assert!((0.0..=1.0).contains(&storage.usage_ratio));
         assert!(storage.total_bytes >= storage.used_bytes);
         let _ = disk;

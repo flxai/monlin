@@ -1,10 +1,32 @@
 use crate::layout::MetricKind;
+use palette::{Clamp, FromColor, Lab, LabHue, Lch, Mix, Srgb};
+use splines::{Interpolation, Key, Spline};
+use std::sync::OnceLock;
+
+pub type BaseColors = [ColorSpec; 6];
+pub type BaseHues = BaseColors;
+
+const DEFAULT_LOW_LIGHTNESS: f32 = 24.0;
+const DEFAULT_LOW_CHROMA: f32 = 38.0;
+const DEFAULT_HIGH_LIGHTNESS: f32 = 86.0;
+const DEFAULT_HIGH_CHROMA: f32 = 78.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Rgb {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColorSpec {
+    Angle(f32),
+    Lch {
+        lightness: f32,
+        chroma: f32,
+        hue: f32,
+    },
+    Rgb(Rgb),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14,153 +36,145 @@ pub struct Gradient {
 }
 
 pub fn gradient_for(metric: MetricKind) -> Gradient {
+    gradient_for_with_hues(metric, None)
+}
+
+pub fn gradient_for_with_hues(metric: MetricKind, hues: Option<&BaseHues>) -> Gradient {
     match metric {
-        MetricKind::Cpu => Gradient {
-            low: Rgb {
-                r: 40,
-                g: 78,
-                b: 150,
-            },
-            high: Rgb {
-                r: 169,
-                g: 219,
-                b: 255,
-            },
-        },
+        MetricKind::Cpu => wheel_gradient(0, hues),
         MetricKind::Sys => blend_gradients(
-            gradient_for(MetricKind::Cpu),
-            gradient_for(MetricKind::Memory),
+            gradient_for_with_hues(MetricKind::Cpu, hues),
+            gradient_for_with_hues(MetricKind::Memory, hues),
         ),
-        MetricKind::Gpu => Gradient {
-            low: Rgb {
-                r: 17,
-                g: 74,
-                b: 33,
-            },
-            high: Rgb {
-                r: 173,
-                g: 255,
-                b: 191,
-            },
-        },
-        MetricKind::Vram => Gradient {
-            low: Rgb {
-                r: 26,
-                g: 92,
-                b: 61,
-            },
-            high: Rgb {
-                r: 181,
-                g: 255,
-                b: 214,
-            },
-        },
+        MetricKind::Gpu => wheel_gradient(2, hues),
+        MetricKind::Vram => gradient_from_spec(vram_color(hues)),
         MetricKind::Gfx => blend_gradients(
-            gradient_for(MetricKind::Gpu),
-            gradient_for(MetricKind::Vram),
+            gradient_for_with_hues(MetricKind::Gpu, hues),
+            gradient_for_with_hues(MetricKind::Vram, hues),
         ),
-        MetricKind::Memory => Gradient {
-            low: Rgb {
-                r: 112,
-                g: 28,
-                b: 28,
-            },
-            high: Rgb {
-                r: 255,
-                g: 176,
-                b: 176,
-            },
-        },
-        MetricKind::Storage => Gradient {
-            low: Rgb {
-                r: 96,
-                g: 69,
-                b: 22,
-            },
-            high: Rgb {
-                r: 255,
-                g: 208,
-                b: 140,
-            },
-        },
-        MetricKind::Io => Gradient {
-            low: Rgb {
-                r: 136,
-                g: 104,
-                b: 24,
-            },
-            high: Rgb {
-                r: 255,
-                g: 236,
-                b: 153,
-            },
-        },
+        MetricKind::Memory => wheel_gradient(1, hues),
+        MetricKind::Storage => wheel_gradient(3, hues),
+        MetricKind::Io => blend_gradients(
+            gradient_for_with_hues(MetricKind::Storage, hues),
+            gradient_for_with_hues(MetricKind::Ingress, hues),
+        ),
         MetricKind::Net => blend_gradients(
-            gradient_for(MetricKind::Ingress),
-            gradient_for(MetricKind::Egress),
+            gradient_for_with_hues(MetricKind::Ingress, hues),
+            gradient_for_with_hues(MetricKind::Egress, hues),
         ),
-        MetricKind::Ingress => Gradient {
-            low: Rgb { r: 8, g: 68, b: 84 },
-            high: Rgb {
-                r: 156,
-                g: 244,
-                b: 255,
-            },
-        },
-        MetricKind::Egress => Gradient {
-            low: Rgb {
-                r: 105,
-                g: 44,
-                b: 130,
-            },
-            high: Rgb {
-                r: 239,
-                g: 173,
-                b: 255,
-            },
-        },
+        MetricKind::Ingress => wheel_gradient(4, hues),
+        MetricKind::Egress => wheel_gradient(5, hues),
     }
 }
 
 pub fn split_gradients_for(metric: MetricKind) -> Option<(Gradient, Gradient)> {
+    split_gradients_for_with_hues(metric, None)
+}
+
+pub fn visible_hues(count: usize, explicit: Option<&[ColorSpec]>) -> Vec<ColorSpec> {
+    if let Some(values) = explicit {
+        if !values.is_empty() {
+            return values.to_vec();
+        }
+    }
+
+    let canonical = default_base_hues();
+    if count <= canonical.len() {
+        return canonical[..count].to_vec();
+    }
+
+    (0..count)
+        .map(|index| ColorSpec::Angle(20.0 + (360.0 * index as f32 / count as f32)))
+        .collect()
+}
+
+pub fn metric_hues_for_visible_hue(metric: MetricKind, hue: ColorSpec) -> BaseHues {
+    let mut hues = default_base_hues();
+    match metric {
+        MetricKind::Cpu => hues[0] = hue,
+        MetricKind::Sys => {
+            hues[0] = hue;
+            hues[1] = hue;
+        }
+        MetricKind::Memory => hues[1] = hue,
+        MetricKind::Gpu => hues[2] = hue,
+        MetricKind::Vram | MetricKind::Gfx => {
+            hues[2] = hue;
+            hues[3] = hue;
+        }
+        MetricKind::Storage => hues[3] = hue,
+        MetricKind::Io => {
+            hues[3] = hue;
+            hues[4] = hue;
+        }
+        MetricKind::Ingress => hues[4] = hue,
+        MetricKind::Net => {
+            hues[4] = hue;
+            hues[5] = hue;
+        }
+        MetricKind::Egress => hues[5] = hue,
+    }
+    hues
+}
+
+pub fn automatic_hues_for_metrics(metrics: &[MetricKind]) -> BaseHues {
+    let mut hues = default_base_hues();
+    let canonical = default_base_hues();
+    let mut needed = [false; 6];
+
+    for metric in metrics {
+        for index in base_slots_for_metric(*metric) {
+            needed[*index] = true;
+        }
+    }
+
+    let indices = needed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, enabled)| enabled.then_some(index))
+        .collect::<Vec<_>>();
+
+    if indices.is_empty() {
+        return hues;
+    }
+
+    for (position, index) in indices.into_iter().enumerate() {
+        hues[index] = canonical[position];
+    }
+
+    hues
+}
+
+pub fn automatic_hues_for_stream(count: usize) -> BaseHues {
+    let mut hues = default_base_hues();
+    let canonical = default_base_hues();
+    let active = count.clamp(1, 6);
+    for index in 0..active {
+        hues[index] = canonical[index];
+    }
+    hues
+}
+
+pub fn split_gradients_for_with_hues(
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
+) -> Option<(Gradient, Gradient)> {
     match metric {
         MetricKind::Sys => Some((
-            gradient_for(MetricKind::Cpu),
-            gradient_for(MetricKind::Memory),
+            gradient_for_with_hues(MetricKind::Cpu, hues),
+            gradient_for_with_hues(MetricKind::Memory, hues),
         )),
         MetricKind::Gfx => Some((
-            gradient_for(MetricKind::Gpu),
-            gradient_for(MetricKind::Vram),
+            gradient_for_with_hues(MetricKind::Gpu, hues),
+            gradient_for_with_hues(MetricKind::Vram, hues),
         )),
         MetricKind::Net => Some((
-            gradient_for(MetricKind::Ingress),
-            gradient_for(MetricKind::Egress),
+            gradient_for_with_hues(MetricKind::Ingress, hues),
+            gradient_for_with_hues(MetricKind::Egress, hues),
         )),
         MetricKind::Io => Some((
-            Gradient {
-                low: Rgb {
-                    r: 156,
-                    g: 116,
-                    b: 24,
-                },
-                high: Rgb {
-                    r: 255,
-                    g: 224,
-                    b: 120,
-                },
-            },
-            Gradient {
-                low: Rgb {
-                    r: 124,
-                    g: 142,
-                    b: 40,
-                },
-                high: Rgb {
-                    r: 235,
-                    g: 255,
-                    b: 143,
-                },
-            },
+            gradient_for_with_hues(MetricKind::Storage, hues),
+            gradient_for_with_hues(MetricKind::Ingress, hues),
         )),
         _ => None,
     }
@@ -183,18 +197,10 @@ fn blend_rgb(left: Rgb, right: Rgb) -> Rgb {
 }
 
 pub fn interpolate(gradient: Gradient, t: f64) -> Rgb {
-    let clamped = emphasize(t.clamp(0.0, 1.0));
-    let lerp = |low: u8, high: u8| -> u8 {
-        let low = low as f64;
-        let high = high as f64;
-        (low + (high - low) * clamped).round() as u8
-    };
-
-    Rgb {
-        r: lerp(gradient.low.r, gradient.high.r),
-        g: lerp(gradient.low.g, gradient.high.g),
-        b: lerp(gradient.low.b, gradient.high.b),
-    }
+    let eased = emphasize(t.clamp(0.0, 1.0)) as f32;
+    let low = rgb_to_lab(gradient.low);
+    let high = rgb_to_lab(gradient.high);
+    lab_to_rgb(low.mix(high, eased))
 }
 
 pub fn paint(text: &str, color: Rgb, enabled: bool) -> String {
@@ -209,7 +215,152 @@ pub fn paint(text: &str, color: Rgb, enabled: bool) -> String {
 }
 
 fn emphasize(t: f64) -> f64 {
-    t.powf(1.8)
+    easing_spline().clamped_sample(t).unwrap_or(t)
+}
+
+fn easing_spline() -> &'static Spline<f64, f64> {
+    static SPLINE: OnceLock<Spline<f64, f64>> = OnceLock::new();
+    SPLINE.get_or_init(|| {
+        Spline::from_vec(vec![
+            Key::new(-0.35, 0.0, Interpolation::CatmullRom),
+            Key::new(0.0, 0.0, Interpolation::CatmullRom),
+            Key::new(0.35, 0.10, Interpolation::CatmullRom),
+            Key::new(0.70, 0.58, Interpolation::CatmullRom),
+            Key::new(1.0, 1.0, Interpolation::CatmullRom),
+            Key::new(1.35, 1.0, Interpolation::CatmullRom),
+        ])
+    })
+}
+
+fn wheel_gradient(index: usize, hues: Option<&BaseHues>) -> Gradient {
+    gradient_from_spec(base_color(index, hues))
+}
+
+fn base_color(index: usize, hues: Option<&BaseHues>) -> ColorSpec {
+    hues.map(|values| values[index])
+        .unwrap_or_else(|| default_base_hues()[index])
+}
+
+fn default_base_hues() -> BaseHues {
+    [
+        ColorSpec::Angle(20.0),
+        ColorSpec::Angle(80.0),
+        ColorSpec::Angle(140.0),
+        ColorSpec::Angle(200.0),
+        ColorSpec::Angle(260.0),
+        ColorSpec::Angle(320.0),
+    ]
+}
+
+fn base_slots_for_metric(metric: MetricKind) -> &'static [usize] {
+    match metric {
+        MetricKind::Cpu => &[0],
+        MetricKind::Sys => &[0, 1],
+        MetricKind::Memory => &[1],
+        MetricKind::Gpu => &[2],
+        MetricKind::Vram => &[2, 3],
+        MetricKind::Gfx => &[2, 3],
+        MetricKind::Storage => &[3],
+        MetricKind::Io => &[3, 4],
+        MetricKind::Ingress => &[4],
+        MetricKind::Net => &[4, 5],
+        MetricKind::Egress => &[5],
+    }
+}
+
+fn vram_color(hues: Option<&BaseHues>) -> ColorSpec {
+    let start = base_color(2, hues);
+    let end = base_color(3, hues);
+    match (start, end) {
+        (ColorSpec::Angle(a), ColorSpec::Angle(b)) => ColorSpec::Angle(circular_midpoint(a, b)),
+        _ => ColorSpec::Rgb(blend_rgb(spec_high_rgb(start), spec_high_rgb(end))),
+    }
+}
+
+fn circular_midpoint(a: f32, b: f32) -> f32 {
+    let mut delta = (b - a).rem_euclid(360.0);
+    if delta > 180.0 {
+        delta -= 360.0;
+    }
+    (a + delta / 2.0).rem_euclid(360.0)
+}
+
+fn gradient_from_spec(spec: ColorSpec) -> Gradient {
+    match spec {
+        ColorSpec::Angle(hue_degrees) => gradient_from_hue(hue_degrees),
+        ColorSpec::Lch {
+            lightness,
+            chroma,
+            hue,
+        } => gradient_from_lch(lightness, chroma, hue),
+        ColorSpec::Rgb(rgb) => gradient_from_rgb(rgb),
+    }
+}
+
+fn gradient_from_hue(hue_degrees: f32) -> Gradient {
+    Gradient {
+        low: lch_to_rgb(DEFAULT_LOW_LIGHTNESS, DEFAULT_LOW_CHROMA, hue_degrees),
+        high: lch_to_rgb(DEFAULT_HIGH_LIGHTNESS, DEFAULT_HIGH_CHROMA, hue_degrees),
+    }
+}
+
+fn gradient_from_lch(lightness: f32, chroma: f32, hue: f32) -> Gradient {
+    let high = lch_to_rgb(lightness, chroma, hue);
+    let low = lch_to_rgb(
+        (lightness * (DEFAULT_LOW_LIGHTNESS / DEFAULT_HIGH_LIGHTNESS)).clamp(0.0, 100.0),
+        chroma * (DEFAULT_LOW_CHROMA / DEFAULT_HIGH_CHROMA),
+        hue,
+    );
+    Gradient { low, high }
+}
+
+fn gradient_from_rgb(rgb: Rgb) -> Gradient {
+    let high_lch = rgb_to_lch(rgb);
+    let low = lch_to_rgb(
+        (high_lch.l * (DEFAULT_LOW_LIGHTNESS / DEFAULT_HIGH_LIGHTNESS)).clamp(0.0, 100.0),
+        high_lch.chroma * (DEFAULT_LOW_CHROMA / DEFAULT_HIGH_CHROMA),
+        high_lch.hue.into_degrees(),
+    );
+    Gradient { low, high: rgb }
+}
+
+fn spec_high_rgb(spec: ColorSpec) -> Rgb {
+    match spec {
+        ColorSpec::Angle(hue) => gradient_from_hue(hue).high,
+        ColorSpec::Lch {
+            lightness,
+            chroma,
+            hue,
+        } => lch_to_rgb(lightness, chroma, hue),
+        ColorSpec::Rgb(rgb) => rgb,
+    }
+}
+
+fn lch_to_rgb(lightness: f32, chroma: f32, hue_degrees: f32) -> Rgb {
+    let lch = Lch::new(lightness, chroma, LabHue::from_degrees(hue_degrees));
+    let lab = Lab::from_color(lch);
+    lab_to_rgb(lab)
+}
+
+fn rgb_to_lab(rgb: Rgb) -> Lab {
+    let rgb = Srgb::new(rgb.r, rgb.g, rgb.b).into_format::<f32>();
+    let linear = rgb.into_linear();
+    Lab::from_color(linear)
+}
+
+fn rgb_to_lch(rgb: Rgb) -> Lch {
+    Lch::from_color(rgb_to_lab(rgb))
+}
+
+fn lab_to_rgb(lab: Lab) -> Rgb {
+    let rgb_linear = palette::LinSrgb::from_color(lab);
+    let rgb: Srgb<f32> = Srgb::from_linear(rgb_linear).clamp();
+    let rgb = rgb.into_format::<u8>();
+    Rgb {
+        r: rgb.red,
+        g: rgb.green,
+        b: rgb.blue,
+    }
 }
 
 #[cfg(test)]
@@ -264,5 +415,140 @@ mod tests {
             gradient_for(MetricKind::Net),
             gradient_for(MetricKind::Ingress)
         );
+    }
+
+    #[test]
+    fn visible_hues_prefers_explicit_values() {
+        assert_eq!(
+            visible_hues(
+                3,
+                Some(&[
+                    ColorSpec::Angle(5.0),
+                    ColorSpec::Angle(15.0),
+                    ColorSpec::Angle(25.0)
+                ])
+            ),
+            vec![
+                ColorSpec::Angle(5.0),
+                ColorSpec::Angle(15.0),
+                ColorSpec::Angle(25.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_hues_spreads_evenly_past_canonical_set() {
+        assert_eq!(
+            visible_hues(8, None),
+            vec![
+                ColorSpec::Angle(20.0),
+                ColorSpec::Angle(65.0),
+                ColorSpec::Angle(110.0),
+                ColorSpec::Angle(155.0),
+                ColorSpec::Angle(200.0),
+                ColorSpec::Angle(245.0),
+                ColorSpec::Angle(290.0),
+                ColorSpec::Angle(335.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_metric_hues_follow_metric_shape() {
+        let sys = metric_hues_for_visible_hue(MetricKind::Sys, ColorSpec::Angle(42.0));
+        assert_eq!(sys[0], ColorSpec::Angle(42.0));
+        assert_eq!(sys[1], ColorSpec::Angle(42.0));
+
+        let io = metric_hues_for_visible_hue(MetricKind::Io, ColorSpec::Angle(210.0));
+        assert_eq!(io[3], ColorSpec::Angle(210.0));
+        assert_eq!(io[4], ColorSpec::Angle(210.0));
+
+        let net = metric_hues_for_visible_hue(MetricKind::Net, ColorSpec::Angle(275.0));
+        assert_eq!(net[4], ColorSpec::Angle(275.0));
+        assert_eq!(net[5], ColorSpec::Angle(275.0));
+    }
+
+    #[test]
+    fn automatic_hues_for_metrics_assigns_only_needed_slots() {
+        let hues = automatic_hues_for_metrics(&[MetricKind::Cpu, MetricKind::Net]);
+        assert_eq!(hues[0], ColorSpec::Angle(20.0));
+        assert_eq!(hues[4], ColorSpec::Angle(80.0));
+        assert_eq!(hues[5], ColorSpec::Angle(140.0));
+    }
+
+    #[test]
+    fn automatic_hues_for_stream_clamps_to_six_channels() {
+        assert_eq!(automatic_hues_for_stream(8), default_base_hues());
+    }
+
+    #[test]
+    fn split_gradients_exist_only_for_combined_metrics() {
+        assert!(split_gradients_for(MetricKind::Cpu).is_none());
+        assert!(split_gradients_for(MetricKind::Sys).is_some());
+        assert!(split_gradients_for(MetricKind::Gfx).is_some());
+        assert!(split_gradients_for(MetricKind::Io).is_some());
+        assert!(split_gradients_for(MetricKind::Net).is_some());
+    }
+
+    #[test]
+    fn circular_midpoint_wraps_across_zero() {
+        assert!((circular_midpoint(350.0, 10.0) - 0.0).abs() < f32::EPSILON);
+        assert!((circular_midpoint(10.0, 350.0) - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn vram_gradient_uses_midpoint_between_gpu_and_storage_hues() {
+        let hues = [
+            ColorSpec::Angle(20.0),
+            ColorSpec::Angle(80.0),
+            ColorSpec::Angle(140.0),
+            ColorSpec::Angle(220.0),
+            ColorSpec::Angle(260.0),
+            ColorSpec::Angle(320.0),
+        ];
+        let midpoint_gradient = gradient_from_hue(180.0);
+        assert_eq!(
+            gradient_for_with_hues(MetricKind::Vram, Some(&hues)),
+            midpoint_gradient
+        );
+    }
+
+    #[test]
+    fn explicit_rgb_spec_uses_given_high_color() {
+        let gradient = gradient_for_with_hues(
+            MetricKind::Cpu,
+            Some(&metric_hues_for_visible_hue(
+                MetricKind::Cpu,
+                ColorSpec::Rgb(Rgb {
+                    r: 0xff,
+                    g: 0x88,
+                    b: 0x00,
+                }),
+            )),
+        );
+        assert_eq!(
+            gradient.high,
+            Rgb {
+                r: 0xff,
+                g: 0x88,
+                b: 0x00,
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_lch_spec_roundtrips_into_distinct_gradient() {
+        let gradient = gradient_for_with_hues(
+            MetricKind::Cpu,
+            Some(&metric_hues_for_visible_hue(
+                MetricKind::Cpu,
+                ColorSpec::Lch {
+                    lightness: 86.0,
+                    chroma: 78.0,
+                    hue: 20.0,
+                },
+            )),
+        );
+        assert_eq!(gradient.high, gradient_from_hue(20.0).high);
     }
 }

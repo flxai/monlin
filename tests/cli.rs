@@ -16,6 +16,50 @@ fn help_exits_successfully() {
 }
 
 #[test]
+fn zsh_completion_can_be_printed() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args(["completion", "zsh"])
+        .output()
+        .expect("failed to run monlin completion zsh");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("#compdef monlin"));
+    assert!(stdout.contains("_monlin_layout"));
+    assert!(stdout.contains("pct hum free"));
+    assert!(stdout.contains("--space:How streamed columns allocate width"));
+}
+
+#[test]
+fn other_shell_completions_can_be_printed() {
+    for shell in ["bash", "fish", "elvish", "power-shell"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+            .args(["completion", shell])
+            .output()
+            .unwrap_or_else(|_| panic!("failed to run monlin completion {shell}"));
+
+        assert!(output.status.success(), "completion failed for {shell}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.trim().is_empty(), "empty completion for {shell}");
+    }
+}
+
+#[test]
+fn debug_colors_command_prints_metric_rows() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args(["--color", "never", "debug", "colors", "--steps", "4"])
+        .output()
+        .expect("failed to run monlin debug colors");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(lines.len() >= 10, "unexpected debug colors output: {stdout}");
+    assert!(lines.iter().any(|line| line.starts_with("cpu ")));
+    assert!(lines.iter().any(|line| line.starts_with("net ")));
+}
+
+#[test]
 fn once_mode_exits_successfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([

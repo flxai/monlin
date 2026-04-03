@@ -15,6 +15,7 @@
         version = "0.2.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
+        nativeBuildInputs = [pkgs.installShellFiles];
 
         meta = with pkgs.lib; {
           description = "Compact terminal monitor for nxu panes and shells";
@@ -26,6 +27,10 @@
       monlin = pkgs.rustPlatform.buildRustPackage (commonArgs // {
         pname = "monlin";
         doCheck = true;
+        postInstall = ''
+          installShellCompletion --cmd monlin \
+            --zsh <("$out/bin/monlin" completion zsh)
+        '';
       });
       fmt = pkgs.runCommand "monlin-fmt-check" {
         nativeBuildInputs = [pkgs.cargo pkgs.rustfmt];
