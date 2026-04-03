@@ -176,7 +176,7 @@ _monlin() {
       return
       ;;
     --space)
-      compadd graph segment
+      compadd stable graph segment
       return
       ;;
     --renderer)

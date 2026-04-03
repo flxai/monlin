@@ -242,6 +242,15 @@ fn render_stream_columns_line(
                 metric,
                 stream_hues[index % stream_hues.len()],
             );
+            let display_usage_text = match config.space {
+                Space::Stable => {
+                    format!(
+                        "{usage_text:>width$}",
+                        width = stable_stream_usage_width(&usage_text)
+                    )
+                }
+                Space::Graph | Space::Segment => usage_text.clone(),
+            };
             let graph = match config.renderer {
                 Renderer::Braille => {
                     render_braille_graph(
@@ -262,7 +271,7 @@ fn render_stream_columns_line(
                     )
                 }
             };
-            let text_only = format!("{label}{separator}{usage_text}");
+            let text_only = format!("{label}{separator}{display_usage_text}");
 
             if graph_width == 0 {
                 return pad_or_trim_visible(&text_only, segment_width);
@@ -270,12 +279,12 @@ fn render_stream_columns_line(
 
             pad_or_trim_visible(
                 &match config.align {
-                    Align::Left => format!("{label}{separator}{usage_text} {graph}"),
+                    Align::Left => format!("{label}{separator}{display_usage_text} {graph}"),
                     Align::Right => {
                         if label.is_empty() {
-                            format!("{graph} {usage_text}")
+                            format!("{graph} {display_usage_text}")
                         } else {
-                            format!("{label} {graph} {usage_text}")
+                            format!("{label} {graph} {display_usage_text}")
                         }
                     }
                 },
@@ -299,6 +308,33 @@ fn stream_column_widths(
 
     let separators = count.saturating_sub(1);
     match space {
+        Space::Stable => {
+            let fixed_total = segments
+                .iter()
+                .map(|(_, label, separator, usage_text, _)| {
+                    label.chars().count()
+                        + separator.chars().count()
+                        + stable_stream_usage_width(usage_text)
+                        + 1
+                })
+                .sum::<usize>();
+            let graph_space = inner_width
+                .saturating_sub(separators)
+                .saturating_sub(fixed_total);
+            let graph_widths = split_stream_widths(graph_space, count);
+            let segment_widths = segments
+                .iter()
+                .zip(graph_widths.iter().copied())
+                .map(|((_, label, separator, usage_text, _), graph_width)| {
+                    label.chars().count()
+                        + separator.chars().count()
+                        + stable_stream_usage_width(usage_text)
+                        + usize::from(graph_width > 0)
+                        + graph_width
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
         Space::Graph => {
             let fixed_total = segments.iter().map(|(_, _, _, _, fixed)| fixed + 1).sum::<usize>();
             let graph_space = inner_width
@@ -331,6 +367,10 @@ fn stream_column_widths(
             (segment_widths, graph_widths)
         }
     }
+}
+
+fn stable_stream_usage_width(usage_text: &str) -> usize {
+    usage_text.chars().count().max(4)
 }
 
 fn render_row(
@@ -1472,11 +1512,48 @@ mod tests {
             ),
         ];
 
+        let (segment_widths_stable, graph_widths_stable) =
+            stream_column_widths(Space::Stable, 120, &segments);
         let (_, graph_widths_graph) = stream_column_widths(Space::Graph, 120, &segments);
         let (_, graph_widths_segment) = stream_column_widths(Space::Segment, 120, &segments);
 
+        assert_eq!(graph_widths_stable[0], graph_widths_stable[1]);
+        assert!(segment_widths_stable[1] > segment_widths_stable[0]);
         assert_eq!(graph_widths_graph[0], graph_widths_graph[1]);
         assert!(graph_widths_segment[0] > graph_widths_segment[1]);
+    }
+
+    #[test]
+    fn stable_stream_spacing_reserves_prefix_width_for_short_percentages() {
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout: Layout::default(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(40),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = vec![
+            VecDeque::from(vec![0.09, 0.09]),
+            VecDeque::from(vec![1.0, 1.0]),
+        ];
+        let values = vec![0.09, 1.0];
+
+        let line = render_stream_columns_line(&config, 40, false, &histories, &values);
+        assert!(line.contains("a   9% "));
+        assert!(line.contains("b 100% "));
     }
 
     #[test]

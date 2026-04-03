@@ -47,6 +47,7 @@ pub enum StreamLayout {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Space {
+    Stable,
     Graph,
     Segment,
 }
@@ -158,8 +159,8 @@ struct Cli {
     #[arg(
         long = "space",
         value_enum,
-        default_value_t = Space::Graph,
-        help = "How streamed columns allocate width: equal graph space or equal total segment space"
+        default_value_t = Space::Stable,
+        help = "How streamed columns allocate width: stable prefixes, compact equal graph space, or equal total segment space"
     )]
     space: Space,
 
@@ -433,6 +434,12 @@ mod tests {
     fn parses_space_mode() {
         let config = parse(&["monlin", "--space", "segment"]);
         assert_eq!(config.space, Space::Segment);
+    }
+
+    #[test]
+    fn defaults_to_stable_stream_spacing() {
+        let config = parse(&["monlin"]);
+        assert_eq!(config.space, Space::Stable);
     }
 
     #[test]
