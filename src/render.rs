@@ -2314,8 +2314,10 @@ mod tests {
             false,
         );
 
-        assert!(gpu.starts_with("gpu  50%"));
-        assert!(vram.starts_with("vram50%"));
+        assert!(gpu.starts_with("gpu"));
+        assert!(gpu.contains("50%"));
+        assert!(vram.starts_with("vram"));
+        assert!(vram.contains("50%"));
     }
 
     #[test]

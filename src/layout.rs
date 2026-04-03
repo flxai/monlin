@@ -18,6 +18,7 @@ pub enum LayoutView {
     Default,
     Pct,
     Hum,
+    Free,
 }
 
 impl LayoutView {
@@ -25,6 +26,7 @@ impl LayoutView {
         match token {
             "pct" => Some(Self::Pct),
             "hum" => Some(Self::Hum),
+            "free" => Some(Self::Free),
             _ => None,
         }
     }
@@ -71,13 +73,12 @@ impl MetricKind {
     pub fn default_view(self) -> LayoutView {
         match self {
             Self::Io | Self::Net | Self::Ingress | Self::Egress => LayoutView::Hum,
+            Self::Memory | Self::Storage => LayoutView::Free,
             Self::Cpu
             | Self::Sys
             | Self::Gpu
             | Self::Vram
-            | Self::Gfx
-            | Self::Memory
-            | Self::Storage => LayoutView::Pct,
+            | Self::Gfx => LayoutView::Pct,
         }
     }
 
@@ -98,6 +99,18 @@ impl MetricKind {
                 Self::Io | Self::Net | Self::Ingress | Self::Egress => {
                     humanize_rate(headline.scalar().unwrap_or(0.0))
                 }
+                Self::Memory => match headline {
+                    crate::metrics::HeadlineValue::Memory {
+                        used_bytes,
+                        total_bytes,
+                        ..
+                    } => format!(
+                        "{}/{}",
+                        humanize_bytes(*used_bytes as f64),
+                        humanize_bytes(*total_bytes as f64)
+                    ),
+                    _ => format_percent(self, normalized),
+                },
                 Self::Storage => match headline {
                     crate::metrics::HeadlineValue::Storage {
                         used_bytes,
@@ -107,6 +120,22 @@ impl MetricKind {
                         humanize_bytes(*used_bytes as f64),
                         humanize_bytes(*total_bytes as f64)
                     ),
+                    _ => format_percent(self, normalized),
+                },
+                _ => format_percent(self, normalized),
+            },
+            LayoutView::Free => match self {
+                Self::Memory => match headline {
+                    crate::metrics::HeadlineValue::Memory {
+                        available_bytes, ..
+                    } => humanize_bytes(*available_bytes as f64),
+                    _ => format_percent(self, normalized),
+                },
+                Self::Storage => match headline {
+                    crate::metrics::HeadlineValue::Storage {
+                        used_bytes,
+                        total_bytes,
+                    } => humanize_bytes(total_bytes.saturating_sub(*used_bytes) as f64),
                     _ => format_percent(self, normalized),
                 },
                 _ => format_percent(self, normalized),
@@ -128,7 +157,7 @@ fn format_percent(metric: MetricKind, value: f64) -> String {
         | MetricKind::Io
         | MetricKind::Net
         | MetricKind::Ingress
-        | MetricKind::Egress => format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0),
+        | MetricKind::Egress => format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
     }
 }
 
@@ -273,35 +302,31 @@ impl Layout {
     where
         F: FnMut(MetricKind) -> bool,
     {
-        let rows = self
+        let items = self
             .rows
             .iter()
-            .map(|row| {
-                row.iter()
-                    .copied()
-                    .filter(|item| keep(item.metric()))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|row| !row.is_empty())
+            .flat_map(|row| row.iter().copied())
+            .filter(|item| keep(item.metric()))
             .collect::<Vec<_>>();
 
+        let rows = split_even_rows_items(&items, self.rows.len().max(1));
         Self::from_rows(rows)
     }
 }
 
 pub fn all_metrics() -> &'static [MetricKind] {
     &[
-        MetricKind::Sys,
         MetricKind::Cpu,
         MetricKind::Memory,
         MetricKind::Storage,
-        MetricKind::Gfx,
-        MetricKind::Gpu,
-        MetricKind::Vram,
         MetricKind::Io,
         MetricKind::Net,
+        MetricKind::Sys,
+        MetricKind::Gfx,
         MetricKind::Ingress,
         MetricKind::Egress,
+        MetricKind::Gpu,
+        MetricKind::Vram,
     ]
 }
 
@@ -587,14 +612,18 @@ mod tests {
     }
 
     #[test]
-    fn memory_values_are_formatted_as_percent() {
+    fn memory_pct_view_formats_as_percent() {
         assert_eq!(
             MetricKind::Memory.format_value(
-                LayoutView::Default,
+                LayoutView::Pct,
                 0.375,
-                &crate::metrics::HeadlineValue::Scalar(0.375),
+                &crate::metrics::HeadlineValue::Memory {
+                    used_bytes: 1536,
+                    available_bytes: 2560,
+                    total_bytes: 4096,
+                },
             ),
-            " 38%"
+            "38%"
         );
     }
 
@@ -638,6 +667,22 @@ mod tests {
     }
 
     #[test]
+    fn memory_human_view_formats_used_over_total() {
+        assert_eq!(
+            MetricKind::Memory.format_value(
+                LayoutView::Hum,
+                0.5,
+                &crate::metrics::HeadlineValue::Memory {
+                    used_bytes: 1536 * 1024 * 1024,
+                    available_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+            ),
+            "1.5G/2.0G"
+        );
+    }
+
+    #[test]
     fn memory_and_gpu_use_new_labels() {
         assert_eq!(MetricKind::Memory.short_label(), "ram");
         assert_eq!(MetricKind::Storage.short_label(), "spc");
@@ -651,13 +696,15 @@ mod tests {
     fn parses_known_views_and_rejects_unknown_ones() {
         assert_eq!(LayoutView::parse("pct"), Some(LayoutView::Pct));
         assert_eq!(LayoutView::parse("hum"), Some(LayoutView::Hum));
+        assert_eq!(LayoutView::parse("free"), Some(LayoutView::Free));
         assert_eq!(LayoutView::parse("wat"), None);
     }
 
     #[test]
     fn default_views_match_metric_families() {
         assert_eq!(MetricKind::Cpu.default_view(), LayoutView::Pct);
-        assert_eq!(MetricKind::Storage.default_view(), LayoutView::Pct);
+        assert_eq!(MetricKind::Memory.default_view(), LayoutView::Free);
+        assert_eq!(MetricKind::Storage.default_view(), LayoutView::Free);
         assert_eq!(MetricKind::Net.default_view(), LayoutView::Hum);
         assert_eq!(MetricKind::Ingress.default_view(), LayoutView::Hum);
     }
@@ -684,17 +731,17 @@ mod tests {
             (
                 "all",
                 vec![
-                    MetricKind::Sys,
                     MetricKind::Cpu,
                     MetricKind::Memory,
                     MetricKind::Storage,
-                    MetricKind::Gfx,
-                    MetricKind::Gpu,
-                    MetricKind::Vram,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::Sys,
+                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
                 ],
                 vec![6, 5],
             ),
@@ -702,33 +749,33 @@ mod tests {
                 "cpu all ram",
                 vec![
                     MetricKind::Cpu,
-                    MetricKind::Sys,
                     MetricKind::Memory,
                     MetricKind::Storage,
-                    MetricKind::Gfx,
-                    MetricKind::Gpu,
-                    MetricKind::Vram,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::Sys,
+                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
                 ],
                 vec![6, 5],
             ),
             (
                 "all cpu ram net cpu",
                 vec![
-                    MetricKind::Sys,
                     MetricKind::Cpu,
                     MetricKind::Memory,
                     MetricKind::Storage,
-                    MetricKind::Gfx,
-                    MetricKind::Gpu,
-                    MetricKind::Vram,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::Sys,
+                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
+                    MetricKind::Gpu,
+                    MetricKind::Vram,
                 ],
                 vec![6, 5],
             ),
@@ -750,16 +797,16 @@ mod tests {
             layout.metrics(),
             &[
                 MetricKind::Cpu,
-                MetricKind::Sys,
                 MetricKind::Memory,
                 MetricKind::Storage,
-                MetricKind::Gfx,
-                MetricKind::Gpu,
-                MetricKind::Vram,
                 MetricKind::Io,
                 MetricKind::Net,
+                MetricKind::Sys,
+                MetricKind::Gfx,
                 MetricKind::Ingress,
                 MetricKind::Egress,
+                MetricKind::Gpu,
+                MetricKind::Vram,
             ]
         );
         assert_eq!(layout.rows().len(), 2);
@@ -822,13 +869,8 @@ mod tests {
                 .map(|row| row.iter().map(|item| item.metric()).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
             &[
-                vec![
-                    MetricKind::Sys,
-                    MetricKind::Gfx,
-                    MetricKind::Io,
-                    MetricKind::Net,
-                ],
-                vec![MetricKind::Cpu, MetricKind::Gpu],
+                vec![MetricKind::Sys, MetricKind::Gfx, MetricKind::Io],
+                vec![MetricKind::Net, MetricKind::Cpu, MetricKind::Gpu],
             ]
         );
     }
@@ -899,13 +941,17 @@ mod tests {
                 ],
             ),
             (
-                "spc.pct spc.hum net.pct net.hum",
-                vec![vec![
-                    (MetricKind::Storage, LayoutView::Pct, None, 1, None, None),
-                    (MetricKind::Storage, LayoutView::Hum, None, 1, None, None),
-                    (MetricKind::Net, LayoutView::Pct, None, 1, None, None),
-                    (MetricKind::Net, LayoutView::Hum, None, 1, None, None),
-                ]],
+                "ram.free spc.pct spc.hum spc.free net.pct net.hum",
+                vec![
+                    vec![
+                        (MetricKind::Memory, LayoutView::Free, None, 1, None, None),
+                        (MetricKind::Storage, LayoutView::Pct, None, 1, None, None),
+                        (MetricKind::Storage, LayoutView::Hum, None, 1, None, None),
+                        (MetricKind::Storage, LayoutView::Free, None, 1, None, None),
+                        (MetricKind::Net, LayoutView::Pct, None, 1, None, None),
+                    ],
+                    vec![(MetricKind::Net, LayoutView::Hum, None, 1, None, None)],
+                ],
             ),
         ];
 
@@ -967,14 +1013,32 @@ mod tests {
 
     #[test]
     fn same_metric_with_different_views_can_coexist() {
-        let layout = parse_layout_spec("spc.pct spc.hum").unwrap();
+        let layout = parse_layout_spec("spc.pct spc.hum spc.free").unwrap();
         assert_eq!(layout.rows().len(), 1);
-        assert_eq!(layout.rows()[0].len(), 2);
+        assert_eq!(layout.rows()[0].len(), 3);
         assert_eq!(layout.rows()[0][0].metric(), MetricKind::Storage);
         assert_eq!(layout.rows()[0][0].view(), LayoutView::Pct);
         assert_eq!(layout.rows()[0][1].metric(), MetricKind::Storage);
         assert_eq!(layout.rows()[0][1].view(), LayoutView::Hum);
+        assert_eq!(layout.rows()[0][2].metric(), MetricKind::Storage);
+        assert_eq!(layout.rows()[0][2].view(), LayoutView::Free);
         assert_eq!(layout.metrics(), &[MetricKind::Storage]);
+    }
+
+    #[test]
+    fn memory_free_view_formats_available_bytes() {
+        assert_eq!(
+            MetricKind::Memory.format_value(
+                LayoutView::Free,
+                0.5,
+                &crate::metrics::HeadlineValue::Memory {
+                    used_bytes: 1536 * 1024 * 1024,
+                    available_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+            ),
+            "512M"
+        );
     }
 
     #[test]
@@ -991,7 +1055,7 @@ mod tests {
                 MetricKind::Net,
                 LayoutView::Pct,
                 crate::metrics::HeadlineValue::Scalar(3.0 * 1024.0 * 1024.0),
-                " 50%",
+                "50%",
             ),
             (
                 MetricKind::Net,
@@ -1006,13 +1070,42 @@ mod tests {
                     used_bytes: 512 * 1024 * 1024,
                     total_bytes: 2 * 1024 * 1024 * 1024,
                 },
-                " 50%",
+                "50%",
             ),
             (
                 MetricKind::Storage,
                 LayoutView::Hum,
                 crate::metrics::HeadlineValue::Storage {
                     used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+                "512M/2.0G",
+            ),
+            (
+                MetricKind::Storage,
+                LayoutView::Free,
+                crate::metrics::HeadlineValue::Storage {
+                    used_bytes: 512 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+                "1.5G",
+            ),
+            (
+                MetricKind::Memory,
+                LayoutView::Free,
+                crate::metrics::HeadlineValue::Memory {
+                    used_bytes: 512 * 1024 * 1024,
+                    available_bytes: 1536 * 1024 * 1024,
+                    total_bytes: 2 * 1024 * 1024 * 1024,
+                },
+                "1.5G",
+            ),
+            (
+                MetricKind::Memory,
+                LayoutView::Hum,
+                crate::metrics::HeadlineValue::Memory {
+                    used_bytes: 512 * 1024 * 1024,
+                    available_bytes: 1536 * 1024 * 1024,
                     total_bytes: 2 * 1024 * 1024 * 1024,
                 },
                 "512M/2.0G",
