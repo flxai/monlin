@@ -29,12 +29,14 @@ pub struct Config {
     pub interval_ms: u64,
     pub align: Align,
     pub label: Option<String>,
+    pub stream_labels: Option<Vec<String>>,
     pub layout: Layout,
     pub renderer: Renderer,
     pub color_mode: ColorMode,
     pub output_mode: OutputMode,
     pub width: Option<usize>,
     pub once: bool,
+    pub force_stream_input: bool,
     pub show_help: bool,
 }
 
@@ -47,12 +49,14 @@ where
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     let mut align = Align::Left;
     let mut label = None;
+    let mut stream_labels = None;
     let mut layout_spec = None;
     let mut renderer = Renderer::Braille;
     let mut color_mode = ColorMode::Auto;
     let mut output_mode = OutputMode::Terminal;
     let mut width = None;
     let mut once = false;
+    let mut force_stream_input = false;
     let mut show_help = false;
     let mut positionals = Vec::new();
 
@@ -78,6 +82,19 @@ where
             }
             "--label" => {
                 label = Some(parse_string(&args, &mut i, "--label")?);
+            }
+            "--labels" => {
+                let raw = parse_string(&args, &mut i, "--labels")?;
+                let labels = raw
+                    .split(',')
+                    .map(str::trim)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>();
+                if labels.is_empty() || labels.iter().any(|label| label.is_empty()) {
+                    return Err("invalid --labels value: expected comma-separated non-empty labels"
+                        .to_owned());
+                }
+                stream_labels = Some(labels);
             }
             "-l" | "--layout" => {
                 layout_spec = Some(parse_string(&args, &mut i, "--layout")?);
@@ -109,6 +126,10 @@ where
             }
             "--once" => {
                 once = true;
+                i += 1;
+            }
+            "-" => {
+                force_stream_input = true;
                 i += 1;
             }
             value if value.starts_with('-') => {
@@ -146,12 +167,14 @@ where
         interval_ms,
         align,
         label,
+        stream_labels,
         layout,
         renderer,
         color_mode,
         output_mode,
         width,
         once,
+        force_stream_input,
         show_help,
     })
 }
@@ -181,6 +204,8 @@ pub fn help_text() -> &'static str {
     "\
 Usage: monlin --layout SPEC [OPTIONS]
        monlin [LEGACY_METRIC...]
+       producer | monlin
+       producer | monlin -
 
 Metrics:
   cpu sys gpu vram gfx memory spc io net ingress egress
@@ -192,11 +217,13 @@ Options:
   --interval-ms N       Sampling interval in milliseconds
   --align left|right    Place the percentage before or after the graph
   --label TEXT          Prefix the entire rendered line
+  --labels A,B,C        Labels for stdin stream columns
   --renderer braille|block
   --color auto|always|never
   --output terminal|i3bar
   --width N             Override terminal width
   --once                Render once and exit
+  -                      Force stdin stream mode
   -h, --help            Show this help text
 
 Notes:
@@ -205,6 +232,7 @@ Notes:
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   Positional metrics are kept only as a compatibility path for older invocations.
+  If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
 "
 }
 
@@ -259,6 +287,30 @@ mod tests {
     fn parses_i3bar_output_mode() {
         let config = parse(&["monlin", "--output", "i3bar"]);
         assert_eq!(config.output_mode, OutputMode::I3bar);
+    }
+
+    #[test]
+    fn parses_stream_labels() {
+        let config = parse(&["monlin", "--labels", "wifi,eth,vpn"]);
+        assert_eq!(
+            config.stream_labels,
+            Some(vec![
+                "wifi".to_owned(),
+                "eth".to_owned(),
+                "vpn".to_owned()
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_empty_stream_labels() {
+        let error = parse_args(
+            ["monlin", "--labels", "wifi,,vpn"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid --labels value"));
     }
 
     #[test]

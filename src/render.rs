@@ -70,6 +70,74 @@ pub fn render_lines_with_headlines(
         .collect()
 }
 
+pub fn render_stream_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    values: &[f64],
+) -> Vec<String> {
+    if values.is_empty() {
+        return vec![String::new()];
+    }
+
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let stream_labels = config.stream_labels.as_deref().unwrap_or(&[]);
+    let label_width = stream_labels
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let row_label = stream_labels
+                .get(index)
+                .map(|label| format!("{label:>label_width$} "))
+                .unwrap_or_default();
+            let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
+            let fixed = prefix.chars().count()
+                + row_label.chars().count()
+                + usage_text.chars().count();
+
+            let graph_width = width.saturating_sub(fixed + 1);
+            let metric = stream_metric_for(index);
+            let metric_history = histories
+                .get(index)
+                .map(|history| {
+                    history
+                        .iter()
+                        .copied()
+                        .map(MetricValue::Single)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let graph = match config.renderer {
+                Renderer::Braille => {
+                    render_braille_graph(&metric_history, graph_width, metric, color_enabled)
+                }
+                Renderer::Block => {
+                    render_block_graph(&metric_history, graph_width, metric, color_enabled)
+                }
+            };
+
+            pad_or_trim_visible(
+                &match config.align {
+                    Align::Left => format!("{prefix}{row_label}{usage_text} {graph}"),
+                    Align::Right => format!("{prefix}{row_label}{graph} {usage_text}"),
+                },
+                width,
+            )
+        })
+        .collect()
+}
+
 fn render_row(
     config: &Config,
     width: usize,
@@ -116,6 +184,19 @@ fn render_row(
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+}
+
+fn stream_metric_for(index: usize) -> MetricKind {
+    const STREAM_METRICS: &[MetricKind] = &[
+        MetricKind::Cpu,
+        MetricKind::Memory,
+        MetricKind::Gpu,
+        MetricKind::Storage,
+        MetricKind::Ingress,
+        MetricKind::Egress,
+    ];
+
+    STREAM_METRICS[index % STREAM_METRICS.len()]
 }
 
 #[cfg(test)]
@@ -621,12 +702,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: None,
+            stream_labels: None,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(40),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let mut histories = HashMap::new();
@@ -677,12 +760,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: None,
+            stream_labels: None,
             layout: layout.clone(),
             renderer: Renderer::Block,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(18),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let histories = HashMap::from([(
@@ -732,12 +817,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: Some("host".to_owned()),
+            stream_labels: None,
             layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(40),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -769,6 +856,60 @@ mod tests {
 
         let line = &lines[0];
         assert_eq!(visible_width(line), 40);
+    }
+
+    #[test]
+    fn stream_lines_default_to_no_series_labels() {
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            layout: Layout::default(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(24),
+            once: true,
+            force_stream_input: false,
+            show_help: false,
+        };
+        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let values = vec![0.25, 0.75];
+
+        let lines = render_stream_lines(&config, 24, false, &histories, &values);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with(" 25%"), "unexpected first row: {}", lines[0]);
+        assert!(lines[1].starts_with(" 75%"), "unexpected second row: {}", lines[1]);
+    }
+
+    #[test]
+    fn stream_lines_use_explicit_labels_when_given() {
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            layout: Layout::default(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(28),
+            once: true,
+            force_stream_input: false,
+            show_help: false,
+        };
+        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let values = vec![0.25, 0.75];
+
+        let lines = render_stream_lines(&config, 28, false, &histories, &values);
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("wifi  25%"), "unexpected first row: {}", lines[0]);
+        assert!(lines[1].starts_with(" vpn  75%"), "unexpected second row: {}", lines[1]);
     }
 
     #[test]
@@ -941,12 +1082,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: None,
+            stream_labels: None,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(16),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -1005,12 +1148,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: None,
+            stream_labels: None,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(80),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let histories = HashMap::new();
@@ -1094,12 +1239,14 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             label: None,
+            stream_labels: None,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
             output_mode: OutputMode::Terminal,
             width: Some(24),
             once: true,
+            force_stream_input: false,
             show_help: false,
         };
         let histories = HashMap::from([(

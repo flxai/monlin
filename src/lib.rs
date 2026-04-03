@@ -7,7 +7,7 @@ pub mod render;
 use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::ffi::c_void;
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::thread;
 use std::time::Duration;
 
@@ -31,6 +31,14 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
+    if let Some(result) = maybe_run_stream(&config)? {
+        return result;
+    }
+
+    run_native(&config)
+}
+
+fn run_native(config: &config::Config) -> Result<(), String> {
     let requested_metrics = config.layout.metrics();
     let mut sampler = metrics::Sampler::default();
     sampler.prime(requested_metrics).map_err(monlin_error)?;
@@ -40,6 +48,45 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         OutputMode::Terminal => run_terminal(&config, &mut sampler, &mut histories),
         OutputMode::I3bar => run_i3bar(&config, &mut sampler, &mut histories),
     }
+}
+
+fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
+    let should_probe = config.force_stream_input || !io::stdin().is_terminal();
+    if !should_probe {
+        return Ok(None);
+    }
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    let first_frame = match read_next_stream_frame(&mut reader, None)? {
+        Some(frame) => frame,
+        None => {
+            if config.force_stream_input {
+                return Ok(Some(Ok(())));
+            }
+            return Ok(None);
+        }
+    };
+    validate_stream_labels(config, first_frame.len())?;
+
+    let result = match config.output_mode {
+        OutputMode::Terminal => run_stream_terminal(config, &mut reader, first_frame),
+        OutputMode::I3bar => run_stream_i3bar(config, &mut reader, first_frame),
+    };
+    Ok(Some(result))
+}
+
+fn validate_stream_labels(config: &config::Config, series_count: usize) -> Result<(), String> {
+    if let Some(labels) = &config.stream_labels {
+        if labels.len() != series_count {
+            return Err(format!(
+                "--labels expected {series_count} entries for the input stream, got {}",
+                labels.len()
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn run_terminal(
@@ -67,6 +114,46 @@ fn run_terminal(
         if config.once {
             writeln!(stdout).map_err(io_to_string)?;
             break;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_stream_terminal<R: BufRead>(
+    config: &config::Config,
+    reader: &mut R,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
+    let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
+    let mut rendered_rows = 0;
+    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let width = config
+        .width
+        .or_else(render::terminal_width)
+        .unwrap_or(80)
+        .max(16);
+    let color_enabled = colors_enabled(config.color_mode);
+
+    let mut current = first_frame;
+    loop {
+        update_stream_histories(&mut histories, &current, config.history);
+        let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
+        rendered_rows =
+            write_terminal_frame(&mut stdout, &lines, rendered_rows).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+
+        match read_next_stream_frame(reader, Some(current.len()))? {
+            Some(frame) => current = frame,
+            None => break,
         }
     }
 
@@ -234,6 +321,54 @@ fn run_i3bar(
     Ok(())
 }
 
+fn run_stream_i3bar<R: BufRead>(
+    config: &config::Config,
+    reader: &mut R,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
+
+    let mut first = true;
+    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let width = config
+        .width
+        .or_else(render::terminal_width)
+        .unwrap_or(80)
+        .max(16);
+
+    let mut current = first_frame;
+    loop {
+        update_stream_histories(&mut histories, &current, config.history);
+        let lines = render::render_stream_lines(config, width, false, &histories, &current);
+        let frame = i3bar_frame_json(&lines).to_string();
+
+        if !first {
+            writeln!(stdout, ",{frame}").map_err(io_to_string)?;
+        } else {
+            writeln!(stdout, "{frame}").map_err(io_to_string)?;
+            first = false;
+        }
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout, "]").map_err(io_to_string)?;
+            break;
+        }
+
+        match read_next_stream_frame(reader, Some(current.len()))? {
+            Some(frame) => current = frame,
+            None => {
+                writeln!(stdout, "]").map_err(io_to_string)?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn sample_lines(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
@@ -283,6 +418,67 @@ fn sample_lines(
     }
 
     Ok(lines)
+}
+
+fn init_stream_histories(series_count: usize, history_len: usize) -> Vec<VecDeque<f64>> {
+    (0..series_count)
+        .map(|_| VecDeque::with_capacity(history_len.max(1)))
+        .collect()
+}
+
+fn update_stream_histories(histories: &mut [VecDeque<f64>], frame: &[f64], history_len: usize) {
+    let limit = history_len.max(1);
+    for (history, value) in histories.iter_mut().zip(frame.iter().copied()) {
+        if history.len() == limit {
+            history.pop_front();
+        }
+        history.push_back(value.clamp(0.0, 1.0));
+    }
+}
+
+fn read_next_stream_frame<R: BufRead>(
+    reader: &mut R,
+    expected_columns: Option<usize>,
+) -> Result<Option<Vec<f64>>, String> {
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).map_err(io_to_string)?;
+        if read == 0 {
+            return Ok(None);
+        }
+
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let values = trimmed
+            .split_whitespace()
+            .map(|token| {
+                token
+                    .parse::<f64>()
+                    .map(|value| (value / 100.0).clamp(0.0, 1.0))
+                    .map_err(|_| format!("invalid stream value: {token}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if values.is_empty() {
+            continue;
+        }
+
+        if let Some(expected) = expected_columns {
+            if values.len() != expected {
+                return Err(format!(
+                    "stream column count changed: expected {expected}, got {}",
+                    values.len()
+                ));
+            }
+        }
+
+        return Ok(Some(values));
+    }
 }
 
 fn i3bar_frame_json(lines: &[String]) -> serde_json::Value {
