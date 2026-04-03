@@ -1,26 +1,47 @@
+use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+
 use crate::layout::{parse_layout_spec, Layout};
 use crate::render::Renderer;
 
 const DEFAULT_INTERVAL_MS: u64 = 1000;
 const DEFAULT_HISTORY: usize = 512;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const AFTER_HELP: &str = "\
+Metrics:
+  cpu sys gpu vram gfx memory spc io net ingress egress
+  all
+
+Notes:
+  Layout is the canonical interface.
+  Item syntax is metric[.view][:basis][/grow][+max][-min], e.g. net.hum:12/2+20-8.
+  Rows can be separated with ',' or a literal newline.
+  Flat layouts auto-wrap after 5 metrics per row.
+  If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
+";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Align {
     Left,
     Right,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum ColorMode {
     Auto,
     Always,
     Never,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum OutputMode {
     Terminal,
     I3bar,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum StreamLayout {
+    Columns,
+    Lines,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,6 +51,7 @@ pub struct Config {
     pub align: Align,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
+    pub stream_layout: StreamLayout,
     pub layout: Layout,
     pub renderer: Renderer,
     pub color_mode: ColorMode,
@@ -40,187 +62,124 @@ pub struct Config {
     pub show_help: bool,
 }
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "monlin",
+    disable_help_flag = true,
+    disable_version_flag = true,
+    about = "Compact terminal monitor for narrow panes, bars, and shell-driven status views.",
+    after_help = AFTER_HELP
+)]
+struct Cli {
+    #[arg(value_name = "LAYOUT")]
+    layout_parts: Vec<String>,
+
+    #[arg(long, default_value_t = DEFAULT_HISTORY)]
+    history: usize,
+
+    #[arg(long = "interval-ms", default_value_t = DEFAULT_INTERVAL_MS)]
+    interval_ms: u64,
+
+    #[arg(long, value_enum, default_value_t = Align::Left)]
+    align: Align,
+
+    #[arg(long)]
+    label: Option<String>,
+
+    #[arg(
+        long = "labels",
+        value_delimiter = ',',
+        value_parser = parse_stream_label
+    )]
+    stream_labels: Vec<String>,
+
+    #[arg(long = "stream-layout", value_enum, default_value_t = StreamLayout::Columns)]
+    stream_layout: StreamLayout,
+
+    #[arg(long, value_enum, default_value_t = Renderer::Braille)]
+    renderer: Renderer,
+
+    #[arg(long = "color", value_enum, default_value_t = ColorMode::Auto)]
+    color_mode: ColorMode,
+
+    #[arg(long = "output", value_enum, default_value_t = OutputMode::Terminal)]
+    output_mode: OutputMode,
+
+    #[arg(long)]
+    width: Option<usize>,
+
+    #[arg(long, action = ArgAction::SetTrue)]
+    once: bool,
+
+    #[arg(short = 'h', long = "help", action = ArgAction::SetTrue)]
+    show_help: bool,
+}
+
 pub fn parse_args<I>(args: I) -> Result<Config, String>
 where
     I: IntoIterator<Item = String>,
 {
     let args = args.into_iter().collect::<Vec<_>>();
-    let mut history = DEFAULT_HISTORY;
-    let mut interval_ms = DEFAULT_INTERVAL_MS;
-    let mut align = Align::Left;
-    let mut label = None;
-    let mut stream_labels = None;
-    let mut renderer = Renderer::Braille;
-    let mut color_mode = ColorMode::Auto;
-    let mut output_mode = OutputMode::Terminal;
-    let mut width = None;
-    let mut once = false;
+    let mut filtered_args = Vec::with_capacity(args.len());
     let mut force_stream_input = false;
-    let mut show_help = false;
-    let mut positionals = Vec::new();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                show_help = true;
-                i += 1;
-            }
-            "--history" => {
-                history = parse_value(&args, &mut i, "--history")?;
-            }
-            "--interval-ms" => {
-                interval_ms = parse_value(&args, &mut i, "--interval-ms")?;
-            }
-            "--align" => {
-                align = match parse_string(&args, &mut i, "--align")?.as_str() {
-                    "left" => Align::Left,
-                    "right" => Align::Right,
-                    other => return Err(format!("invalid --align value: {other}")),
-                };
-            }
-            "--label" => {
-                label = Some(parse_string(&args, &mut i, "--label")?);
-            }
-            "--labels" => {
-                let raw = parse_string(&args, &mut i, "--labels")?;
-                let labels = raw
-                    .split(',')
-                    .map(str::trim)
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>();
-                if labels.is_empty() || labels.iter().any(|label| label.is_empty()) {
-                    return Err("invalid --labels value: expected comma-separated non-empty labels"
-                        .to_owned());
-                }
-                stream_labels = Some(labels);
-            }
-            "--renderer" => {
-                renderer = match parse_string(&args, &mut i, "--renderer")?.as_str() {
-                    "braille" => Renderer::Braille,
-                    "block" => Renderer::Block,
-                    other => return Err(format!("invalid --renderer value: {other}")),
-                };
-            }
-            "--color" => {
-                color_mode = match parse_string(&args, &mut i, "--color")?.as_str() {
-                    "auto" => ColorMode::Auto,
-                    "always" => ColorMode::Always,
-                    "never" => ColorMode::Never,
-                    other => return Err(format!("invalid --color value: {other}")),
-                };
-            }
-            "--output" => {
-                output_mode = match parse_string(&args, &mut i, "--output")?.as_str() {
-                    "terminal" => OutputMode::Terminal,
-                    "i3bar" => OutputMode::I3bar,
-                    other => return Err(format!("invalid --output value: {other}")),
-                };
-            }
-            "--width" => {
-                width = Some(parse_value(&args, &mut i, "--width")?);
-            }
-            "--once" => {
-                once = true;
-                i += 1;
-            }
-            "-" => {
-                force_stream_input = true;
-                i += 1;
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unknown flag: {value}"));
-            }
-            value => {
-                positionals.push(value.to_owned());
-                i += 1;
-            }
+    for arg in args {
+        if arg == "-" {
+            force_stream_input = true;
+        } else {
+            filtered_args.push(arg);
         }
     }
 
-    if history == 0 {
-        history = 1;
-    }
-    if let Some(value) = width {
+    let cli = Cli::try_parse_from(filtered_args).map_err(|error| error.to_string())?;
+
+    let history = cli.history.max(1);
+    if let Some(value) = cli.width {
         if value == 0 {
             return Err("--width must be greater than zero".to_owned());
         }
     }
-    let layout = if positionals.is_empty() {
+
+    let layout = if cli.layout_parts.is_empty() {
         Layout::default()
     } else {
-        parse_layout_spec(&positionals.join(" "))?
+        parse_layout_spec(&cli.layout_parts.join(" "))?
     };
 
     Ok(Config {
         history,
-        interval_ms,
-        align,
-        label,
-        stream_labels,
+        interval_ms: cli.interval_ms,
+        align: cli.align,
+        label: cli.label,
+        stream_labels: (!cli.stream_labels.is_empty()).then_some(cli.stream_labels),
+        stream_layout: cli.stream_layout,
         layout,
-        renderer,
-        color_mode,
-        output_mode,
-        width,
-        once,
+        renderer: cli.renderer,
+        color_mode: cli.color_mode,
+        output_mode: cli.output_mode,
+        width: cli.width,
+        once: cli.once,
         force_stream_input,
-        show_help,
+        show_help: cli.show_help,
     })
 }
 
-fn parse_value<T: std::str::FromStr>(
-    args: &[String],
-    i: &mut usize,
-    flag: &str,
-) -> Result<T, String> {
-    let value = parse_string(args, i, flag)?;
-    value
-        .parse::<T>()
-        .map_err(|_| format!("invalid value for {flag}: {value}"))
+fn parse_stream_label(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Err("labels must be non-empty".to_owned())
+    } else {
+        Ok(trimmed.to_owned())
+    }
 }
 
-fn parse_string(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
-    let next = *i + 1;
-    let value = args
-        .get(next)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {flag}"))?;
-    *i += 2;
-    Ok(value)
-}
-
-pub fn help_text() -> &'static str {
-    "\
-Usage: monlin [LAYOUT] [OPTIONS]
-       producer | monlin
-       producer | monlin -
-
-Metrics:
-  cpu sys gpu vram gfx memory spc io net ingress egress
-  all
-
-Options:
-  --history N           Number of history samples to retain
-  --interval-ms N       Sampling interval in milliseconds
-  --align left|right    Place the percentage before or after the graph
-  --label TEXT          Prefix the entire rendered line
-  --labels A,B,C        Labels for stdin stream columns
-  --renderer braille|block
-  --color auto|always|never
-  --output terminal|i3bar
-  --width N             Override terminal width
-  --once                Render once and exit
-  -                      Force stdin stream mode
-  -h, --help            Show this help text
-
-Notes:
-  Layout is the canonical interface.
-  Item syntax is metric[.view][:basis][/grow][+max][-min], e.g. net.hum:12/2+20-8.
-  Rows can be separated with ',' or a literal newline.
-  Flat layouts auto-wrap after 5 metrics per row.
-  If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
-"
+pub fn help_text() -> String {
+    let mut command = Cli::command();
+    let mut help = Vec::new();
+    command
+        .write_long_help(&mut help)
+        .expect("writing clap help should succeed");
+    String::from_utf8(help).expect("clap help is valid utf-8")
 }
 
 #[cfg(test)]
@@ -254,7 +213,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("unknown flag: --layout"));
+        assert!(error.contains("--layout"));
     }
 
     #[test]
@@ -283,6 +242,12 @@ mod tests {
     }
 
     #[test]
+    fn parses_stream_layout() {
+        let config = parse(&["monlin", "--stream-layout", "lines"]);
+        assert_eq!(config.stream_layout, StreamLayout::Lines);
+    }
+
+    #[test]
     fn rejects_empty_stream_labels() {
         let error = parse_args(
             ["monlin", "--labels", "wifi,,vpn"]
@@ -290,7 +255,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid --labels value"));
+        assert!(error.contains("labels"));
     }
 
     #[test]
@@ -318,7 +283,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid --align value"));
+        assert!(error.contains("--align"));
     }
 
     #[test]
@@ -329,7 +294,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid --renderer value"));
+        assert!(error.contains("--renderer"));
     }
 
     #[test]
@@ -340,7 +305,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid --color value"));
+        assert!(error.contains("--color"));
     }
 
     #[test]
@@ -351,14 +316,14 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid --output value"));
+        assert!(error.contains("--output"));
     }
 
     #[test]
     fn rejects_unknown_flag() {
         let error =
             parse_args(["monlin", "--wat"].into_iter().map(|item| item.to_string())).unwrap_err();
-        assert!(error.contains("unknown flag"));
+        assert!(error.contains("--wat"));
     }
 
     #[test]
@@ -369,7 +334,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("missing value for --label"));
+        assert!(error.contains("--label"));
     }
 
     #[test]
@@ -380,7 +345,7 @@ mod tests {
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("invalid value for --interval-ms"));
+        assert!(error.contains("--interval-ms"));
     }
 
     #[test]

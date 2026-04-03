@@ -1,12 +1,14 @@
 use std::collections::{HashMap, VecDeque};
 use std::env;
 
+use clap::ValueEnum;
+
 use crate::color::{gradient_for, interpolate, paint, split_gradients_for};
-use crate::config::{Align, Config};
+use crate::config::{Align, Config, StreamLayout};
 use crate::layout::{Layout, LayoutItem, MetricKind};
 use crate::metrics::{HeadlineValue, MetricValue};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Renderer {
     Braille,
     Block,
@@ -81,6 +83,25 @@ pub fn render_stream_lines(
         return vec![String::new()];
     }
 
+    match config.stream_layout {
+        StreamLayout::Columns => vec![render_stream_columns_line(
+            config,
+            width,
+            color_enabled,
+            histories,
+            values,
+        )],
+        StreamLayout::Lines => render_stream_rows(config, width, color_enabled, histories, values),
+    }
+}
+
+fn render_stream_rows(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    values: &[f64],
+) -> Vec<String> {
     let prefix = config
         .label
         .as_ref()
@@ -136,6 +157,84 @@ pub fn render_stream_lines(
             )
         })
         .collect()
+}
+
+fn render_stream_columns_line(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    values: &[f64],
+) -> String {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let separators = values.len().saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+    let widths = split_stream_widths(segment_space, values.len());
+    let label_width = config
+        .stream_labels
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|label| label.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let segments = values
+        .iter()
+        .enumerate()
+        .zip(widths)
+        .map(|((index, value), segment_width)| {
+            let label = config
+                .stream_labels
+                .as_deref()
+                .unwrap_or(&[])
+                .get(index)
+                .map(|label| format!("{label:<label_width$}"))
+                .unwrap_or_default();
+            let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
+            let fixed = label.chars().count() + usage_text.chars().count();
+
+            if segment_width <= fixed {
+                return pad_or_trim_visible(&format!("{label}{usage_text}"), segment_width);
+            }
+
+            let graph_width = segment_width.saturating_sub(fixed + 1);
+            let metric = stream_metric_for(index);
+            let metric_history = histories
+                .get(index)
+                .map(|history| {
+                    history
+                        .iter()
+                        .copied()
+                        .map(MetricValue::Single)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let graph = match config.renderer {
+                Renderer::Braille => {
+                    render_braille_graph(&metric_history, graph_width, metric, color_enabled)
+                }
+                Renderer::Block => {
+                    render_block_graph(&metric_history, graph_width, metric, color_enabled)
+                }
+            };
+
+            pad_or_trim_visible(
+                &match config.align {
+                    Align::Left => format!("{label}{usage_text} {graph}"),
+                    Align::Right => format!("{label}{graph} {usage_text}"),
+                },
+                segment_width,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
 }
 
 fn render_row(
@@ -319,6 +418,18 @@ fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
     }
 
     widths
+}
+
+fn split_stream_widths(total: usize, count: usize) -> Vec<usize> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let base = total / count;
+    let remainder = total % count;
+    (0..count)
+        .map(|index| base + usize::from(index < remainder))
+        .collect()
 }
 
 fn render_segment_with_headline(
@@ -703,6 +814,7 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -761,6 +873,7 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: layout.clone(),
             renderer: Renderer::Block,
             color_mode: ColorMode::Never,
@@ -818,6 +931,7 @@ mod tests {
             align: Align::Left,
             label: Some("host".to_owned()),
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -859,13 +973,14 @@ mod tests {
     }
 
     #[test]
-    fn stream_lines_default_to_no_series_labels() {
+    fn stream_columns_default_to_single_row_without_series_labels() {
         let config = Config {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -880,19 +995,50 @@ mod tests {
 
         let lines = render_stream_lines(&config, 24, false, &histories, &values);
 
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with(" 25%"), "unexpected first row: {}", lines[0]);
-        assert!(lines[1].starts_with(" 75%"), "unexpected second row: {}", lines[1]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("25%"), "unexpected row: {}", lines[0]);
+        assert!(lines[0].contains("75%"), "unexpected row: {}", lines[0]);
     }
 
     #[test]
-    fn stream_lines_use_explicit_labels_when_given() {
+    fn stream_columns_use_explicit_labels_when_given() {
         let config = Config {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_layout: StreamLayout::Columns,
+            layout: Layout::default(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(28),
+            once: true,
+            force_stream_input: false,
+            show_help: false,
+        };
+        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let values = vec![0.25, 0.75];
+
+        let lines = render_stream_lines(&config, 28, false, &histories, &values);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("wifi"), "unexpected row: {}", lines[0]);
+        assert!(lines[0].contains("vpn"), "unexpected row: {}", lines[0]);
+        assert!(lines[0].contains("25%"), "unexpected row: {}", lines[0]);
+        assert!(lines[0].contains("75%"), "unexpected row: {}", lines[0]);
+    }
+
+    #[test]
+    fn stream_lines_layout_renders_one_row_per_series() {
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_layout: StreamLayout::Lines,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1083,6 +1229,7 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1149,6 +1296,7 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1240,6 +1388,7 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_layout: StreamLayout::Columns,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,

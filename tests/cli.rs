@@ -12,7 +12,7 @@ fn help_exits_successfully() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Usage: monlin [LAYOUT] [OPTIONS]"));
+    assert!(stdout.contains("Usage: monlin [OPTIONS] [LAYOUT]..."));
 }
 
 #[test]
@@ -168,10 +168,10 @@ fn stdin_numeric_rows_enable_stream_mode_automatically() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 3, "unexpected stream output: {stdout}");
-    assert!(lines[0].starts_with("  0%"), "unexpected first row: {stdout}");
-    assert!(lines[1].starts_with(" 25%"), "unexpected second row: {stdout}");
-    assert!(lines[2].starts_with(" 50%"), "unexpected third row: {stdout}");
+    assert_eq!(lines.len(), 1, "unexpected stream output: {stdout}");
+    assert!(lines[0].contains("0%"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("25%"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("50%"), "unexpected row: {stdout}");
 }
 
 #[test]
@@ -197,9 +197,9 @@ fn dash_forces_stdin_stream_mode() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 2, "unexpected stream output: {stdout}");
-    assert!(lines[0].starts_with(" 10%"), "unexpected first row: {stdout}");
-    assert!(lines[1].starts_with(" 20%"), "unexpected second row: {stdout}");
+    assert_eq!(lines.len(), 1, "unexpected stream output: {stdout}");
+    assert!(lines[0].contains("10%"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("20%"), "unexpected row: {stdout}");
 }
 
 #[test]
@@ -230,6 +230,47 @@ fn stream_mode_uses_explicit_labels() {
     let output = child
         .wait_with_output()
         .expect("failed waiting for monlin labeled stream output");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "unexpected stream output: {stdout}");
+    assert!(lines[0].contains("wifi"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("vpn"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("10%"), "unexpected row: {stdout}");
+    assert!(lines[0].contains("20%"), "unexpected row: {stdout}");
+}
+
+#[test]
+fn stream_mode_lines_layout_preserves_old_per_series_rows() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "-",
+            "--once",
+            "--width",
+            "32",
+            "--color",
+            "never",
+            "--stream-layout",
+            "lines",
+            "--labels",
+            "wifi,vpn",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn monlin - --stream-layout lines");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("missing child stdin")
+        .write_all(b"10 20\n")
+        .expect("failed to write numeric stream input");
+
+    let output = child
+        .wait_with_output()
+        .expect("failed waiting for monlin line-layout stream output");
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
