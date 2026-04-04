@@ -7,12 +7,14 @@ pub mod render;
 use std::collections::{HashMap, VecDeque};
 #[cfg(unix)]
 use std::ffi::c_void;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::fs;
+use std::io::{self, BufRead, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::process::Command;
 use std::thread;
 use std::time::Duration;
 
 use clap_complete::{generate, Generator, Shell};
-use config::{ColorMode, OutputMode};
+use config::{ColorMode, ExternalInputSource, OutputMode};
 use layout::MetricKind;
 use metrics::MetricValue;
 use serde_json::json;
@@ -24,6 +26,22 @@ const SHOW_CURSOR: &str = "\x1b[?25h";
 const CURSOR_RESTORE_SIGNALS: [i32; 4] = [1, 2, 3, 15];
 #[cfg(unix)]
 const STDOUT_FILENO: i32 = 1;
+
+enum ExternalPollResult {
+    Frame(Vec<f64>),
+    NoUpdate,
+}
+
+enum ExternalPoller {
+    File(FilePoller),
+    Process(String),
+}
+
+struct FilePoller {
+    path: std::path::PathBuf,
+    offset: u64,
+    pending: String,
+}
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let config = config::parse_args(args)?;
@@ -42,6 +60,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             colors_enabled(config.color_mode),
         );
         return Ok(());
+    }
+
+    if let Some(result) = maybe_run_external_stream(&config)? {
+        return result;
     }
 
     if let Some(result) = maybe_run_stream(&config)? {
@@ -94,6 +116,8 @@ _monlin_layout() {
     egress
     out
     all
+    'f:/path/to/file'
+    'p:command'
   )
 
   cur="${words[CURRENT]}"
@@ -134,7 +158,9 @@ _monlin_layout() {
     'in:Network ingress' \
     'egress:Network egress' \
     'out:Network egress' \
-    'all:Canonical multi-row layout'
+    'all:Canonical multi-row layout' \
+    'f:/path/to/file:Poll a file for numeric rows' \
+    'p:command:Poll a shell command for numeric rows'
 }
 
 _monlin() {
@@ -287,6 +313,25 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     }
 }
 
+fn maybe_run_external_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
+    let Some(source) = &config.external_input else {
+        return Ok(None);
+    };
+
+    let (mut poller, first_frame) = ExternalPoller::new(source, None)?;
+    let first_frame = match first_frame {
+        Some(frame) => frame,
+        None => return Ok(Some(Ok(()))),
+    };
+    validate_stream_labels(config, first_frame.len())?;
+
+    let result = match config.output_mode {
+        OutputMode::Terminal => run_external_stream_terminal(config, &mut poller, first_frame),
+        OutputMode::I3bar => run_external_stream_i3bar(config, &mut poller, first_frame),
+    };
+    Ok(Some(result))
+}
+
 fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
     let should_probe = config.force_stream_input || !io::stdin().is_terminal();
     if !should_probe {
@@ -335,7 +380,7 @@ fn run_terminal(
     let mut stdout = io::stdout().lock();
     let _cursor_guard =
         CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
-    let mut rendered_rows = 0;
+    let mut frame_state = TerminalFrameState::default();
 
     loop {
         if config.interval_ms > 0 {
@@ -344,8 +389,13 @@ fn run_terminal(
 
         let lines = sample_lines(config, sampler, histories)?;
 
-        rendered_rows =
-            write_terminal_frame(&mut stdout, &lines, rendered_rows).map_err(io_to_string)?;
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
+            .map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
         if config.once {
@@ -366,21 +416,21 @@ fn run_stream_terminal<R: BufRead>(
     let mut stdout = io::stdout().lock();
     let _cursor_guard =
         CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
-    let mut rendered_rows = 0;
+    let mut frame_state = TerminalFrameState::default();
     let mut histories = init_stream_histories(first_frame.len(), config.history);
-    let width = config
-        .width
-        .or_else(render::terminal_width)
-        .unwrap_or(80)
-        .max(16);
     let color_enabled = colors_enabled(config.color_mode);
 
     let mut current = first_frame;
     loop {
         update_stream_histories(&mut histories, &current, config.history);
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
         let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
-        rendered_rows =
-            write_terminal_frame(&mut stdout, &lines, rendered_rows).map_err(io_to_string)?;
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
+            .map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
         if config.once {
@@ -391,6 +441,50 @@ fn run_stream_terminal<R: BufRead>(
         match read_next_stream_frame(reader, Some(current.len()))? {
             Some(frame) => current = frame,
             None => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn run_external_stream_terminal(
+    config: &config::Config,
+    poller: &mut ExternalPoller,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
+    let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
+    let mut frame_state = TerminalFrameState::default();
+    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let color_enabled = colors_enabled(config.color_mode);
+
+    let mut current = first_frame;
+    loop {
+        update_stream_histories(&mut histories, &current, config.history);
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
+            .map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        match poller.poll(Some(current.len()))? {
+            ExternalPollResult::Frame(frame) => current = frame,
+            ExternalPollResult::NoUpdate => {}
         }
     }
 
@@ -487,18 +581,45 @@ fn restore_signal_handlers(previous_handlers: [SignalHandler; CURSOR_RESTORE_SIG
     }
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct TerminalFrameState {
+    reserved_rows: usize,
+    previous_lines: Vec<String>,
+}
+
 fn write_terminal_frame<W: Write>(
     stdout: &mut W,
     lines: &[String],
-    previous_rows: usize,
-) -> io::Result<usize> {
-    if previous_rows > 0 {
-        write!(stdout, "\r")?;
-        if previous_rows > 1 {
-            write!(stdout, "\x1b[{}A", previous_rows - 1)?;
-        }
+    frame_state: &mut TerminalFrameState,
+    width: usize,
+) -> io::Result<()> {
+    let current_rows = physical_frame_rows(lines, width).max(1);
+    let previous_rows = physical_frame_rows(&frame_state.previous_lines, width);
+
+    if frame_state.reserved_rows == 0 {
+        frame_state.reserved_rows = current_rows;
+        write_frame_lines(stdout, lines)?;
+        frame_state.previous_lines = lines.to_vec();
+        return Ok(());
     }
 
+    if current_rows > frame_state.reserved_rows {
+        for _ in 0..(current_rows - frame_state.reserved_rows) {
+            writeln!(stdout)?;
+        }
+        frame_state.reserved_rows = current_rows;
+    }
+
+    move_to_previous_frame_top(stdout, previous_rows)?;
+    clear_reserved_region(stdout, frame_state.reserved_rows)?;
+    move_to_region_top(stdout, frame_state.reserved_rows)?;
+    write_frame_lines(stdout, lines)?;
+    frame_state.previous_lines = lines.to_vec();
+
+    Ok(())
+}
+
+fn write_frame_lines<W: Write>(stdout: &mut W, lines: &[String]) -> io::Result<()> {
     for (index, line) in lines.iter().enumerate() {
         write!(stdout, "{line}\x1b[K")?;
         if index + 1 < lines.len() {
@@ -506,16 +627,43 @@ fn write_terminal_frame<W: Write>(
         }
     }
 
-    let stale_rows = previous_rows.saturating_sub(lines.len());
-    if stale_rows > 0 {
-        for _ in 0..stale_rows {
-            writeln!(stdout)?;
-            write!(stdout, "\x1b[K")?;
-        }
-        write!(stdout, "\r\x1b[{}A", stale_rows)?;
-    }
+    Ok(())
+}
 
-    Ok(lines.len())
+fn move_to_region_top<W: Write>(stdout: &mut W, reserved_rows: usize) -> io::Result<()> {
+    write!(stdout, "\r")?;
+    if reserved_rows > 1 {
+        write!(stdout, "\x1b[{}A", reserved_rows - 1)?;
+    }
+    Ok(())
+}
+
+fn move_to_previous_frame_top<W: Write>(stdout: &mut W, previous_rows: usize) -> io::Result<()> {
+    write!(stdout, "\r")?;
+    if previous_rows > 1 {
+        write!(stdout, "\x1b[{}A", previous_rows - 1)?;
+    }
+    Ok(())
+}
+
+fn clear_reserved_region<W: Write>(stdout: &mut W, reserved_rows: usize) -> io::Result<()> {
+    for row in 0..reserved_rows {
+        write!(stdout, "\x1b[2K")?;
+        if row + 1 < reserved_rows {
+            write!(stdout, "\x1b[1B\r")?;
+        }
+    }
+    Ok(())
+}
+
+fn physical_frame_rows(lines: &[String], width: usize) -> usize {
+    let width = width.max(1);
+    lines.iter()
+        .map(|line| {
+            let visible = render::visible_width(line);
+            visible.max(1).div_ceil(width)
+        })
+        .sum()
 }
 
 fn write_cursor_visibility<W: Write>(stdout: &mut W, visible: bool) -> io::Result<()> {
@@ -606,6 +754,55 @@ fn run_stream_i3bar<R: BufRead>(
     Ok(())
 }
 
+fn run_external_stream_i3bar(
+    config: &config::Config,
+    poller: &mut ExternalPoller,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
+
+    let mut first = true;
+    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let width = config
+        .width
+        .or_else(render::terminal_width)
+        .unwrap_or(80)
+        .max(16);
+
+    let mut current = first_frame;
+    loop {
+        update_stream_histories(&mut histories, &current, config.history);
+        let lines = render::render_stream_lines(config, width, false, &histories, &current);
+        let frame = i3bar_frame_json(&lines).to_string();
+
+        if !first {
+            writeln!(stdout, ",{frame}").map_err(io_to_string)?;
+        } else {
+            writeln!(stdout, "{frame}").map_err(io_to_string)?;
+            first = false;
+        }
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout, "]").map_err(io_to_string)?;
+            break;
+        }
+
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        match poller.poll(Some(current.len()))? {
+            ExternalPollResult::Frame(frame) => current = frame,
+            ExternalPollResult::NoUpdate => {}
+        }
+    }
+
+    Ok(())
+}
+
 fn sample_lines(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
@@ -690,32 +887,178 @@ fn read_next_stream_frame<R: BufRead>(
         if trimmed.is_empty() {
             continue;
         }
+        return parse_stream_frame(trimmed, expected_columns).map(Some);
+    }
+}
 
-        let values = trimmed
-            .split_whitespace()
-            .map(|token| {
-                token
-                    .parse::<f64>()
-                    .map(|value| (value / 100.0).clamp(0.0, 1.0))
-                    .map_err(|_| format!("invalid stream value: {token}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+fn parse_stream_frame(line: &str, expected_columns: Option<usize>) -> Result<Vec<f64>, String> {
+    let values = line
+        .split_whitespace()
+        .map(|token| {
+            token
+                .parse::<f64>()
+                .map(|value| (value / 100.0).clamp(0.0, 1.0))
+                .map_err(|_| format!("invalid stream value: {token}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
-        if values.is_empty() {
-            continue;
+    if values.is_empty() {
+        return Err("stream frame must contain at least one numeric value".to_owned());
+    }
+
+    if let Some(expected) = expected_columns {
+        if values.len() != expected {
+            return Err(format!(
+                "stream column count changed: expected {expected}, got {}",
+                values.len()
+            ));
         }
+    }
 
-        if let Some(expected) = expected_columns {
-            if values.len() != expected {
-                return Err(format!(
-                    "stream column count changed: expected {expected}, got {}",
-                    values.len()
-                ));
+    Ok(values)
+}
+
+impl ExternalPoller {
+    fn new(
+        source: &ExternalInputSource,
+        expected_columns: Option<usize>,
+    ) -> Result<(Self, Option<Vec<f64>>), String> {
+        match source {
+            ExternalInputSource::File(path) => {
+                let mut poller = FilePoller {
+                    path: path.clone(),
+                    offset: 0,
+                    pending: String::new(),
+                };
+                let first = poller.poll(expected_columns, true)?;
+                Ok((Self::File(poller), first))
+            }
+            ExternalInputSource::Process(command) => {
+                let poller = Self::Process(command.clone());
+                let first = match poll_latest_output_line(&run_external_process(command)?, expected_columns)? {
+                    Some(frame) => Some(frame),
+                    None => None,
+                };
+                Ok((poller, first))
             }
         }
-
-        return Ok(Some(values));
     }
+
+    fn poll(&mut self, expected_columns: Option<usize>) -> Result<ExternalPollResult, String> {
+        match self {
+            Self::File(poller) => Ok(match poller.poll(expected_columns, false)? {
+                Some(frame) => ExternalPollResult::Frame(frame),
+                None => ExternalPollResult::NoUpdate,
+            }),
+            Self::Process(command) => Ok(match poll_latest_output_line(
+                &run_external_process(command)?,
+                expected_columns,
+            )? {
+                Some(frame) => ExternalPollResult::Frame(frame),
+                None => ExternalPollResult::NoUpdate,
+            }),
+        }
+    }
+}
+
+impl FilePoller {
+    fn poll(
+        &mut self,
+        expected_columns: Option<usize>,
+        allow_pending_at_eof: bool,
+    ) -> Result<Option<Vec<f64>>, String> {
+        let metadata = fs::metadata(&self.path)
+            .map_err(|error| format!("monlin: {}: {error}", self.path.display()))?;
+        if metadata.len() < self.offset {
+            self.offset = 0;
+            self.pending.clear();
+        }
+
+        let mut file = fs::File::open(&self.path)
+            .map_err(|error| format!("monlin: {}: {error}", self.path.display()))?;
+        file.seek(SeekFrom::Start(self.offset))
+            .map_err(|error| format!("monlin: {}: {error}", self.path.display()))?;
+
+        let mut chunk = String::new();
+        file.read_to_string(&mut chunk)
+            .map_err(|error| format!("monlin: {}: {error}", self.path.display()))?;
+        self.offset = file
+            .stream_position()
+            .map_err(|error| format!("monlin: {}: {error}", self.path.display()))?;
+
+        if chunk.is_empty() {
+            if allow_pending_at_eof && !self.pending.trim().is_empty() {
+                return parse_stream_frame(self.pending.trim(), expected_columns).map(Some);
+            }
+            return Ok(None);
+        }
+
+        let mut text = std::mem::take(&mut self.pending);
+        text.push_str(&chunk);
+        let trailing_newline = text.ends_with('\n');
+        let mut latest = None;
+        let mut parts = text.split('\n').collect::<Vec<_>>();
+        if !trailing_newline {
+            self.pending = parts.pop().unwrap_or_default().to_owned();
+        }
+
+        for line in parts {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            latest = Some(parse_stream_frame(trimmed, expected_columns)?);
+        }
+
+        if trailing_newline {
+            self.pending.clear();
+        } else if allow_pending_at_eof && latest.is_none() && !self.pending.trim().is_empty() {
+            latest = Some(parse_stream_frame(self.pending.trim(), expected_columns)?);
+        }
+
+        Ok(latest)
+    }
+}
+
+fn poll_latest_output_line(
+    text: &str,
+    expected_columns: Option<usize>,
+) -> Result<Option<Vec<f64>>, String> {
+    for line in text.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        return parse_stream_frame(trimmed, expected_columns).map(Some);
+    }
+
+    Ok(None)
+}
+
+fn run_external_process(command: &str) -> Result<String, String> {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+    let output = Command::new(&shell)
+        .arg("-lc")
+        .arg(command)
+        .output()
+        .map_err(|error| format!("monlin: failed to run process source `{command}`: {error}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if stderr.is_empty() {
+            return Err(format!(
+                "monlin: process source `{command}` exited with {}",
+                output.status
+            ));
+        }
+        return Err(format!(
+            "monlin: process source `{command}` failed: {stderr}"
+        ));
+    }
+
+    String::from_utf8(output.stdout).map_err(|error| {
+        format!("monlin: process source `{command}` produced invalid UTF-8: {error}")
+    })
 }
 
 fn i3bar_frame_json(lines: &[String]) -> serde_json::Value {
@@ -762,64 +1105,74 @@ fn io_to_string(error: io::Error) -> String {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn i3bar_frame_uses_one_block_per_line() {
-        let frame = i3bar_frame_json(&["sys  40% ....".to_owned(), "net 1.5M/s ....".to_owned()]);
+        let frame = i3bar_frame_json(&["sys  40% ....".to_owned(), "net 1.5M ....".to_owned()]);
         let blocks = frame.as_array().unwrap();
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["name"], "monlin-0");
         assert_eq!(blocks[0]["full_text"], "sys  40% ....");
         assert_eq!(blocks[1]["name"], "monlin-1");
-        assert_eq!(blocks[1]["full_text"], "net 1.5M/s ....");
+        assert_eq!(blocks[1]["full_text"], "net 1.5M ....");
     }
 
     #[test]
     fn terminal_repaint_moves_back_to_the_top_of_a_multiline_frame() {
         let mut output = Vec::new();
+        let mut frame_state = TerminalFrameState::default();
 
-        let rendered_rows = write_terminal_frame(
+        write_terminal_frame(
             &mut output,
-            &["sys  40% ....".to_owned(), "net 1.5M/s ....".to_owned()],
-            0,
+            &["sys  40% ....".to_owned(), "net 1.5M ....".to_owned()],
+            &mut frame_state,
+            80,
         )
         .unwrap();
-        let rendered_rows = write_terminal_frame(
+        write_terminal_frame(
             &mut output,
             &["cpu  12% ....".to_owned(), "ram  63% ....".to_owned()],
-            rendered_rows,
+            &mut frame_state,
+            80,
         )
         .unwrap();
 
-        assert_eq!(rendered_rows, 2);
+        assert_eq!(frame_state.reserved_rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "sys  40% ....\x1b[K\nnet 1.5M/s ....\x1b[K\r\x1b[1Acpu  12% ....\x1b[K\nram  63% ....\x1b[K"
+            "sys  40% ....\x1b[K\nnet 1.5M ....\x1b[K\r\x1b[1A\x1b[2K\x1b[1B\r\x1b[2K\r\x1b[1Acpu  12% ....\x1b[K\nram  63% ....\x1b[K"
         );
     }
 
     #[test]
     fn terminal_repaint_clears_stale_rows_when_a_frame_shrinks() {
         let mut output = Vec::new();
+        let mut frame_state = TerminalFrameState::default();
 
-        let rendered_rows = write_terminal_frame(
+        write_terminal_frame(
             &mut output,
             &[
                 "sys  40% ....".to_owned(),
                 "gfx  22% ....".to_owned(),
-                "net 1.5M/s ....".to_owned(),
+                "net 1.5M ....".to_owned(),
             ],
-            0,
+            &mut frame_state,
+            80,
         )
         .unwrap();
-        let rendered_rows =
-            write_terminal_frame(&mut output, &["cpu  12% ....".to_owned()], rendered_rows)
-                .unwrap();
+        write_terminal_frame(
+            &mut output,
+            &["cpu  12% ....".to_owned()],
+            &mut frame_state,
+            80,
+        )
+        .unwrap();
 
-        assert_eq!(rendered_rows, 1);
+        assert_eq!(frame_state.reserved_rows, 3);
         assert_eq!(
             String::from_utf8(output).unwrap(),
-            "sys  40% ....\x1b[K\ngfx  22% ....\x1b[K\nnet 1.5M/s ....\x1b[K\r\x1b[2Acpu  12% ....\x1b[K\n\x1b[K\n\x1b[K\r\x1b[2A"
+            "sys  40% ....\x1b[K\ngfx  22% ....\x1b[K\nnet 1.5M ....\x1b[K\r\x1b[2A\x1b[2K\x1b[1B\r\x1b[2K\x1b[1B\r\x1b[2K\r\x1b[2Acpu  12% ....\x1b[K"
         );
     }
 
@@ -832,6 +1185,34 @@ mod tests {
         let mut shown = Vec::new();
         write_cursor_visibility(&mut shown, true).unwrap();
         assert_eq!(String::from_utf8(shown).unwrap(), SHOW_CURSOR);
+    }
+
+    #[test]
+    fn terminal_repaint_tracks_wrapped_physical_rows() {
+        let mut output = Vec::new();
+        let mut frame_state = TerminalFrameState::default();
+
+        write_terminal_frame(
+            &mut output,
+            &["1234567890ABCDE".to_owned()],
+            &mut frame_state,
+            10,
+        )
+        .unwrap();
+        assert_eq!(frame_state.reserved_rows, 2);
+
+        write_terminal_frame(
+            &mut output,
+            &["cpu".to_owned()],
+            &mut frame_state,
+            10,
+        )
+        .unwrap();
+        assert_eq!(frame_state.reserved_rows, 2);
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "1234567890ABCDE\x1b[K\r\x1b[1A\x1b[2K\x1b[1B\r\x1b[2K\r\x1b[1Acpu\x1b[K"
+        );
     }
 
     #[test]
@@ -901,6 +1282,67 @@ mod tests {
         let mut mismatch = io::Cursor::new(b"10 20 30\n".as_slice());
         let error = read_next_stream_frame(&mut mismatch, Some(2)).unwrap_err();
         assert!(error.contains("stream column count changed"));
+    }
+
+    #[test]
+    fn parse_stream_frame_parses_percentages() {
+        let frame = parse_stream_frame("10 20 30", None).unwrap();
+        assert_eq!(frame, vec![0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn file_poller_uses_latest_non_empty_file_line() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("monlin-external-{unique}.txt"));
+        fs::write(&path, "10 20\n\n30 40\n").unwrap();
+
+        let mut poller = FilePoller {
+            path: path.clone(),
+            offset: 0,
+            pending: String::new(),
+        };
+        let frame = poller.poll(None, true).unwrap().unwrap();
+        assert_eq!(frame, vec![0.3, 0.4]);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_poller_only_emits_new_appended_lines() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("monlin-external-append-{unique}.txt"));
+        fs::write(&path, "10 20\n").unwrap();
+
+        let mut poller = FilePoller {
+            path: path.clone(),
+            offset: 0,
+            pending: String::new(),
+        };
+        assert_eq!(poller.poll(None, true).unwrap(), Some(vec![0.1, 0.2]));
+        assert_eq!(poller.poll(None, false).unwrap(), None);
+
+        fs::write(&path, "10 20\n30 40\n").unwrap();
+        assert_eq!(poller.poll(None, false).unwrap(), Some(vec![0.3, 0.4]));
+        assert_eq!(poller.poll(None, false).unwrap(), None);
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn external_poller_runs_process_sources() {
+        let (_, frame) = ExternalPoller::new(
+            &ExternalInputSource::Process("printf '10 20\\n30 40\\n'".to_owned()),
+            None,
+        )
+        .unwrap();
+        let frame = frame.unwrap();
+        assert_eq!(frame, vec![0.3, 0.4]);
     }
 
     #[test]

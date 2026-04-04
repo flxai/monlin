@@ -1,4 +1,5 @@
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+use std::path::PathBuf;
 
 use crate::color::{ColorSpec, Rgb};
 use crate::layout::{parse_layout_spec, Layout};
@@ -61,6 +62,12 @@ pub enum CompletionShell {
     Zsh,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExternalInputSource {
+    File(PathBuf),
+    Process(String),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
 enum DebugCommand {
     #[command(about = "Print sampled metric color ramps")]
@@ -101,6 +108,7 @@ pub struct Config {
     pub once: bool,
     pub colors: Option<Vec<ColorSpec>>,
     pub force_stream_input: bool,
+    pub external_input: Option<ExternalInputSource>,
     pub print_completion: Option<CompletionShell>,
     pub debug_colors_steps: Option<usize>,
     pub show_help: bool,
@@ -217,10 +225,20 @@ where
         }
     }
 
-    let layout = if cli.layout_parts.is_empty() {
+    let joined_layout = cli.layout_parts.join(" ");
+    let external_input = if cli.layout_parts.is_empty() {
+        None
+    } else {
+        parse_external_input(&joined_layout)?
+    };
+    if external_input.is_some() && force_stream_input {
+        return Err("'-' cannot be combined with f:... or p:... input sources".to_owned());
+    }
+
+    let layout = if external_input.is_some() || cli.layout_parts.is_empty() {
         Layout::default()
     } else {
-        parse_layout_spec(&cli.layout_parts.join(" "))?
+        parse_layout_spec(&joined_layout)?
     };
     let colors = (!cli.colors.is_empty()).then_some(cli.colors);
 
@@ -240,6 +258,7 @@ where
         width: cli.width,
         once: cli.once,
         force_stream_input,
+        external_input,
         print_completion: match cli.command {
             Some(CliCommand::Completion { shell }) => Some(shell),
             _ => None,
@@ -253,6 +272,26 @@ where
         },
         show_help: cli.show_help,
     })
+}
+
+fn parse_external_input(raw: &str) -> Result<Option<ExternalInputSource>, String> {
+    if let Some(path) = raw.strip_prefix("f:") {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("f: source path must be non-empty".to_owned());
+        }
+        return Ok(Some(ExternalInputSource::File(PathBuf::from(path))));
+    }
+
+    if let Some(command) = raw.strip_prefix("p:") {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("p: source command must be non-empty".to_owned());
+        }
+        return Ok(Some(ExternalInputSource::Process(command.to_owned())));
+    }
+
+    Ok(None)
 }
 
 fn parse_color_spec(raw: &str) -> Result<ColorSpec, String> {
@@ -363,6 +402,7 @@ pub fn clap_command() -> clap::Command {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
+    use std::path::PathBuf;
 
     fn parse(items: &[&str]) -> Config {
         parse_args(items.iter().map(|item| item.to_string())).unwrap()
