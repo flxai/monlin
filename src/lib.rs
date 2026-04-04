@@ -14,8 +14,8 @@ use std::thread;
 use std::time::Duration;
 
 use clap_complete::{generate, Generator, Shell};
-use config::{ColorMode, ExternalInputSource, OutputMode};
-use layout::{MetricKind, Source};
+use config::{ColorMode, ExternalInputSource, OutputMode, StreamGroup, StreamItem};
+use layout::{Document, MetricKind, Source};
 use metrics::{CanonicalSample, CanonicalValue, MetricValue};
 use serde_json::json;
 
@@ -70,6 +70,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         && io::stdin().is_terminal()
     {
         return Err("stream column references like @1 require stdin input".to_owned());
+    }
+
+    if let Some(result) = maybe_run_document_sources(&config)? {
+        return result;
     }
 
     if let Some(result) = maybe_run_external_stream(&config)? {
@@ -336,6 +340,60 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     }
 }
 
+fn maybe_run_document_sources(
+    config: &config::Config,
+) -> Result<Option<Result<(), String>>, String> {
+    let Some(document) = &config.document else {
+        return Ok(None);
+    };
+    if !document.uses_external_sources() {
+        return Ok(None);
+    }
+    if document.uses_stream_columns() {
+        return Ok(Some(Err(
+            "mixing polled sources with stdin column references is not yet supported".to_owned(),
+        )));
+    }
+    if document
+        .sources()
+        .iter()
+        .any(|source| matches!(source, Source::Metric(_)))
+    {
+        return Ok(Some(Err(
+            "mixing native metrics with polled sources is not yet supported".to_owned(),
+        )));
+    }
+
+    let (groups, sources) = stream_groups_from_external_document(document)?;
+    let mut render_config = config.clone();
+    render_config.stream_groups = Some(groups);
+    render_config.external_input = None;
+
+    let mut pollers = sources
+        .iter()
+        .map(ExternalPoller::from_source)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut current = pollers
+        .iter_mut()
+        .zip(sources.iter())
+        .map(|(poller, source)| match poller.poll(None)? {
+            ExternalPollResult::Frame(frame) => scalar_from_frame(source, frame),
+            ExternalPollResult::NoUpdate => Ok(0.0),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    validate_stream_shape(&render_config, current.len())?;
+
+    let result = match config.output_mode {
+        OutputMode::Terminal => {
+            run_document_external_terminal(&render_config, &sources, &mut pollers, &mut current)
+        }
+        OutputMode::I3bar => {
+            run_document_external_i3bar(&render_config, &sources, &mut pollers, &mut current)
+        }
+    };
+    Ok(Some(result))
+}
+
 fn maybe_run_external_stream(
     config: &config::Config,
 ) -> Result<Option<Result<(), String>>, String> {
@@ -355,6 +413,54 @@ fn maybe_run_external_stream(
         OutputMode::I3bar => run_external_stream_i3bar(config, &mut poller, first_frame),
     };
     Ok(Some(result))
+}
+
+fn stream_groups_from_external_document(
+    document: &Document,
+) -> Result<(Vec<StreamGroup>, Vec<Source>), String> {
+    let mut ordered_sources = Vec::new();
+    let mut source_indices = HashMap::new();
+    let mut groups: Vec<StreamGroup> = Vec::new();
+
+    for row in document.rows() {
+        let mut rendered_row = Vec::with_capacity(row.items().len());
+        for item in row.items() {
+            let source = item.source().clone();
+            if !matches!(source, Source::File(_) | Source::Process(_)) {
+                return Err(
+                    "document stream rendering currently supports only f:/ and p: items"
+                        .to_owned(),
+                );
+            }
+            let index = if let Some(index) = source_indices.get(&source).copied() {
+                index
+            } else {
+                let index = ordered_sources.len();
+                source_indices.insert(source.clone(), index);
+                ordered_sources.push(source);
+                index
+            };
+            rendered_row.push(StreamItem {
+                label: item.label().map(str::to_owned),
+                column_index: index,
+                display: item.display(),
+                basis: item.size(),
+                max_width: item.max_width(),
+                min_width: item.min_width(),
+            });
+        }
+
+        let row_label = row.label().map(str::to_owned);
+        match groups.last_mut() {
+            Some(group) if group.label == row_label => group.rows.push(rendered_row),
+            _ => groups.push(StreamGroup {
+                label: row_label,
+                rows: vec![rendered_row],
+            }),
+        }
+    }
+
+    Ok((groups, ordered_sources))
 }
 
 fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
@@ -411,6 +517,25 @@ fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result
     }
 
     Ok(())
+}
+
+fn describe_source(source: &Source) -> String {
+    match source {
+        Source::Metric(metric) => metric.short_label().to_owned(),
+        Source::StreamColumn(index) => format!("@{}", index + 1),
+        Source::File(path) => format!("f:{}", path.display()),
+        Source::Process(command) => format!("p:{command}"),
+    }
+}
+
+fn scalar_from_frame(source: &Source, frame: Vec<f64>) -> Result<f64, String> {
+    if frame.len() != 1 {
+        return Err(format!(
+            "source {} must produce exactly one numeric value per sample",
+            describe_source(source)
+        ));
+    }
+    Ok(frame[0])
 }
 
 fn run_terminal(
@@ -865,6 +990,111 @@ fn run_external_stream_i3bar(
     Ok(())
 }
 
+fn run_document_external_terminal(
+    config: &config::Config,
+    sources: &[Source],
+    pollers: &mut [ExternalPoller],
+    current: &mut [f64],
+) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
+    let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
+    let mut frame_state = TerminalFrameState::default();
+    let mut histories = init_canonical_stream_histories(current.len(), config.history);
+    let color_enabled = colors_enabled(config.color_mode);
+
+    loop {
+        update_canonical_stream_histories(&mut histories, current, config.history);
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(current);
+        let lines = render::render_stream_lines(
+            config,
+            width,
+            color_enabled,
+            &projected_histories,
+            &projected_values,
+        );
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        for ((poller, source), value) in pollers.iter_mut().zip(sources.iter()).zip(current.iter_mut()) {
+            if let ExternalPollResult::Frame(frame) = poller.poll(None)? {
+                *value = scalar_from_frame(source, frame)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_document_external_i3bar(
+    config: &config::Config,
+    sources: &[Source],
+    pollers: &mut [ExternalPoller],
+    current: &mut [f64],
+) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
+
+    let mut first = true;
+    let mut histories = init_canonical_stream_histories(current.len(), config.history);
+
+    loop {
+        update_canonical_stream_histories(&mut histories, current, config.history);
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(current);
+        let lines =
+            render::render_stream_lines(config, width, false, &projected_histories, &projected_values);
+        let frame = i3bar_frame_json(&lines).to_string();
+
+        if !first {
+            writeln!(stdout, ",{frame}").map_err(io_to_string)?;
+        } else {
+            writeln!(stdout, "{frame}").map_err(io_to_string)?;
+            first = false;
+        }
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout, "]").map_err(io_to_string)?;
+            break;
+        }
+
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        for ((poller, source), value) in pollers.iter_mut().zip(sources.iter()).zip(current.iter_mut()) {
+            if let ExternalPollResult::Frame(frame) = poller.poll(None)? {
+                *value = scalar_from_frame(source, frame)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn sample_lines(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
@@ -950,6 +1180,21 @@ fn parse_stream_frame(line: &str, expected_columns: Option<usize>) -> Result<Vec
 }
 
 impl ExternalPoller {
+    fn from_source(source: &Source) -> Result<Self, String> {
+        match source {
+            Source::File(path) => Ok(Self::File(FilePoller {
+                path: path.clone(),
+                offset: 0,
+                pending: String::new(),
+            })),
+            Source::Process(command) => Ok(Self::Process(command.clone())),
+            Source::Metric(_) | Source::StreamColumn(_) => Err(format!(
+                "unsupported polled source: {}",
+                describe_source(source)
+            )),
+        }
+    }
+
     fn new(
         source: &ExternalInputSource,
         expected_columns: Option<usize>,
@@ -1517,6 +1762,34 @@ mod tests {
         .unwrap();
         let frame = frame.unwrap();
         assert_eq!(frame, vec![30.0, 40.0]);
+    }
+
+    #[test]
+    fn document_external_sources_lower_to_stream_groups() {
+        let document =
+            layout::parse_layout_document("\"pair\"=(one=p:'printf 10', two=f:/tmp/example)")
+                .unwrap();
+        let (groups, sources) = stream_groups_from_external_document(&document).unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].label.as_deref(), Some("pair"));
+        assert_eq!(groups[0].rows.len(), 2);
+        assert_eq!(groups[0].rows[0][0].label.as_deref(), Some("one"));
+        assert_eq!(groups[0].rows[1][0].label.as_deref(), Some("two"));
+        assert_eq!(sources.len(), 2);
+        assert!(matches!(sources[0], Source::Process(_)));
+        assert!(matches!(sources[1], Source::File(_)));
+    }
+
+    #[test]
+    fn mixed_native_and_polled_document_sources_are_rejected() {
+        let mut config =
+            config::parse_args(["monlin"].into_iter().map(str::to_owned)).unwrap();
+        config.document = Some(layout::parse_layout_document("cpu load=p:'printf 10'").unwrap());
+        let result = maybe_run_document_sources(&config).unwrap().unwrap();
+        assert!(result
+            .unwrap_err()
+            .contains("mixing native metrics with polled sources"));
     }
 
     #[test]
