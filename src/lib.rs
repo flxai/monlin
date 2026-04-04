@@ -139,6 +139,7 @@ _monlin_layout() {
     egress
     out
     all
+    avail
     'f:/path/to/file'
     'p:command'
     'label1,label2=f:/path/to/file'
@@ -152,7 +153,7 @@ _monlin_layout() {
   if [[ "$token" == *.* ]]; then
     base="${token%%.*}"
     case "$base" in
-      cpu|rnd|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out)
+      cpu|rnd|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out|all|avail)
         compadd -Q -P "${prefix}${base}." -- pct hum free
         return
         ;;
@@ -185,6 +186,7 @@ _monlin_layout() {
     'egress:Network egress' \
     'out:Network egress' \
     'all:Canonical multi-row layout' \
+    'avail:Canonical multi-row layout filtered to available metrics' \
     'f:/path/to/file:Poll a file for numeric rows' \
     'p:command:Poll a shell command for numeric rows' \
     'label1,label2=f:/path/to/file:Poll a file and label the stream columns' \
@@ -343,10 +345,22 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     let mut sampler = metrics::Sampler::default();
     sampler.prime(requested_metrics).map_err(monlin_error)?;
 
-    let mut histories = init_canonical_metric_histories(requested_metrics, config.history);
-    match config.output_mode {
-        OutputMode::Terminal => run_terminal(&config, &mut sampler, &mut histories),
-        OutputMode::I3bar => run_i3bar(&config, &mut sampler, &mut histories),
+    let mut effective_config = config.clone();
+    if config.layout.filter_available() {
+        let availability = sampler.sample_canonical(requested_metrics).map_err(monlin_error)?;
+        let available = requested_metrics
+            .iter()
+            .copied()
+            .filter(|metric| availability.values.contains_key(&Source::Metric(*metric)))
+            .collect::<std::collections::HashSet<_>>();
+        effective_config.layout = config.layout.retain_available(|metric| available.contains(&metric));
+    }
+
+    let mut histories =
+        init_canonical_metric_histories(effective_config.layout.metrics(), effective_config.history);
+    match effective_config.output_mode {
+        OutputMode::Terminal => run_terminal(&effective_config, &mut sampler, &mut histories),
+        OutputMode::I3bar => run_i3bar(&effective_config, &mut sampler, &mut histories),
     }
 }
 

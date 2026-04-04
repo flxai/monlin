@@ -12,9 +12,11 @@ const AFTER_HELP: &str = "\
 Metrics:
   cpu rnd sys gpu vram gfx memory spc io net ingress egress
   all
+  avail
 
 Notes:
   Layout is the canonical interface.
+  Without a layout, monlin defaults to avail.
   Item syntax is metric[.view][:size][+max][-min], e.g. net.hum:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
@@ -527,6 +529,7 @@ fn document_from_stream_labels(labels: &[String]) -> Document {
                 .collect(),
         )],
         false,
+        false,
     )
 }
 
@@ -558,6 +561,7 @@ mod tests {
         let config = parse(&["monlin"]);
         assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
         assert_eq!(config.layout.rows().len(), 2);
+        assert!(config.layout.filter_available());
         assert_eq!(config.output_mode, OutputMode::Terminal);
     }
 
