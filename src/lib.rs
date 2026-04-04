@@ -354,13 +354,13 @@ _monlin() {{
       return
     fi
     if [[ "$cur" == -* ]]; then
-      _describe -t options 'option' $opts
+      _describe -t options 'option' -- $opts
     fi
     return
   fi
 
   if [[ "$cur" == -* ]]; then
-    _describe -t options 'option' $opts
+    _describe -t options 'option' -- $opts
     return
   fi
 
