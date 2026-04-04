@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MetricKind {
     Cpu,
@@ -295,6 +297,126 @@ impl LayoutItem {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Source {
+    Metric(MetricKind),
+    StreamColumn(usize),
+    File(PathBuf),
+    Process(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Item {
+    label: Option<String>,
+    source: Source,
+    view: LayoutView,
+    display: DisplayMode,
+    size: usize,
+    max_width: Option<usize>,
+    min_width: Option<usize>,
+}
+
+impl Item {
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    pub fn view(&self) -> LayoutView {
+        self.view
+    }
+
+    pub fn display(&self) -> DisplayMode {
+        self.display
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn max_width(&self) -> Option<usize> {
+        self.max_width
+    }
+
+    pub fn min_width(&self) -> Option<usize> {
+        self.min_width
+    }
+
+    fn lower(&self) -> Result<LayoutItem, String> {
+        match self.source {
+            Source::Metric(metric) => Ok(LayoutItem::with_constraints(
+                metric,
+                self.view,
+                self.display,
+                Some(self.size),
+                self.size,
+                self.max_width,
+                self.min_width,
+            )),
+            Source::StreamColumn(index) => Err(format!(
+                "stream source @{} cannot yet be lowered into a native layout",
+                index + 1
+            )),
+            Source::File(ref path) => Err(format!(
+                "file source {} cannot yet be lowered into a native layout",
+                path.display()
+            )),
+            Source::Process(ref command) => Err(format!(
+                "process source {command:?} cannot yet be lowered into a native layout"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Row {
+    items: Vec<Item>,
+}
+
+impl Row {
+    pub fn items(&self) -> &[Item] {
+        &self.items
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Document {
+    rows: Vec<Row>,
+    explicit_rows: bool,
+}
+
+impl Document {
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    pub fn explicit_rows(&self) -> bool {
+        self.explicit_rows
+    }
+
+    fn lower(&self) -> Result<Layout, String> {
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.items
+                    .iter()
+                    .map(Item::lower)
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(if self.explicit_rows {
+            Layout::from_explicit_rows(rows)
+        } else {
+            Layout::from_rows(rows)
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
     rows: Vec<Vec<LayoutItem>>,
     metrics: Vec<MetricKind>,
@@ -387,6 +509,10 @@ pub fn all_metrics() -> &'static [MetricKind] {
 }
 
 pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
+    parse_layout_document(spec)?.lower()
+}
+
+pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     if spec.contains(';') {
         return Err("invalid row separator ';'; use ',' or a literal newline".to_owned());
     }
@@ -421,20 +547,20 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
                 }
                 hinted_rows = Some(count);
                 for item in items {
-                    push_unique(&mut flat, item.metric());
-                    flat_items.push(item);
+                    push_unique_document_metrics(&mut flat, &item.source);
+                    flat_items.push(item.clone());
                     parsed_row.push(item);
                 }
                 continue;
             }
 
-            let item = parse_layout_item(token)?;
-            push_unique(&mut flat, item.metric());
-            flat_items.push(item);
+            let item = parse_document_item(token)?;
+            push_unique_document_metrics(&mut flat, &item.source);
+            flat_items.push(item.clone());
             parsed_row.push(item);
         }
         if !parsed_row.is_empty() {
-            parsed_rows.push(parsed_row);
+            parsed_rows.push(Row { items: parsed_row });
         }
     }
 
@@ -443,18 +569,29 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
     }
 
     if explicit_rows {
-        return Ok(Layout::from_explicit_rows(parsed_rows));
+        return Ok(Document {
+            rows: parsed_rows,
+            explicit_rows: true,
+        });
     }
 
     let rows = if let Some(row_count) = hinted_rows {
-        split_even_rows_items(&flat_items, row_count.max(1))
+        split_even_rows_document_items(&flat_items, row_count.max(1))
     } else if flat_items.len() > 5 {
-        flat_items.chunks(5).map(|row| row.to_vec()).collect()
+        flat_items
+            .chunks(5)
+            .map(|row| Row {
+                items: row.to_vec(),
+            })
+            .collect()
     } else {
-        vec![flat_items]
+        vec![Row { items: flat_items }]
     };
 
-    Ok(Layout::from_rows(rows))
+    Ok(Document {
+        rows,
+        explicit_rows: false,
+    })
 }
 
 fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
@@ -463,7 +600,13 @@ fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
     }
 }
 
-fn parse_all_items(token: &str) -> Result<Option<(usize, Vec<LayoutItem>)>, String> {
+fn push_unique_document_metrics(metrics: &mut Vec<MetricKind>, source: &Source) {
+    if let Source::Metric(metric) = source {
+        push_unique(metrics, *metric);
+    }
+}
+
+fn parse_all_items(token: &str) -> Result<Option<(usize, Vec<Item>)>, String> {
     if token.starts_with("all/") || token.starts_with("all:") {
         return Err("invalid all syntax; use 'all' or write explicit rows".to_owned());
     }
@@ -488,12 +631,20 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, Vec<LayoutItem>)>, Stri
         all_metrics()
             .iter()
             .copied()
-            .map(|metric| LayoutItem::new(metric, view, Some(1), 1))
+            .map(|metric| Item {
+                label: None,
+                source: Source::Metric(metric),
+                view,
+                display: DisplayMode::Full,
+                size: 1,
+                max_width: None,
+                min_width: None,
+            })
             .collect(),
     )))
 }
 
-fn parse_layout_item(token: &str) -> Result<LayoutItem, String> {
+fn parse_document_item(token: &str) -> Result<Item, String> {
     if token.contains('/') {
         return Err("invalid metric syntax: use ':size' only".to_owned());
     }
@@ -548,11 +699,15 @@ fn parse_layout_item(token: &str) -> Result<LayoutItem, String> {
         }
     }
 
-    let grow = basis.unwrap_or(1);
-
-    Ok(LayoutItem::with_constraints(
-        metric, view, display, basis, grow, max_width, min_width,
-    ))
+    Ok(Item {
+        label: None,
+        source: Source::Metric(metric),
+        view,
+        display,
+        size: basis.unwrap_or(1),
+        max_width,
+        min_width,
+    })
 }
 
 fn parse_positive_suffix<'a>(
@@ -621,6 +776,24 @@ fn split_even_rows_items(items: &[LayoutItem], rows: usize) -> Vec<Vec<LayoutIte
         .collect()
 }
 
+fn split_even_rows_document_items(items: &[Item], rows: usize) -> Vec<Row> {
+    let heights = split_even_width(items.len(), rows);
+    let mut start = 0;
+
+    heights
+        .into_iter()
+        .filter(|count| *count > 0)
+        .map(|count| {
+            let end = start + count;
+            let row = Row {
+                items: items[start..end].to_vec(),
+            };
+            start = end;
+            row
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +827,43 @@ mod tests {
                 MetricKind::Vram,
             ]
         );
+    }
+
+    #[test]
+    fn document_parser_preserves_rows_and_metric_sources() {
+        let document = parse_layout_document("cpu ram, gpu").unwrap();
+        assert!(document.explicit_rows());
+        assert_eq!(document.rows().len(), 2);
+        assert_eq!(document.rows()[0].items().len(), 2);
+        assert_eq!(document.rows()[1].items().len(), 1);
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &Source::Metric(MetricKind::Cpu)
+        );
+        assert_eq!(
+            document.rows()[0].items()[1].source(),
+            &Source::Metric(MetricKind::Memory)
+        );
+        assert_eq!(
+            document.rows()[1].items()[0].source(),
+            &Source::Metric(MetricKind::Gpu)
+        );
+    }
+
+    #[test]
+    fn document_lowering_matches_current_layout_behavior() {
+        let document = parse_layout_document("cpu:3 ram.value+8-2").unwrap();
+        let layout = document.lower().unwrap();
+        let item0 = layout.rows()[0][0];
+        let item1 = layout.rows()[0][1];
+
+        assert_eq!(item0.metric(), MetricKind::Cpu);
+        assert_eq!(item0.basis(), Some(3));
+        assert_eq!(item0.grow(), 3);
+        assert_eq!(item1.metric(), MetricKind::Memory);
+        assert_eq!(item1.display(), DisplayMode::Value);
+        assert_eq!(item1.max_width(), Some(8));
+        assert_eq!(item1.min_width(), Some(2));
     }
 
     #[test]
