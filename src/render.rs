@@ -2989,8 +2989,8 @@ fn render_split_braille_graph_with_options(
     solid_colors: bool,
     window: Window,
 ) -> String {
-    let mut uppers = resample_channel(samples, width, MetricValue::upper, window);
-    let mut lowers = resample_channel(samples, width, MetricValue::lower, window);
+    let mut uppers = resample_split_channel(samples, width, MetricValue::upper, window);
+    let mut lowers = resample_split_channel(samples, width, MetricValue::lower, window);
     normalize_split_channels(&mut uppers, &mut lowers);
     let mut out = String::new();
 
@@ -3013,6 +3013,31 @@ fn render_split_braille_graph_with_options(
     }
 
     out
+}
+
+fn resample_split_channel(
+    samples: &[MetricValue],
+    target: usize,
+    channel: fn(MetricValue) -> f64,
+    window: Window,
+) -> Vec<f64> {
+    if target == 0 {
+        return Vec::new();
+    }
+    if samples.is_empty() {
+        return vec![0.0; target];
+    }
+    if window == Window::Tail {
+        let recent_len = target.saturating_mul(2);
+        let recent = if samples.len() > recent_len {
+            &samples[samples.len() - recent_len..]
+        } else {
+            samples
+        };
+        return resample_channel(recent, target, channel, Window::Agg);
+    }
+
+    resample_channel(samples, target, channel, window)
 }
 
 fn normalize_split_channels(uppers: &mut [f64], lowers: &mut [f64]) {
@@ -5525,6 +5550,58 @@ mod tests {
 
         assert_eq!(agg, " █");
         assert_eq!(tail, "██");
+    }
+
+    #[test]
+    fn split_tail_window_uses_recent_two_width_samples() {
+        let samples = [
+            MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            },
+            MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            },
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
+            MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            },
+            MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            },
+        ];
+
+        let agg = render_split_braille_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Net,
+            None,
+            false,
+            false,
+            Window::Agg,
+        );
+        let tail = render_split_braille_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Net,
+            None,
+            false,
+            false,
+            Window::Tail,
+        );
+
+        assert_eq!(agg, "⣿⣿");
+        assert_eq!(tail, "⠰⣿");
     }
 
     #[test]
