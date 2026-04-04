@@ -255,36 +255,8 @@ pub fn visible_hues(count: usize, explicit: Option<&[ColorSpec]>) -> Vec<ColorSp
         .collect()
 }
 
-pub fn metric_hues_for_visible_hue(metric: MetricKind, hue: ColorSpec) -> BaseHues {
-    let mut hues = default_base_hues();
-    match metric {
-        MetricKind::Cpu => hues[0] = hue,
-        MetricKind::Rnd => hues[0] = hue,
-        MetricKind::Sys => {
-            hues[0] = hue;
-            hues[1] = hue;
-        }
-        MetricKind::Memory => hues[1] = hue,
-        MetricKind::Gpu => hues[2] = hue,
-        MetricKind::Vram | MetricKind::Gfx => {
-            hues[2] = hue;
-            hues[3] = hue;
-        }
-        MetricKind::Storage => hues[3] = hue,
-        MetricKind::Io => {
-            hues[4] = hue;
-            hues[5] = hue;
-        }
-        MetricKind::In => hues[4] = hue,
-        MetricKind::Out => hues[5] = hue,
-        MetricKind::Net => {
-            hues[6] = hue;
-            hues[7] = hue;
-        }
-        MetricKind::Ingress => hues[6] = hue,
-        MetricKind::Egress => hues[7] = hue,
-    }
-    hues
+pub fn metric_hues_for_visible_hue(_metric: MetricKind, hue: ColorSpec) -> BaseHues {
+    [hue; 8]
 }
 
 pub fn automatic_hues_for_metrics(metrics: &[MetricKind]) -> BaseHues {
@@ -643,18 +615,15 @@ mod tests {
     }
 
     #[test]
-    fn visible_metric_hues_follow_metric_shape() {
+    fn visible_metric_hues_apply_one_visible_color_to_each_item() {
         let sys = metric_hues_for_visible_hue(MetricKind::Sys, ColorSpec::Angle(42.0));
-        assert_eq!(sys[0], ColorSpec::Angle(42.0));
-        assert_eq!(sys[1], ColorSpec::Angle(42.0));
+        assert!(sys.iter().all(|slot| *slot == ColorSpec::Angle(42.0)));
 
         let io = metric_hues_for_visible_hue(MetricKind::Io, ColorSpec::Angle(210.0));
-        assert_eq!(io[4], ColorSpec::Angle(210.0));
-        assert_eq!(io[5], ColorSpec::Angle(210.0));
+        assert!(io.iter().all(|slot| *slot == ColorSpec::Angle(210.0)));
 
         let net = metric_hues_for_visible_hue(MetricKind::Net, ColorSpec::Angle(275.0));
-        assert_eq!(net[6], ColorSpec::Angle(275.0));
-        assert_eq!(net[7], ColorSpec::Angle(275.0));
+        assert!(net.iter().all(|slot| *slot == ColorSpec::Angle(275.0)));
     }
 
     #[test]
