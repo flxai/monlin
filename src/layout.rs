@@ -60,9 +60,9 @@ impl MetricKind {
             "rnd" | "random" => Some(Self::Rnd),
             "sys" => Some(Self::Sys),
             "gpu" => Some(Self::Gpu),
-            "vram" => Some(Self::Vram),
+            "vram" | "vrm" => Some(Self::Vram),
             "gfx" => Some(Self::Gfx),
-            "memory" | "mem" | "ram" => Some(Self::Memory),
+            "memory" | "ram" => Some(Self::Memory),
             "storage" | "disk" | "space" | "spc" => Some(Self::Storage),
             "io" => Some(Self::Io),
             "net" => Some(Self::Net),
@@ -947,6 +947,10 @@ fn parse_document_entry(
         return Ok(items);
     }
 
+    if let Some(items) = parse_group_alias_items(&token)? {
+        return Ok(items);
+    }
+
     if matches!(parser.peek(), Some(LayoutToken::Equals))
         && matches!(parser.peek_n(1), Some(LayoutToken::Word(_)))
     {
@@ -1004,10 +1008,10 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
         return Err("invalid avail syntax; use 'avail' or write explicit rows".to_owned());
     }
 
-    let (filter_available, view) = if token == "all" {
-        (false, LayoutView::Default)
+    let (count, filter_available, view, metrics) = if token == "all" {
+        (2, false, LayoutView::Default, all_metrics().to_vec())
     } else if token == "avail" {
-        (true, LayoutView::Default)
+        (2, true, LayoutView::Default, all_metrics().to_vec())
     } else if let Some(view_token) = token.strip_prefix("all.") {
         if view_token.contains(':')
             || view_token.contains('/')
@@ -1017,9 +1021,11 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
             return Err("all does not support size or width constraints".to_owned());
         }
         (
+            2,
             false,
             LayoutView::parse(view_token)
                 .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+            all_metrics().to_vec(),
         )
     } else if let Some(view_token) = token.strip_prefix("avail.") {
         if view_token.contains(':')
@@ -1030,7 +1036,55 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
             return Err("avail does not support size or width constraints".to_owned());
         }
         (
+            2,
             true,
+            LayoutView::parse(view_token)
+                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+            all_metrics().to_vec(),
+        )
+    } else {
+        return Ok(None);
+    };
+
+    Ok(Some((
+        count,
+        filter_available,
+        metrics
+            .iter()
+            .copied()
+            .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
+            .collect(),
+    )))
+}
+
+fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
+    let (metrics, view) = if token == "xpu" {
+        (vec![MetricKind::Cpu, MetricKind::Gpu], LayoutView::Default)
+    } else if token == "mem" {
+        (vec![MetricKind::Memory, MetricKind::Vram], LayoutView::Default)
+    } else if let Some(view_token) = token.strip_prefix("xpu.") {
+        if view_token.contains(':')
+            || view_token.contains('/')
+            || view_token.contains('+')
+            || view_token.contains('-')
+        {
+            return Err("xpu does not support size or width constraints".to_owned());
+        }
+        (
+            vec![MetricKind::Cpu, MetricKind::Gpu],
+            LayoutView::parse(view_token)
+                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+        )
+    } else if let Some(view_token) = token.strip_prefix("mem.") {
+        if view_token.contains(':')
+            || view_token.contains('/')
+            || view_token.contains('+')
+            || view_token.contains('-')
+        {
+            return Err("mem does not support size or width constraints".to_owned());
+        }
+        (
+            vec![MetricKind::Memory, MetricKind::Vram],
             LayoutView::parse(view_token)
                 .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
         )
@@ -1038,15 +1092,12 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
         return Ok(None);
     };
 
-    Ok(Some((
-        2,
-        filter_available,
-        all_metrics()
-            .iter()
-            .copied()
+    Ok(Some(
+        metrics
+            .into_iter()
             .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
             .collect(),
-    )))
+    ))
 }
 
 fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item, String> {
@@ -1287,6 +1338,13 @@ mod tests {
                 MetricKind::Gpu,
                 MetricKind::Vram,
             ]
+        );
+        assert_eq!(
+            layout.rows()[1]
+                .iter()
+                .map(|item| item.metric())
+                .collect::<Vec<_>>(),
+            [MetricKind::Memory, MetricKind::Vram, MetricKind::Net]
         );
     }
 
@@ -1537,6 +1595,46 @@ mod tests {
             .iter()
             .flat_map(|row| row.iter())
             .all(|item| item.view() == LayoutView::Pct));
+    }
+
+    #[test]
+    fn xpu_expands_to_cpu_and_gpu() {
+        let layout = parse_layout_spec("xpu").unwrap();
+        assert_eq!(layout.metrics(), &[MetricKind::Cpu, MetricKind::Gpu]);
+        assert_eq!(layout.rows().len(), 1);
+        assert_eq!(
+            layout.rows()[0]
+                .iter()
+                .map(|item| item.metric())
+                .collect::<Vec<_>>(),
+            [MetricKind::Cpu, MetricKind::Gpu]
+        );
+    }
+
+    #[test]
+    fn mem_expands_to_ram_and_vram() {
+        let layout = parse_layout_spec("mem").unwrap();
+        assert_eq!(layout.metrics(), &[MetricKind::Memory, MetricKind::Vram]);
+        assert_eq!(layout.rows().len(), 1);
+        assert_eq!(
+            layout.rows()[0]
+                .iter()
+                .map(|item| item.metric())
+                .collect::<Vec<_>>(),
+            [MetricKind::Memory, MetricKind::Vram]
+        );
+    }
+
+    #[test]
+    fn grouped_metric_aliases_accept_views() {
+        let layout = parse_layout_spec("xpu.pct mem.free").unwrap();
+        assert_eq!(layout.rows().len(), 1);
+        assert!(layout.rows()[0][0..2]
+            .iter()
+            .all(|item| item.view() == LayoutView::Pct));
+        assert!(layout.rows()[0][2..4]
+            .iter()
+            .all(|item| item.view() == LayoutView::Free));
     }
 
     #[test]

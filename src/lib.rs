@@ -120,10 +120,12 @@ _monlin_layout() {
   local -a metrics
   metrics=(
     cpu
+    xpu
     rnd
     sys
     gpu
     vram
+    vrm
     gfx
     memory
     mem
@@ -153,7 +155,7 @@ _monlin_layout() {
   if [[ "$token" == *.* ]]; then
     base="${token%%.*}"
     case "$base" in
-      cpu|rnd|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out|all|avail)
+      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out|all|avail)
         compadd -Q -P "${prefix}${base}." -- pct hum free
         return
         ;;
@@ -167,13 +169,15 @@ _monlin_layout() {
 
   _describe -t metrics 'layout item' \
     'cpu:CPU usage' \
+    'xpu:CPU and GPU pair' \
     'rnd:Synthetic random metric' \
     'sys:CPU and RAM split' \
     'gpu:GPU utilization' \
     'vram:VRAM usage' \
+    'vrm:VRAM usage' \
     'gfx:GPU and VRAM split' \
     'memory:RAM usage' \
-    'mem:RAM usage' \
+    'mem:RAM and VRAM pair' \
     'ram:RAM usage' \
     'storage:Storage usage' \
     'disk:Storage usage' \

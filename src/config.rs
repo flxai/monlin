@@ -10,7 +10,7 @@ const DEFAULT_HISTORY: usize = 512;
 
 const AFTER_HELP: &str = "\
 Metrics:
-  cpu rnd sys gpu vram gfx memory spc io net ingress egress
+  cpu xpu rnd sys gpu vram gfx memory mem spc io net ingress egress
   all
   avail
 
