@@ -13,7 +13,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       staticPkgs = pkgs.pkgsStatic;
       commonArgs = {
-        version = "0.4.0";
+        version = "0.5.0";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.installShellFiles];
