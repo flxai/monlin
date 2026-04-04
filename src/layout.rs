@@ -640,64 +640,153 @@ pub fn parse_layout_spec(spec: &str) -> Result<Layout, String> {
     parse_layout_document(spec)?.lower()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LayoutToken {
+    Word(String),
+    Equals,
+    Comma,
+    LParen,
+    RParen,
+}
+
+fn tokenize_layout_spec(spec: &str) -> Result<Vec<LayoutToken>, String> {
+    let mut tokens = Vec::new();
+    let chars = spec.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '\n' {
+            tokens.push(LayoutToken::Comma);
+            index += 1;
+            continue;
+        }
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '=' => {
+                tokens.push(LayoutToken::Equals);
+                index += 1;
+            }
+            ',' => {
+                tokens.push(LayoutToken::Comma);
+                index += 1;
+            }
+            '(' => {
+                tokens.push(LayoutToken::LParen);
+                index += 1;
+            }
+            ')' => {
+                tokens.push(LayoutToken::RParen);
+                index += 1;
+            }
+            _ => {
+                let mut word = String::new();
+                while index < chars.len() {
+                    let ch = chars[index];
+                    if ch.is_whitespace() || matches!(ch, '=' | ',' | '(' | ')') {
+                        break;
+                    }
+                    if matches!(ch, '"' | '\'') {
+                        let quote = ch;
+                        index += 1;
+                        let start = index;
+                        while index < chars.len() && chars[index] != quote {
+                            index += 1;
+                        }
+                        if index >= chars.len() {
+                            return Err("unterminated quoted string in layout".to_owned());
+                        }
+                        word.extend(chars[start..index].iter());
+                        index += 1;
+                        continue;
+                    }
+
+                    word.push(ch);
+                    index += 1;
+                }
+
+                if word.is_empty() {
+                    return Err("invalid empty token in layout".to_owned());
+                }
+                tokens.push(LayoutToken::Word(word));
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+struct LayoutParser {
+    tokens: Vec<LayoutToken>,
+    index: usize,
+}
+
+impl LayoutParser {
+    fn new(tokens: Vec<LayoutToken>) -> Self {
+        Self { tokens, index: 0 }
+    }
+
+    fn peek(&self) -> Option<&LayoutToken> {
+        self.tokens.get(self.index)
+    }
+
+    fn peek_n(&self, offset: usize) -> Option<&LayoutToken> {
+        self.tokens.get(self.index + offset)
+    }
+
+    fn next(&mut self) -> Option<LayoutToken> {
+        let token = self.tokens.get(self.index).cloned();
+        if token.is_some() {
+            self.index += 1;
+        }
+        token
+    }
+
+    fn at_end(&self) -> bool {
+        self.index >= self.tokens.len()
+    }
+}
+
 pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     if spec.contains(';') {
         return Err("invalid row separator ';'; use ',' or a literal newline".to_owned());
     }
 
-    let explicit_rows = spec.contains(',') || spec.contains('\n');
-    let mut rows = spec
-        .split(|ch| ch == ',' || ch == '\n')
-        .filter_map(|row| {
-            let trimmed = row.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        })
-        .collect::<Vec<_>>();
-    if rows.is_empty() {
-        rows.push(spec.trim());
+    let tokens = tokenize_layout_spec(spec)?;
+    if tokens.is_empty() {
+        return Err("layout must contain at least one metric".to_owned());
     }
+    let contains_group = tokens
+        .iter()
+        .any(|token| matches!(token, LayoutToken::LParen | LayoutToken::RParen));
+    let explicit_rows = spec.contains(',') || spec.contains('\n') || contains_group;
 
+    let mut parser = LayoutParser::new(tokens);
     let mut flat = Vec::new();
     let mut flat_items = Vec::new();
     let mut hinted_rows = None;
-    let mut parsed_rows = Vec::new();
-
-    for row in rows {
-        let mut parsed_row = Vec::new();
-        for token in row.split_whitespace() {
-            if let Some((count, items)) = parse_all_items(token)? {
-                if explicit_rows {
-                    return Err("all cannot be mixed with explicit row separators".to_owned());
-                }
-                hinted_rows = Some(count);
-                for item in items {
-                    push_unique_document_metrics(&mut flat, &item.source);
-                    flat_items.push(item.clone());
-                    parsed_row.push(item);
-                }
-                continue;
-            }
-
-            let item = parse_document_item(token)?;
-            push_unique_document_metrics(&mut flat, &item.source);
-            flat_items.push(item.clone());
-            parsed_row.push(item);
-        }
-        if !parsed_row.is_empty() {
-            parsed_rows.push(Row::new(None, parsed_row));
-        }
+    let rows = parse_document_rows(
+        &mut parser,
+        false,
+        None,
+        explicit_rows,
+        &mut flat,
+        &mut flat_items,
+        &mut hinted_rows,
+    )?;
+    if !parser.at_end() {
+        return Err("unexpected trailing tokens in layout".to_owned());
     }
-
-    if flat.is_empty() {
-        return Err("layout must contain at least one metric".to_owned());
+    if flat_items.is_empty() {
+        return Err("layout must contain at least one layout item".to_owned());
     }
 
     if explicit_rows {
-        return Ok(Document::new(parsed_rows, true));
+        return Ok(Document::new(rows, true));
     }
 
     let rows = if let Some(row_count) = hinted_rows {
@@ -712,6 +801,166 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     };
 
     Ok(Document::new(rows, false))
+}
+
+fn parse_document_rows(
+    parser: &mut LayoutParser,
+    stop_at_rparen: bool,
+    inherited_label: Option<String>,
+    explicit_rows: bool,
+    flat: &mut Vec<MetricKind>,
+    flat_items: &mut Vec<Item>,
+    hinted_rows: &mut Option<usize>,
+) -> Result<Vec<Row>, String> {
+    let mut rows = Vec::new();
+    let mut current = Vec::new();
+
+    while !parser.at_end() {
+        match parser.peek() {
+            Some(LayoutToken::RParen) if stop_at_rparen => break,
+            Some(LayoutToken::Comma) => {
+                parser.next();
+                if current.is_empty() {
+                    return Err("rows cannot be empty".to_owned());
+                }
+                rows.push(Row::new(inherited_label.clone(), current));
+                current = Vec::new();
+            }
+            _ if starts_group(parser) => {
+                if !current.is_empty() {
+                    return Err("groups cannot appear inline with other items".to_owned());
+                }
+                rows.extend(parse_document_group(
+                    parser,
+                    explicit_rows,
+                    flat,
+                    flat_items,
+                    hinted_rows,
+                )?);
+                if matches!(parser.peek(), Some(LayoutToken::Comma)) {
+                    parser.next();
+                }
+            }
+            _ => {
+                let items = parse_document_entry(parser, explicit_rows, hinted_rows)?;
+                for item in items {
+                    push_unique_document_metrics(flat, &item.source);
+                    flat_items.push(item.clone());
+                    current.push(item);
+                }
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        rows.push(Row::new(inherited_label, current));
+    }
+
+    if rows.is_empty() {
+        Err("layout must contain at least one metric".to_owned())
+    } else {
+        if !explicit_rows && rows.len() > 1 {
+            *hinted_rows = Some(rows.len());
+        }
+        Ok(rows)
+    }
+}
+
+fn parse_document_group(
+    parser: &mut LayoutParser,
+    explicit_rows: bool,
+    flat: &mut Vec<MetricKind>,
+    flat_items: &mut Vec<Item>,
+    hinted_rows: &mut Option<usize>,
+) -> Result<Vec<Row>, String> {
+    let label = if matches!(
+        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
+        (
+            Some(LayoutToken::Word(_)),
+            Some(LayoutToken::Equals),
+            Some(LayoutToken::LParen)
+        )
+    ) {
+        match parser.next() {
+            Some(LayoutToken::Word(label)) => {
+                expect_layout_token(parser, LayoutToken::Equals)?;
+                Some(label)
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        None
+    };
+
+    expect_layout_token(parser, LayoutToken::LParen)?;
+    let rows = parse_document_rows(
+        parser,
+        true,
+        label,
+        true,
+        flat,
+        flat_items,
+        hinted_rows,
+    )?;
+    expect_layout_token(parser, LayoutToken::RParen)?;
+    let _ = explicit_rows;
+    Ok(rows)
+}
+
+fn parse_document_entry(
+    parser: &mut LayoutParser,
+    explicit_rows: bool,
+    hinted_rows: &mut Option<usize>,
+) -> Result<Vec<Item>, String> {
+    let token = match parser.next() {
+        Some(LayoutToken::Word(word)) => word,
+        Some(other) => return Err(format!("unexpected token in layout: {:?}", other)),
+        None => return Err("unexpected end of layout".to_owned()),
+    };
+
+    if let Some((count, items)) = parse_all_items(&token)? {
+        if explicit_rows {
+            return Err("all cannot be mixed with explicit row separators".to_owned());
+        }
+        *hinted_rows = Some(count);
+        return Ok(items);
+    }
+
+    if matches!(parser.peek(), Some(LayoutToken::Equals))
+        && matches!(parser.peek_n(1), Some(LayoutToken::Word(_)))
+    {
+        parser.next();
+        let source = match parser.next() {
+            Some(LayoutToken::Word(word)) => word,
+            _ => unreachable!(),
+        };
+        return Ok(vec![parse_document_source_item(Some(token), &source)?]);
+    }
+
+    Ok(vec![parse_document_source_item(None, &token)?])
+}
+
+fn starts_group(parser: &LayoutParser) -> bool {
+    matches!(
+        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
+        (
+            Some(LayoutToken::Word(_)),
+            Some(LayoutToken::Equals),
+            Some(LayoutToken::LParen)
+        )
+    ) || matches!(parser.peek(), Some(LayoutToken::LParen))
+}
+
+fn expect_layout_token(parser: &mut LayoutParser, expected: LayoutToken) -> Result<(), String> {
+    let actual = parser.next();
+    if actual.as_ref() == Some(&expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unexpected token in layout: expected {:?}, got {:?}",
+            expected, actual
+        ))
+    }
 }
 
 fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
@@ -751,28 +1000,17 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, Vec<Item>)>, String> {
         all_metrics()
             .iter()
             .copied()
-            .map(|metric| Item {
-                label: None,
-                source: Source::Metric(metric),
-                view,
-                display: DisplayMode::Full,
-                size: 1,
-                max_width: None,
-                min_width: None,
-            })
+            .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
             .collect(),
     )))
 }
 
-fn parse_document_item(token: &str) -> Result<Item, String> {
-    if token.contains('/') {
-        return Err("invalid metric syntax: use ':size' only".to_owned());
-    }
+fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item, String> {
     let (head, min_width) = parse_positive_suffix(token, '-', "metric min width")?;
     let (head, max_width) = parse_positive_suffix(head, '+', "metric max width")?;
 
-    let (head, basis) = match head.split_once(':') {
-        Some((head, basis)) => {
+    let (head, basis) = match head.rsplit_once(':') {
+        Some((head, basis)) if basis.chars().all(|ch| ch.is_ascii_digit()) => {
             let parsed = basis
                 .parse::<usize>()
                 .map_err(|_| format!("invalid metric size: {basis}"))?;
@@ -781,14 +1019,29 @@ fn parse_document_item(token: &str) -> Result<Item, String> {
             }
             (head, Some(parsed))
         }
-        None => (head, Some(1)),
+        Some((_, basis))
+            if !head.starts_with("p:") && !head.starts_with("f:") && basis.contains('/') =>
+        {
+            return Err("invalid metric syntax: use ':size' only".to_owned());
+        }
+        _ => (head, Some(1)),
     };
 
-    let mut parts = head.split('.');
-    let metric_token = parts.next().unwrap_or_default();
+    let mut metric_token = head;
     let mut view = LayoutView::Default;
     let mut display = DisplayMode::Full;
-    for suffix in parts {
+    let mut suffixes = Vec::new();
+    while let Some((prefix, suffix)) = metric_token.rsplit_once('.') {
+        if LayoutView::parse(suffix).is_some() || DisplayMode::parse(suffix).is_some() {
+            suffixes.push(suffix);
+            metric_token = prefix;
+            continue;
+        }
+        break;
+    }
+    suffixes.reverse();
+
+    for suffix in suffixes {
         if let Some(parsed_view) = LayoutView::parse(suffix) {
             if view != LayoutView::Default {
                 return Err(format!("duplicate metric view: {suffix}"));
@@ -806,8 +1059,6 @@ fn parse_document_item(token: &str) -> Result<Item, String> {
         return Err(format!("unknown metric suffix: {suffix}"));
     }
 
-    let metric =
-        MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
     if let (Some(min_width), Some(max_width)) = (min_width, max_width) {
         if min_width > max_width {
             return Err("metric min width cannot exceed max width".to_owned());
@@ -819,12 +1070,60 @@ fn parse_document_item(token: &str) -> Result<Item, String> {
         }
     }
 
+    let size = basis.unwrap_or(1);
+    if let Some(column) = metric_token.strip_prefix('@') {
+        let parsed_column = column
+            .parse::<usize>()
+            .map_err(|_| format!("invalid stream column reference: @{column}"))?;
+        if parsed_column == 0 {
+            return Err("stream column references are 1-based; use @1, @2, ...".to_owned());
+        }
+        return Ok(Item::stream_column(
+            label,
+            parsed_column - 1,
+            display,
+            size,
+            max_width,
+            min_width,
+        ));
+    }
+    if let Some(path) = metric_token.strip_prefix("f:") {
+        let path = path.trim();
+        if path.is_empty() {
+            return Err("f: source path must be non-empty".to_owned());
+        }
+        return Ok(Item::file(
+            label,
+            PathBuf::from(path),
+            display,
+            size,
+            max_width,
+            min_width,
+        ));
+    }
+    if let Some(command) = metric_token.strip_prefix("p:") {
+        let command = command.trim();
+        if command.is_empty() {
+            return Err("p: source command must be non-empty".to_owned());
+        }
+        return Ok(Item::process(
+            label,
+            command.to_owned(),
+            display,
+            size,
+            max_width,
+            min_width,
+        ));
+    }
+
+    let metric =
+        MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
     Ok(Item {
-        label: None,
+        label,
         source: Source::Metric(metric),
         view,
         display,
-        size: basis.unwrap_or(1),
+        size,
         max_width,
         min_width,
     })
@@ -836,7 +1135,7 @@ fn parse_positive_suffix<'a>(
     label: &str,
 ) -> Result<(&'a str, Option<usize>), String> {
     match token.rsplit_once(delimiter) {
-        Some((head, value)) => {
+        Some((head, value)) if value.chars().all(|ch| ch.is_ascii_digit()) => {
             let parsed = value
                 .parse::<usize>()
                 .map_err(|_| format!("invalid {label}: {value}"))?;
@@ -845,7 +1144,7 @@ fn parse_positive_suffix<'a>(
             }
             Ok((head, Some(parsed)))
         }
-        None => Ok((token, None)),
+        _ => Ok((token, None)),
     }
 }
 
@@ -966,6 +1265,31 @@ mod tests {
             document.rows()[1].items()[0].source(),
             &Source::Metric(MetricKind::Gpu)
         );
+    }
+
+    #[test]
+    fn document_parser_handles_stream_and_process_sources() {
+        let document =
+            parse_layout_document("cpu=@1 \"load avg\"=p:'cut -f 1 -d\\  /proc/loadavg'").unwrap();
+        assert_eq!(document.rows().len(), 1);
+        assert_eq!(document.rows()[0].items()[0].label(), Some("cpu"));
+        assert_eq!(document.rows()[0].items()[0].source(), &Source::StreamColumn(0));
+        assert_eq!(document.rows()[0].items()[1].label(), Some("load avg"));
+        assert_eq!(
+            document.rows()[0].items()[1].source(),
+            &Source::Process("cut -f 1 -d\\  /proc/loadavg".to_owned())
+        );
+    }
+
+    #[test]
+    fn document_parser_applies_group_labels_to_rows() {
+        let document = parse_layout_document("\"pair\"=(a=@1, b=@2)").unwrap();
+        assert!(document.explicit_rows());
+        assert_eq!(document.rows().len(), 2);
+        assert_eq!(document.rows()[0].label(), Some("pair"));
+        assert_eq!(document.rows()[1].label(), Some("pair"));
+        assert_eq!(document.rows()[0].items()[0].label(), Some("a"));
+        assert_eq!(document.rows()[1].items()[0].label(), Some("b"));
     }
 
     #[test]
