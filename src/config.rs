@@ -282,28 +282,30 @@ where
     if external_input.is_some() && force_stream_input {
         return Err("'-' cannot be combined with f:... or p:... input sources".to_owned());
     }
-    let stream_groups = if external_input.is_none()
-        && !joined_layout.trim().is_empty()
-        && looks_like_stream_group_spec(&joined_layout)
-    {
-        Some(parse_stream_groups_spec(&joined_layout)?)
-    } else {
-        None
-    };
-    if (inline_stream_labels.is_some() || stream_groups.is_some()) && !cli.stream_labels.is_empty()
-    {
+    let stream_groups = None;
+    if inline_stream_labels.is_some() && !cli.stream_labels.is_empty() {
         return Err("inline stream labels cannot be combined with --labels".to_owned());
     }
+    if document
+        .as_ref()
+        .is_some_and(|document| document.uses_stream_columns())
+        && !cli.stream_labels.is_empty()
+    {
+        return Err("stream column layouts cannot be combined with --labels".to_owned());
+    }
 
-    let layout =
-        if external_input.is_some() || stream_groups.is_some() || cli.layout_parts.is_empty() {
-            Layout::default()
-        } else {
-            parse_layout_spec(&joined_layout)?
-        };
-    let document = if let Some(groups) = &stream_groups {
-        Some(document_from_stream_groups(groups))
-    } else if external_input.is_some() {
+    let layout = if external_input.is_some()
+        || stream_groups.is_some()
+        || cli.layout_parts.is_empty()
+        || document
+            .as_ref()
+            .is_some_and(|document| !document.is_native_only())
+    {
+        Layout::default()
+    } else {
+        parse_layout_spec(&joined_layout)?
+    };
+    let document = if external_input.is_some() {
         inline_stream_labels
             .as_ref()
             .map(|labels| document_from_stream_labels(labels))
@@ -505,172 +507,6 @@ fn parse_stream_label(raw: &str) -> Result<String, String> {
     }
 }
 
-fn looks_like_stream_group_spec(raw: &str) -> bool {
-    raw.contains('@') || raw.contains("=(") || raw.starts_with('(')
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum StreamToken {
-    Word(String),
-    Equals,
-    Comma,
-    LParen,
-    RParen,
-}
-
-fn tokenize_stream_spec(spec: &str) -> Result<Vec<StreamToken>, String> {
-    let mut tokens = Vec::new();
-    let chars = spec.chars().collect::<Vec<_>>();
-    let mut index = 0;
-
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch.is_whitespace() {
-            index += 1;
-            continue;
-        }
-
-        match ch {
-            '=' => {
-                tokens.push(StreamToken::Equals);
-                index += 1;
-            }
-            ',' => {
-                tokens.push(StreamToken::Comma);
-                index += 1;
-            }
-            '(' => {
-                tokens.push(StreamToken::LParen);
-                index += 1;
-            }
-            ')' => {
-                tokens.push(StreamToken::RParen);
-                index += 1;
-            }
-            _ => {
-                let mut word = String::new();
-                while index < chars.len() {
-                    let ch = chars[index];
-                    if ch.is_whitespace() || matches!(ch, '=' | ',' | '(' | ')') {
-                        break;
-                    }
-                    if matches!(ch, '"' | '\'') {
-                        let quote = ch;
-                        index += 1;
-                        let start = index;
-                        while index < chars.len() && chars[index] != quote {
-                            index += 1;
-                        }
-                        if index >= chars.len() {
-                            return Err("unterminated quoted string in stream layout".to_owned());
-                        }
-                        word.extend(chars[start..index].iter());
-                        index += 1;
-                        continue;
-                    }
-
-                    word.push(ch);
-                    index += 1;
-                }
-
-                if word.is_empty() {
-                    return Err("invalid empty token in stream layout".to_owned());
-                }
-                tokens.push(StreamToken::Word(word));
-            }
-        }
-    }
-
-    Ok(tokens)
-}
-
-struct StreamParser {
-    tokens: Vec<StreamToken>,
-    index: usize,
-}
-
-impl StreamParser {
-    fn new(tokens: Vec<StreamToken>) -> Self {
-        Self { tokens, index: 0 }
-    }
-
-    fn peek(&self) -> Option<&StreamToken> {
-        self.tokens.get(self.index)
-    }
-
-    fn peek_n(&self, offset: usize) -> Option<&StreamToken> {
-        self.tokens.get(self.index + offset)
-    }
-
-    fn next(&mut self) -> Option<StreamToken> {
-        let token = self.tokens.get(self.index).cloned();
-        if token.is_some() {
-            self.index += 1;
-        }
-        token
-    }
-
-    fn at_end(&self) -> bool {
-        self.index >= self.tokens.len()
-    }
-}
-
-fn parse_stream_groups_spec(spec: &str) -> Result<Vec<StreamGroup>, String> {
-    let tokens = tokenize_stream_spec(spec)?;
-    if tokens.is_empty() {
-        return Err("stream layout must contain at least one @N reference".to_owned());
-    }
-
-    let mut parser = StreamParser::new(tokens);
-    let starts_with_group = matches!(
-        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
-        (
-            Some(StreamToken::Word(_)),
-            Some(StreamToken::Equals),
-            Some(StreamToken::LParen)
-        )
-    ) || matches!(parser.peek(), Some(StreamToken::LParen));
-
-    if starts_with_group {
-        let mut groups = Vec::new();
-        while !parser.at_end() {
-            groups.push(parse_stream_group(&mut parser)?);
-        }
-        Ok(groups)
-    } else {
-        Ok(vec![StreamGroup {
-            label: None,
-            rows: parse_stream_rows(&mut parser, false)?,
-        }])
-    }
-}
-
-fn document_from_stream_groups(groups: &[StreamGroup]) -> Document {
-    let rows = groups
-        .iter()
-        .flat_map(|group| {
-            group.rows.iter().map(|row| {
-                Row::new(
-                    group.label.clone(),
-                    row.iter()
-                        .map(|item| {
-                            Item::stream_column(
-                                item.label.clone(),
-                                item.column_index,
-                                item.display,
-                                item.basis,
-                                item.max_width,
-                                item.min_width,
-                            )
-                        })
-                        .collect(),
-                )
-            })
-        })
-        .collect();
-    Document::new(rows, true)
-}
-
 fn document_from_stream_labels(labels: &[String]) -> Document {
     Document::new(
         vec![Row::new(
@@ -692,171 +528,6 @@ fn document_from_stream_labels(labels: &[String]) -> Document {
         )],
         false,
     )
-}
-
-fn parse_stream_group(parser: &mut StreamParser) -> Result<StreamGroup, String> {
-    let label = if matches!(
-        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
-        (
-            Some(StreamToken::Word(_)),
-            Some(StreamToken::Equals),
-            Some(StreamToken::LParen)
-        )
-    ) {
-        match parser.next() {
-            Some(StreamToken::Word(label)) => {
-                expect_stream_token(parser, StreamToken::Equals)?;
-                Some(label)
-            }
-            _ => unreachable!(),
-        }
-    } else {
-        None
-    };
-
-    expect_stream_token(parser, StreamToken::LParen)?;
-    let rows = parse_stream_rows(parser, true)?;
-    expect_stream_token(parser, StreamToken::RParen)?;
-    Ok(StreamGroup { label, rows })
-}
-
-fn parse_stream_rows(
-    parser: &mut StreamParser,
-    stop_at_rparen: bool,
-) -> Result<Vec<Vec<StreamItem>>, String> {
-    let mut rows = Vec::new();
-    let mut current = Vec::new();
-
-    loop {
-        match parser.peek() {
-            None => break,
-            Some(StreamToken::RParen) if stop_at_rparen => break,
-            Some(StreamToken::Comma) => {
-                parser.next();
-                if current.is_empty() {
-                    return Err("stream rows cannot be empty".to_owned());
-                }
-                rows.push(current);
-                current = Vec::new();
-            }
-            _ => current.push(parse_stream_item(parser)?),
-        }
-    }
-
-    if current.is_empty() && rows.is_empty() {
-        return Err("stream layout must contain at least one @N item".to_owned());
-    }
-    if !current.is_empty() {
-        rows.push(current);
-    }
-
-    Ok(rows)
-}
-
-fn parse_stream_item(parser: &mut StreamParser) -> Result<StreamItem, String> {
-    let label = if matches!(
-        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
-        (
-            Some(StreamToken::Word(_)),
-            Some(StreamToken::Equals),
-            Some(StreamToken::Word(_))
-        )
-    ) {
-        let label = match parser.next() {
-            Some(StreamToken::Word(label)) => label,
-            _ => unreachable!(),
-        };
-        expect_stream_token(parser, StreamToken::Equals)?;
-        Some(label)
-    } else {
-        None
-    };
-
-    let source = match parser.next() {
-        Some(StreamToken::Word(word)) => word,
-        Some(other) => return Err(format!("unexpected token in stream item: {:?}", other)),
-        None => return Err("unexpected end of stream layout".to_owned()),
-    };
-
-    let (source, min_width) = parse_positive_stream_suffix(&source, '-', "stream min width")?;
-    let (source, max_width) = parse_positive_stream_suffix(source, '+', "stream max width")?;
-
-    let (source, basis) = match source.split_once(':') {
-        Some((head, basis)) => {
-            let parsed = basis
-                .parse::<usize>()
-                .map_err(|_| format!("invalid stream size: {basis}"))?;
-            if parsed == 0 {
-                return Err("stream sizes must be greater than zero".to_owned());
-            }
-            (head, parsed)
-        }
-        None => (source, 1),
-    };
-
-    let mut parts = source.split('.');
-    let source_token = parts.next().unwrap_or_default();
-    let mut display = DisplayMode::Full;
-    for suffix in parts {
-        if let Some(parsed_display) = DisplayMode::parse(suffix) {
-            if display != DisplayMode::Full {
-                return Err(format!("duplicate display mode: {suffix}"));
-            }
-            display = parsed_display;
-            continue;
-        }
-        return Err(format!("unknown stream suffix: {suffix}"));
-    }
-
-    let Some(column) = source_token.strip_prefix('@') else {
-        return Err(format!("unknown stream source: {source_token}"));
-    };
-    let parsed_column = column
-        .parse::<usize>()
-        .map_err(|_| format!("invalid stream column reference: @{column}"))?;
-    if parsed_column == 0 {
-        return Err("stream column references are 1-based; use @1, @2, ...".to_owned());
-    }
-
-    Ok(StreamItem {
-        label,
-        column_index: parsed_column - 1,
-        display,
-        basis,
-        max_width,
-        min_width,
-    })
-}
-
-fn expect_stream_token(parser: &mut StreamParser, expected: StreamToken) -> Result<(), String> {
-    let actual = parser.next();
-    if actual.as_ref() == Some(&expected) {
-        Ok(())
-    } else {
-        Err(format!(
-            "unexpected token in stream layout: expected {:?}, got {:?}",
-            expected, actual
-        ))
-    }
-}
-
-fn parse_positive_stream_suffix<'a>(
-    token: &'a str,
-    delimiter: char,
-    label: &str,
-) -> Result<(&'a str, Option<usize>), String> {
-    match token.rsplit_once(delimiter) {
-        Some((head, value)) => {
-            let parsed = value
-                .parse::<usize>()
-                .map_err(|_| format!("invalid {label}: {value}"))?;
-            if parsed == 0 {
-                return Err(format!("{label}s must be greater than zero"));
-            }
-            Ok((head, Some(parsed)))
-        }
-        None => Ok((token, None)),
-    }
 }
 
 pub fn help_text() -> String {
@@ -1026,30 +697,7 @@ mod tests {
     fn parses_stream_column_layout_items() {
         let config = parse(&["monlin", "cpu=@1", "ram=@2"]);
         let document = config.document.as_ref().unwrap();
-        assert_eq!(
-            config.stream_groups,
-            Some(vec![StreamGroup {
-                label: None,
-                rows: vec![vec![
-                    StreamItem {
-                        label: Some("cpu".to_owned()),
-                        column_index: 0,
-                        display: DisplayMode::Full,
-                        basis: 1,
-                        max_width: None,
-                        min_width: None,
-                    },
-                    StreamItem {
-                        label: Some("ram".to_owned()),
-                        column_index: 1,
-                        display: DisplayMode::Full,
-                        basis: 1,
-                        max_width: None,
-                        min_width: None,
-                    }
-                ]],
-            }])
-        );
+        assert_eq!(config.stream_groups, None);
         assert_eq!(document.rows().len(), 1);
         assert_eq!(document.rows()[0].items()[0].label(), Some("cpu"));
         assert_eq!(
@@ -1062,30 +710,7 @@ mod tests {
     fn parses_labeled_stream_groups() {
         let config = parse(&["monlin", "\"two randoms\"=(\"1st program\"=@1, 2nd=@2)"]);
         let document = config.document.as_ref().unwrap();
-        assert_eq!(
-            config.stream_groups,
-            Some(vec![StreamGroup {
-                label: Some("two randoms".to_owned()),
-                rows: vec![
-                    vec![StreamItem {
-                        label: Some("1st program".to_owned()),
-                        column_index: 0,
-                        display: DisplayMode::Full,
-                        basis: 1,
-                        max_width: None,
-                        min_width: None,
-                    }],
-                    vec![StreamItem {
-                        label: Some("2nd".to_owned()),
-                        column_index: 1,
-                        display: DisplayMode::Full,
-                        basis: 1,
-                        max_width: None,
-                        min_width: None,
-                    }]
-                ],
-            }])
-        );
+        assert_eq!(config.stream_groups, None);
         assert_eq!(document.rows().len(), 2);
         assert_eq!(document.rows()[0].label(), Some("two randoms"));
         assert_eq!(document.rows()[1].label(), Some("two randoms"));

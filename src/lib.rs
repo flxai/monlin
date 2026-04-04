@@ -556,7 +556,13 @@ fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result
         }
     }
 
-    if let Some(groups) = &config.stream_groups {
+    let derived_groups = config
+        .document
+        .as_ref()
+        .filter(|document| document.uses_stream_columns())
+        .map(stream_groups_from_stream_document)
+        .transpose()?;
+    if let Some(groups) = derived_groups.as_ref().or(config.stream_groups.as_ref()) {
         let max_ref = groups
             .iter()
             .flat_map(|group| group.rows.iter())
