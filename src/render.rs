@@ -4,8 +4,7 @@ use std::env;
 use clap::ValueEnum;
 
 use crate::color::{
-    gradient_for_with_hues, interpolate, metric_hues_for_visible_hue, paint,
-    split_gradients_for_with_hues, visible_hues, BaseHues, ColorSpec,
+    color_for_intensity, metric_hues_for_visible_hue, paint, visible_hues, BaseHues, ColorSpec,
 };
 use crate::config::{Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout};
 use crate::layout::{
@@ -2528,7 +2527,7 @@ fn render_block_graph(
         .map(|sample| {
             let idx = (sample.clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f64).round() as usize;
             let ch = BLOCKS[idx.min(BLOCKS.len() - 1)].to_string();
-            let color = interpolate(gradient_for_with_hues(metric, hues), sample);
+            let color = color_for_intensity(metric, hues, sample);
             paint(&ch, color, color_enabled)
         })
         .collect()
@@ -2557,7 +2556,7 @@ pub(crate) fn render_braille_graph(
         let right = quantize_level(chunk.get(1).copied().unwrap_or(0.0));
         let cell = braille_cell(left, right);
         let intensity = chunk.iter().copied().reduce(f64::max).unwrap_or(0.0);
-        let color = interpolate(gradient_for_with_hues(metric, hues), intensity);
+        let color = color_for_intensity(metric, hues, intensity);
         out.push_str(&paint(&cell.to_string(), color, color_enabled));
     }
 
@@ -2574,10 +2573,6 @@ fn render_split_braille_graph(
     let mut uppers = resample_channel(samples, width, MetricValue::upper);
     let mut lowers = resample_channel(samples, width, MetricValue::lower);
     normalize_split_channels(&mut uppers, &mut lowers);
-    let (upper_gradient, lower_gradient) = split_gradients_for_with_hues(metric, hues).unwrap_or((
-        gradient_for_with_hues(metric, hues),
-        gradient_for_with_hues(metric, hues),
-    ));
     let mut out = String::new();
 
     for index in 0..width {
@@ -2591,8 +2586,8 @@ fn render_split_braille_graph(
             lower,
             upper_intensity,
             lower_intensity,
-            upper_gradient,
-            lower_gradient,
+            metric,
+            hues,
             color_enabled,
         ));
     }
@@ -2693,21 +2688,21 @@ fn render_split_cell(
     lower_level: usize,
     upper_intensity: f64,
     lower_intensity: f64,
-    upper_gradient: crate::color::Gradient,
-    lower_gradient: crate::color::Gradient,
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
     color_enabled: bool,
 ) -> String {
     if upper_level == 0 && lower_level == 0 {
         let ch = braille_half_cell(1, 1).to_string();
-        let upper_color = interpolate(upper_gradient, 0.0);
-        let lower_color = interpolate(lower_gradient, 0.0);
+        let upper_color = color_for_intensity(metric, hues, 0.0);
+        let lower_color = color_for_intensity(metric, hues, 0.0);
         let color = blend_split_color(1, 1, upper_color, lower_color);
         return paint(&ch, color, color_enabled);
     }
 
     let ch = braille_half_cell(upper_level, lower_level).to_string();
-    let upper_color = interpolate(upper_gradient, upper_intensity);
-    let lower_color = interpolate(lower_gradient, lower_intensity);
+    let upper_color = color_for_intensity(metric, hues, upper_intensity);
+    let lower_color = color_for_intensity(metric, hues, lower_intensity);
     let color = blend_split_color(upper_level, lower_level, upper_color, lower_color);
     paint(&ch, color, color_enabled)
 }
@@ -2780,7 +2775,7 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::color::split_gradients_for;
+    use crate::color::{interpolate, split_gradients_for};
     use crate::config::{ColorMode, Config, OutputMode};
     use crate::layout::{Layout, LayoutView, MetricKind};
 

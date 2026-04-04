@@ -1,5 +1,6 @@
 use crate::layout::MetricKind;
 use chromata::{popular, Theme};
+use colorous as scientific;
 use palette::{Clamp, FromColor, Lab, LabHue, Lch, Mix, Srgb};
 use splines::{Interpolation, Key, Spline};
 use std::sync::OnceLock;
@@ -22,12 +23,22 @@ pub struct Rgb {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColorSpec {
     Angle(f32),
+    Map(ColorMapKind),
     Lch {
         lightness: f32,
         chroma: f32,
         hue: f32,
     },
     Rgb(Rgb),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ColorMapKind {
+    Turbo,
+    Viridis,
+    Plasma,
+    Magma,
+    Inferno,
 }
 
 pub fn palette_names() -> &'static [&'static str] {
@@ -54,6 +65,21 @@ pub fn palette_names() -> &'static [&'static str] {
         "tokyonight-light",
         "dracula",
     ]
+}
+
+pub fn colormap_names() -> &'static [&'static str] {
+    &["turbo", "viridis", "plasma", "magma", "inferno"]
+}
+
+pub fn named_colormap(name: &str) -> Option<ColorMapKind> {
+    match name.to_ascii_lowercase().as_str() {
+        "turbo" => Some(ColorMapKind::Turbo),
+        "viridis" => Some(ColorMapKind::Viridis),
+        "plasma" => Some(ColorMapKind::Plasma),
+        "magma" => Some(ColorMapKind::Magma),
+        "inferno" => Some(ColorMapKind::Inferno),
+        _ => None,
+    }
 }
 
 pub fn named_palette(name: &str) -> Option<Vec<ColorSpec>> {
@@ -345,6 +371,13 @@ pub fn interpolate(gradient: Gradient, t: f64) -> Rgb {
     lab_to_rgb(low.mix(high, eased))
 }
 
+pub fn color_for_intensity(metric: MetricKind, hues: Option<&BaseHues>, t: f64) -> Rgb {
+    match hues.and_then(|values| values.first()).copied() {
+        Some(ColorSpec::Map(map)) => colormap_rgb(map, t),
+        _ => interpolate(gradient_for_with_hues(metric, hues), t),
+    }
+}
+
 pub fn paint(text: &str, color: Rgb, enabled: bool) -> String {
     if !enabled {
         return text.to_owned();
@@ -435,6 +468,10 @@ fn circular_midpoint(a: f32, b: f32) -> f32 {
 fn gradient_from_spec(spec: ColorSpec) -> Gradient {
     match spec {
         ColorSpec::Angle(hue_degrees) => gradient_from_hue(hue_degrees),
+        ColorSpec::Map(map) => Gradient {
+            low: colormap_rgb(map, 0.0),
+            high: colormap_rgb(map, 1.0),
+        },
         ColorSpec::Lch {
             lightness,
             chroma,
@@ -462,24 +499,40 @@ fn gradient_from_lch(lightness: f32, chroma: f32, hue: f32) -> Gradient {
 }
 
 fn gradient_from_rgb(rgb: Rgb) -> Gradient {
-    let high_lch = rgb_to_lch(rgb);
-    let low = lch_to_rgb(
-        (high_lch.l * (DEFAULT_LOW_LIGHTNESS / DEFAULT_HIGH_LIGHTNESS)).clamp(0.0, 100.0),
-        high_lch.chroma * (DEFAULT_LOW_CHROMA / DEFAULT_HIGH_CHROMA),
-        high_lch.hue.into_degrees(),
-    );
+    let scale = DEFAULT_LOW_LIGHTNESS / DEFAULT_HIGH_LIGHTNESS;
+    let low = Rgb {
+        r: (f32::from(rgb.r) * scale).round() as u8,
+        g: (f32::from(rgb.g) * scale).round() as u8,
+        b: (f32::from(rgb.b) * scale).round() as u8,
+    };
     Gradient { low, high: rgb }
 }
 
 fn spec_high_rgb(spec: ColorSpec) -> Rgb {
     match spec {
         ColorSpec::Angle(hue) => gradient_from_hue(hue).high,
+        ColorSpec::Map(map) => colormap_rgb(map, 1.0),
         ColorSpec::Lch {
             lightness,
             chroma,
             hue,
         } => lch_to_rgb(lightness, chroma, hue),
         ColorSpec::Rgb(rgb) => rgb,
+    }
+}
+
+fn colormap_rgb(map: ColorMapKind, t: f64) -> Rgb {
+    let color = match map {
+        ColorMapKind::Turbo => scientific::TURBO.eval_continuous(t.clamp(0.0, 1.0)),
+        ColorMapKind::Viridis => scientific::VIRIDIS.eval_continuous(t.clamp(0.0, 1.0)),
+        ColorMapKind::Plasma => scientific::PLASMA.eval_continuous(t.clamp(0.0, 1.0)),
+        ColorMapKind::Magma => scientific::MAGMA.eval_continuous(t.clamp(0.0, 1.0)),
+        ColorMapKind::Inferno => scientific::INFERNO.eval_continuous(t.clamp(0.0, 1.0)),
+    };
+    Rgb {
+        r: color.r,
+        g: color.g,
+        b: color.b,
     }
 }
 
@@ -493,10 +546,6 @@ fn rgb_to_lab(rgb: Rgb) -> Lab {
     let rgb = Srgb::new(rgb.r, rgb.g, rgb.b).into_format::<f32>();
     let linear = rgb.into_linear();
     Lab::from_color(linear)
-}
-
-fn rgb_to_lch(rgb: Rgb) -> Lch {
-    Lch::from_color(rgb_to_lab(rgb))
 }
 
 fn lab_to_rgb(lab: Lab) -> Rgb {
@@ -694,6 +743,34 @@ mod tests {
                 b: 0x00,
             }
         );
+    }
+
+    #[test]
+    fn explicit_rgb_gradients_keep_distinct_low_colors() {
+        let left = gradient_for_with_hues(
+            MetricKind::Cpu,
+            Some(&metric_hues_for_visible_hue(
+                MetricKind::Cpu,
+                ColorSpec::Rgb(Rgb {
+                    r: 0xfb,
+                    g: 0x49,
+                    b: 0x34,
+                }),
+            )),
+        );
+        let right = gradient_for_with_hues(
+            MetricKind::Cpu,
+            Some(&metric_hues_for_visible_hue(
+                MetricKind::Cpu,
+                ColorSpec::Rgb(Rgb {
+                    r: 0xd7,
+                    g: 0x99,
+                    b: 0x21,
+                }),
+            )),
+        );
+
+        assert_ne!(left.low, right.low);
     }
 
     #[test]

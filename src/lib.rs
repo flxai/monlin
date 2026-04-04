@@ -16,7 +16,7 @@ use std::time::Duration;
 use clap_complete::{generate, Generator, Shell};
 use config::{ColorMode, ExternalInputSource, OutputMode, StreamGroup, StreamItem};
 use layout::{Document, MetricKind, Source};
-use metrics::{CanonicalSample, CanonicalValue, MetricValue};
+use metrics::{CanonicalSample, CanonicalValue, HeadlineValue, MetricValue};
 use serde_json::json;
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
@@ -218,8 +218,8 @@ _monlin() {
     '-e:How native layouts arrange rows'
     '--engine:How native layouts arrange rows'
     '--renderer:Graph renderer to use'
-    '-c:Comma-separated visible-order colors: named palettes like default/gruvbox/solarized/catppuccin, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
-    '--colors:Comma-separated visible-order colors: named palettes like default/gruvbox/solarized/catppuccin, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
+    '-c:Colors: a named palette like gruvbox or solarized, a named colormap like turbo or viridis, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
+    '--colors:Colors: a named palette like gruvbox or solarized, a named colormap like turbo or viridis, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
     '--color:When to emit ANSI colors'
     '--output:Output protocol to render'
     '--width:Override the render width'
@@ -250,7 +250,7 @@ _monlin() {
       return
       ;;
     -c|--colors)
-      compadd default canonical rainbow warm cool pastel neon
+      compadd default canonical rainbow warm cool pastel neon solarized solarized-light gruvbox gruvbox-light nord catppuccin catppuccin-latte catppuccin-frappe catppuccin-macchiato catppuccin-mocha tokyonight tokyonight-storm tokyonight-light dracula turbo viridis plasma magma inferno
       return
       ;;
     --renderer)
@@ -592,12 +592,24 @@ fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>
             return Ok(None);
         }
     };
-    let groups = config
+    if let Some(document) = config
         .document
         .as_ref()
         .filter(|document| document.uses_stream_columns())
-        .map(stream_groups_from_stream_document)
-        .transpose()?;
+    {
+        validate_stream_shape(config, first_frame.len())?;
+        let result = match config.output_mode {
+            OutputMode::Terminal => {
+                run_stream_document_terminal(config, document, &mut reader, first_frame)
+            }
+            OutputMode::I3bar => {
+                run_stream_document_i3bar(config, document, &mut reader, first_frame)
+            }
+        };
+        return Ok(Some(result));
+    }
+
+    let groups = config.stream_groups.clone();
     let mut render_config = config.clone();
     if let Some(groups) = groups {
         render_config.stream_groups = Some(groups);
@@ -795,6 +807,53 @@ fn run_stream_terminal<R: BufRead>(
             color_enabled,
             &projected_histories,
             &projected_values,
+        );
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+
+        match read_next_stream_frame(reader, Some(current.len()))? {
+            Some(frame) => current = frame,
+            None => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn run_stream_document_terminal<R: BufRead>(
+    config: &config::Config,
+    document: &Document,
+    reader: &mut R,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
+    let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
+    let mut frame_state = TerminalFrameState::default();
+    let mut histories = init_canonical_document_histories(document, config.history);
+
+    let mut current = first_frame;
+    loop {
+        let sample = sample_stream_document(document, &current)?;
+        update_canonical_document_histories(&mut histories, &sample, document, config.history);
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        let lines = render::render_document_lines(
+            config,
+            width,
+            colors_enabled(config.color_mode),
+            &histories,
+            document,
+            &sample,
         );
         write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
@@ -1109,6 +1168,57 @@ fn run_stream_i3bar<R: BufRead>(
             &projected_histories,
             &projected_values,
         );
+        let frame = i3bar_frame_json(&lines).to_string();
+
+        if !first {
+            writeln!(stdout, ",{frame}").map_err(io_to_string)?;
+        } else {
+            writeln!(stdout, "{frame}").map_err(io_to_string)?;
+            first = false;
+        }
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout, "]").map_err(io_to_string)?;
+            break;
+        }
+
+        match read_next_stream_frame(reader, Some(current.len()))? {
+            Some(frame) => current = frame,
+            None => {
+                writeln!(stdout, "]").map_err(io_to_string)?;
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn run_stream_document_i3bar<R: BufRead>(
+    config: &config::Config,
+    document: &Document,
+    reader: &mut R,
+    first_frame: Vec<f64>,
+) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
+
+    let mut first = true;
+    let mut histories = init_canonical_document_histories(document, config.history);
+    let width = config
+        .width
+        .or_else(render::terminal_width)
+        .unwrap_or(80)
+        .max(16);
+
+    let mut current = first_frame;
+    loop {
+        let sample = sample_stream_document(document, &current)?;
+        update_canonical_document_histories(&mut histories, &sample, document, config.history);
+        let lines =
+            render::render_document_lines(config, width, false, &histories, document, &sample);
         let frame = i3bar_frame_json(&lines).to_string();
 
         if !first {
@@ -1869,6 +1979,35 @@ fn sample_document_canonical(
     }
 
     Ok(sample)
+}
+
+fn sample_stream_document(document: &Document, frame: &[f64]) -> Result<CanonicalSample, String> {
+    let mut values = HashMap::new();
+    let mut headlines = HashMap::new();
+
+    for source in document.sources() {
+        match source {
+            Source::StreamColumn(index) => {
+                let Some(raw) = frame.get(*index).copied() else {
+                    return Err(format!(
+                        "stream layout references @{}, but the input stream has only {} columns",
+                        index + 1,
+                        frame.len()
+                    ));
+                };
+                values.insert(source.clone(), CanonicalValue::from_stream_percent(raw));
+                headlines.insert(source.clone(), HeadlineValue::Scalar(raw.max(0.0)));
+            }
+            Source::Metric(_)
+            | Source::SplitMetric(_, _)
+            | Source::File(_)
+            | Source::Process(_) => {
+                return Err("stdin stream rendering currently supports only @N items".to_owned());
+            }
+        }
+    }
+
+    Ok(CanonicalSample { values, headlines })
 }
 
 fn colors_enabled(mode: ColorMode) -> bool {

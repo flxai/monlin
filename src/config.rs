@@ -1,7 +1,7 @@
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 
-use crate::color::{named_palette, ColorSpec, Rgb};
+use crate::color::{named_colormap, named_palette, ColorSpec, Rgb};
 use crate::layout::{
     parse_layout_document, parse_layout_spec, DisplayMode, Document, Item, Layout, Row,
 };
@@ -227,7 +227,7 @@ struct Cli {
         short = 'c',
         long = "colors",
         value_delimiter = ',',
-        help = "Comma-separated visible-order colors: named palettes like default/gruvbox/solarized/catppuccin, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
+        help = "Colors: a named palette like gruvbox or solarized, a named colormap like turbo or viridis, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
     )]
     colors: Vec<String>,
 
@@ -426,7 +426,12 @@ fn expand_color_specs(tokens: &[String]) -> Result<Vec<ColorSpec>, String> {
     let mut specs = Vec::new();
 
     for token in tokens {
-        if let Some(palette) = named_palette(token.trim()) {
+        if let Some(map) = named_colormap(token.trim()) {
+            if tokens.len() != 1 {
+                return Err("named colormaps cannot be mixed with other color specs".to_owned());
+            }
+            specs.push(ColorSpec::Map(map));
+        } else if let Some(palette) = named_palette(token.trim()) {
             specs.extend(palette);
         } else {
             specs.push(parse_color_spec(token)?);
@@ -834,6 +839,26 @@ mod tests {
     }
 
     #[test]
+    fn parses_named_colormap_colors() {
+        let config = parse(&["monlin", "--colors", "turbo"]);
+        assert_eq!(
+            config.colors,
+            Some(vec![ColorSpec::Map(crate::color::ColorMapKind::Turbo)])
+        );
+    }
+
+    #[test]
+    fn rejects_mixing_named_colormap_with_other_specs() {
+        let error = parse_args(
+            ["monlin", "--colors", "turbo,20"]
+                .into_iter()
+                .map(|item| item.to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("named colormaps cannot be mixed"));
+    }
+
+    #[test]
     fn rejects_invalid_prefixed_color_payload() {
         let error = parse_args(
             ["monlin", "--colors", "Lwat"]
@@ -950,7 +975,7 @@ mod tests {
         let help = help_text();
         assert!(help.contains("metric[.view][:size][+max][-min]"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
-        assert!(help.contains("named palettes like default/gruvbox/solarized/catppuccin"));
+        assert!(help.contains("named palette like gruvbox or solarized"));
     }
 
     #[test]
@@ -959,5 +984,6 @@ mod tests {
         assert!(crate::color::palette_names().contains(&"rainbow"));
         assert!(crate::color::palette_names().contains(&"gruvbox"));
         assert!(crate::color::palette_names().contains(&"solarized"));
+        assert!(crate::color::colormap_names().contains(&"turbo"));
     }
 }
