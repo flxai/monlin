@@ -2,7 +2,7 @@ use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::color::{named_palette, ColorSpec, Rgb};
-use crate::layout::{parse_layout_spec, DisplayMode, Layout};
+use crate::layout::{parse_layout_document, parse_layout_spec, DisplayMode, Document, Item, Layout, Row};
 use crate::render::Renderer;
 
 const DEFAULT_INTERVAL_MS: u64 = 1000;
@@ -125,6 +125,7 @@ enum CliCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
+    pub document: Option<Document>,
     pub history: usize,
     pub interval_ms: u64,
     pub align: Align,
@@ -268,6 +269,11 @@ where
     }
 
     let joined_layout = cli.layout_parts.join(" ");
+    let document = if joined_layout.trim().is_empty() {
+        None
+    } else {
+        parse_layout_document(&joined_layout).ok()
+    };
     let (external_input, inline_stream_labels) = if cli.layout_parts.is_empty() {
         (None, None)
     } else {
@@ -295,11 +301,22 @@ where
         } else {
             parse_layout_spec(&joined_layout)?
         };
+    let document = if let Some(groups) = &stream_groups {
+        Some(document_from_stream_groups(groups))
+    } else if external_input.is_some() {
+        inline_stream_labels
+            .as_ref()
+            .map(|labels| document_from_stream_labels(labels))
+            .or(document)
+    } else {
+        document
+    };
     let colors = (!cli.colors.is_empty())
         .then(|| expand_color_specs(&cli.colors))
         .transpose()?;
 
     Ok(Config {
+        document,
         history,
         interval_ms: cli.interval_ms,
         align: cli.align,
@@ -626,6 +643,55 @@ fn parse_stream_groups_spec(spec: &str) -> Result<Vec<StreamGroup>, String> {
             rows: parse_stream_rows(&mut parser, false)?,
         }])
     }
+}
+
+fn document_from_stream_groups(groups: &[StreamGroup]) -> Document {
+    let rows = groups
+        .iter()
+        .flat_map(|group| {
+            group.rows.iter().map(|row| {
+                Row::new(
+                    group.label.clone(),
+                    row.iter()
+                        .map(|item| {
+                            Item::stream_column(
+                                item.label.clone(),
+                                item.column_index,
+                                item.display,
+                                item.basis,
+                                item.max_width,
+                                item.min_width,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+        })
+        .collect();
+    Document::new(rows, true)
+}
+
+fn document_from_stream_labels(labels: &[String]) -> Document {
+    Document::new(
+        vec![Row::new(
+            None,
+            labels
+                .iter()
+                .enumerate()
+                .map(|(index, label)| {
+                    Item::stream_column(
+                        Some(label.clone()),
+                        index,
+                        DisplayMode::Full,
+                        1,
+                        None,
+                        None,
+                    )
+                })
+                .collect(),
+        )],
+        false,
+    )
 }
 
 fn parse_stream_group(parser: &mut StreamParser) -> Result<StreamGroup, String> {
@@ -959,6 +1025,7 @@ mod tests {
     #[test]
     fn parses_stream_column_layout_items() {
         let config = parse(&["monlin", "cpu=@1", "ram=@2"]);
+        let document = config.document.as_ref().unwrap();
         assert_eq!(
             config.stream_groups,
             Some(vec![StreamGroup {
@@ -983,11 +1050,18 @@ mod tests {
                 ]],
             }])
         );
+        assert_eq!(document.rows().len(), 1);
+        assert_eq!(document.rows()[0].items()[0].label(), Some("cpu"));
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &crate::layout::Source::StreamColumn(0)
+        );
     }
 
     #[test]
     fn parses_labeled_stream_groups() {
         let config = parse(&["monlin", "\"two randoms\"=(\"1st program\"=@1, 2nd=@2)"]);
+        let document = config.document.as_ref().unwrap();
         assert_eq!(
             config.stream_groups,
             Some(vec![StreamGroup {
@@ -1011,6 +1085,21 @@ mod tests {
                     }]
                 ],
             }])
+        );
+        assert_eq!(document.rows().len(), 2);
+        assert_eq!(document.rows()[0].label(), Some("two randoms"));
+        assert_eq!(document.rows()[1].label(), Some("two randoms"));
+    }
+
+    #[test]
+    fn parses_native_layout_document() {
+        let config = parse(&["monlin", "cpu", "ram.free"]);
+        let document = config.document.as_ref().unwrap();
+        assert_eq!(document.rows().len(), 1);
+        assert!(document.is_native_only());
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &crate::layout::Source::Metric(MetricKind::Cpu)
         );
     }
 

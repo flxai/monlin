@@ -2490,6 +2490,7 @@ mod tests {
     #[test]
     fn line_layout_respects_multiple_segments() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2537,6 +2538,7 @@ mod tests {
         let layout = crate::layout::parse_layout_spec("cpu gpu").unwrap();
         let lines = render_lines(
             &Config {
+            document: None,
                 layout: layout.clone(),
                 ..config
             },
@@ -2556,6 +2558,7 @@ mod tests {
     fn line_layout_supports_block_renderer() {
         let layout = crate::layout::parse_layout_spec("cpu").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2621,6 +2624,7 @@ mod tests {
     #[test]
     fn whole_line_respects_requested_width() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2677,6 +2681,7 @@ mod tests {
     #[test]
     fn quintuple_layout_respects_requested_width_without_trimming_tail_metric() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2807,6 +2812,7 @@ mod tests {
     #[test]
     fn stream_columns_default_to_single_row_without_series_labels() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2845,6 +2851,7 @@ mod tests {
     #[test]
     fn stream_columns_use_explicit_labels_when_given() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2885,6 +2892,7 @@ mod tests {
     #[test]
     fn stream_columns_keep_graph_widths_balanced_with_long_labels() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -2956,6 +2964,7 @@ mod tests {
     #[test]
     fn stable_stream_spacing_reserves_prefix_width_for_short_percentages() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3000,6 +3009,7 @@ mod tests {
 
         let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3144,6 +3154,7 @@ mod tests {
 
         let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3281,6 +3292,7 @@ mod tests {
     fn auto_engine_uses_grid_for_multiline_layouts() {
         let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
         let grid_config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3304,6 +3316,7 @@ mod tests {
             show_help: false,
         };
         let auto_config = Config {
+            document: None,
             layout_engine: LayoutEngine::Auto,
             ..grid_config.clone()
         };
@@ -3420,6 +3433,7 @@ mod tests {
     fn auto_engine_uses_flow_for_single_line_layouts() {
         let layout = crate::layout::parse_layout_spec("cpu ram spc io").unwrap();
         let base_config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3443,6 +3457,7 @@ mod tests {
             show_help: false,
         };
         let auto_config = Config {
+            document: None,
             layout_engine: LayoutEngine::Auto,
             ..base_config.clone()
         };
@@ -3526,6 +3541,7 @@ mod tests {
     fn flex_engine_spans_underfull_rows_across_tracks() {
         let layout = crate::layout::parse_layout_spec("cpu ram spc, io").unwrap();
         let base_config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3549,6 +3565,7 @@ mod tests {
             show_help: false,
         };
         let flex_config = Config {
+            document: None,
             layout_engine: LayoutEngine::Flex,
             ..base_config.clone()
         };
@@ -3634,6 +3651,7 @@ mod tests {
     fn flex_engine_honors_basis_hints_for_first_row_tracks() {
         let layout = crate::layout::parse_layout_spec("cpu:4 ram:8 spc:16, io, net").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3708,6 +3726,7 @@ mod tests {
         let layout =
             crate::layout::parse_layout_spec("cpu:3 ram:1, io:1 net:1, cpu:1 ram:1").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3793,6 +3812,7 @@ mod tests {
 
         let layout = crate::layout::parse_layout_spec("cpu:3 ram:1, ram:1 cpu:2 io:1").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3878,6 +3898,7 @@ mod tests {
     fn unavailable_metrics_remain_visible_in_layout() {
         let layout = crate::layout::parse_layout_spec("gpu gfx vram, cpu gpu").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -3924,6 +3945,7 @@ mod tests {
     #[test]
     fn stream_lines_layout_renders_one_row_per_series() {
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -4138,6 +4160,7 @@ mod tests {
     fn very_narrow_fixed_width_rows_still_render_to_the_requested_width() {
         let layout = crate::layout::parse_layout_spec("cpu:12 ram:12 net:16").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -4212,6 +4235,7 @@ mod tests {
     fn multiline_layout_renders_multiple_rows() {
         let layout = crate::layout::parse_layout_spec("all").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
@@ -4311,6 +4335,7 @@ mod tests {
     fn combined_net_uses_summed_rate_headline() {
         let layout = crate::layout::parse_layout_spec("net").unwrap();
         let config = Config {
+            document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,

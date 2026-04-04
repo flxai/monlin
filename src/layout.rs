@@ -316,6 +316,82 @@ pub struct Item {
 }
 
 impl Item {
+    pub fn metric(
+        metric: MetricKind,
+        view: LayoutView,
+        display: DisplayMode,
+        size: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            label: None,
+            source: Source::Metric(metric),
+            view,
+            display,
+            size,
+            max_width,
+            min_width,
+        }
+    }
+
+    pub fn stream_column(
+        label: Option<String>,
+        column_index: usize,
+        display: DisplayMode,
+        size: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            label,
+            source: Source::StreamColumn(column_index),
+            view: LayoutView::Default,
+            display,
+            size,
+            max_width,
+            min_width,
+        }
+    }
+
+    pub fn file(
+        label: Option<String>,
+        path: PathBuf,
+        display: DisplayMode,
+        size: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            label,
+            source: Source::File(path),
+            view: LayoutView::Default,
+            display,
+            size,
+            max_width,
+            min_width,
+        }
+    }
+
+    pub fn process(
+        label: Option<String>,
+        command: String,
+        display: DisplayMode,
+        size: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            label,
+            source: Source::Process(command),
+            view: LayoutView::Default,
+            display,
+            size,
+            max_width,
+            min_width,
+        }
+    }
+
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
@@ -372,10 +448,19 @@ impl Item {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Row {
+    label: Option<String>,
     items: Vec<Item>,
 }
 
 impl Row {
+    pub fn new(label: Option<String>, items: Vec<Item>) -> Self {
+        Self { label, items }
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
+    }
+
     pub fn items(&self) -> &[Item] {
         &self.items
     }
@@ -388,12 +473,55 @@ pub struct Document {
 }
 
 impl Document {
+    pub fn new(rows: Vec<Row>, explicit_rows: bool) -> Self {
+        Self {
+            rows,
+            explicit_rows,
+        }
+    }
+
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
 
     pub fn explicit_rows(&self) -> bool {
         self.explicit_rows
+    }
+
+    pub fn sources(&self) -> Vec<&Source> {
+        let mut sources = Vec::new();
+        for row in &self.rows {
+            for item in &row.items {
+                if !sources.iter().any(|source| *source == &item.source) {
+                    sources.push(&item.source);
+                }
+            }
+        }
+        sources
+    }
+
+    pub fn uses_stream_columns(&self) -> bool {
+        self.rows.iter().any(|row| {
+            row.items
+                .iter()
+                .any(|item| matches!(item.source, Source::StreamColumn(_)))
+        })
+    }
+
+    pub fn uses_external_sources(&self) -> bool {
+        self.rows.iter().any(|row| {
+            row.items.iter().any(|item| {
+                matches!(item.source, Source::File(_) | Source::Process(_))
+            })
+        })
+    }
+
+    pub fn is_native_only(&self) -> bool {
+        self.rows.iter().all(|row| {
+            row.items
+                .iter()
+                .all(|item| matches!(item.source, Source::Metric(_)))
+        })
     }
 
     fn lower(&self) -> Result<Layout, String> {
@@ -560,7 +688,7 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
             parsed_row.push(item);
         }
         if !parsed_row.is_empty() {
-            parsed_rows.push(Row { items: parsed_row });
+            parsed_rows.push(Row::new(None, parsed_row));
         }
     }
 
@@ -569,10 +697,7 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     }
 
     if explicit_rows {
-        return Ok(Document {
-            rows: parsed_rows,
-            explicit_rows: true,
-        });
+        return Ok(Document::new(parsed_rows, true));
     }
 
     let rows = if let Some(row_count) = hinted_rows {
@@ -580,18 +705,13 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     } else if flat_items.len() > 5 {
         flat_items
             .chunks(5)
-            .map(|row| Row {
-                items: row.to_vec(),
-            })
+            .map(|row| Row::new(None, row.to_vec()))
             .collect()
     } else {
-        vec![Row { items: flat_items }]
+        vec![Row::new(None, flat_items)]
     };
 
-    Ok(Document {
-        rows,
-        explicit_rows: false,
-    })
+    Ok(Document::new(rows, false))
 }
 
 fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
@@ -785,9 +905,7 @@ fn split_even_rows_document_items(items: &[Item], rows: usize) -> Vec<Row> {
         .filter(|count| *count > 0)
         .map(|count| {
             let end = start + count;
-            let row = Row {
-                items: items[start..end].to_vec(),
-            };
+            let row = Row::new(None, items[start..end].to_vec());
             start = end;
             row
         })
