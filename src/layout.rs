@@ -639,8 +639,6 @@ pub fn all_metrics() -> &'static [MetricKind] {
         MetricKind::Storage,
         MetricKind::Io,
         MetricKind::Net,
-        MetricKind::Sys,
-        MetricKind::Gfx,
         MetricKind::Ingress,
         MetricKind::Egress,
         MetricKind::Gpu,
@@ -1571,8 +1569,8 @@ mod tests {
         let layout = parse_layout_spec("all").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 6);
-        assert_eq!(layout.rows()[1].len(), 5);
+        assert_eq!(layout.rows()[0].len(), 5);
+        assert_eq!(layout.rows()[1].len(), 4);
     }
 
     #[test]
@@ -1580,8 +1578,8 @@ mod tests {
         let layout = parse_layout_spec("avail").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 6);
-        assert_eq!(layout.rows()[1].len(), 5);
+        assert_eq!(layout.rows()[0].len(), 5);
+        assert_eq!(layout.rows()[1].len(), 4);
         assert!(layout.filter_available());
     }
 
@@ -1661,14 +1659,12 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
-                    MetricKind::Sys,
-                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![6, 5],
+                vec![5, 4],
             ),
             (
                 "cpu all ram",
@@ -1678,14 +1674,12 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
-                    MetricKind::Sys,
-                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![7, 6],
+                vec![6, 5],
             ),
             (
                 "all cpu ram net cpu",
@@ -1695,14 +1689,12 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
-                    MetricKind::Sys,
-                    MetricKind::Gfx,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![8, 7],
+                vec![7, 6],
             ),
         ];
 
@@ -1726,8 +1718,6 @@ mod tests {
                 MetricKind::Storage,
                 MetricKind::Io,
                 MetricKind::Net,
-                MetricKind::Sys,
-                MetricKind::Gfx,
                 MetricKind::Ingress,
                 MetricKind::Egress,
                 MetricKind::Gpu,
@@ -1735,8 +1725,8 @@ mod tests {
             ]
         );
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 8);
-        assert_eq!(layout.rows()[1].len(), 7);
+        assert_eq!(layout.rows()[0].len(), 7);
+        assert_eq!(layout.rows()[1].len(), 6);
     }
 
     #[test]

@@ -17,7 +17,7 @@ Metrics:
 Notes:
   Layout is the canonical interface.
   Without a layout, monlin defaults to avail.
-  Item syntax is metric[.view][:size][+max][-min], e.g. net.hum:12+20-8.
+  Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.hum:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
