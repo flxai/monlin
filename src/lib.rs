@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use clap_complete::{generate, Generator, Shell};
 use config::{ColorMode, ExternalInputSource, OutputMode};
-use layout::MetricKind;
-use metrics::MetricValue;
+use layout::{MetricKind, Source};
+use metrics::{CanonicalSample, CanonicalValue, MetricValue};
 use serde_json::json;
 
 const HIDE_CURSOR: &str = "\x1b[?25l";
@@ -31,6 +31,8 @@ enum ExternalPollResult {
     Frame(Vec<f64>),
     NoUpdate,
 }
+
+type CanonicalHistories = HashMap<Source, VecDeque<CanonicalValue>>;
 
 enum ExternalPoller {
     File(FilePoller),
@@ -192,8 +194,8 @@ _monlin() {
     '-e:How native layouts arrange rows'
     '--engine:How native layouts arrange rows'
     '--renderer:Graph renderer to use'
-    '-c:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
-    '--colors:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
+    '-c:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
+    '--colors:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800, or packed LCh L086078020'
     '--color:When to emit ANSI colors'
     '--output:Output protocol to render'
     '--width:Override the render width'
@@ -327,7 +329,7 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     let mut sampler = metrics::Sampler::default();
     sampler.prime(requested_metrics).map_err(monlin_error)?;
 
-    let mut histories = init_histories(requested_metrics, config.history);
+    let mut histories = init_canonical_metric_histories(requested_metrics, config.history);
     match config.output_mode {
         OutputMode::Terminal => run_terminal(&config, &mut sampler, &mut histories),
         OutputMode::I3bar => run_i3bar(&config, &mut sampler, &mut histories),
@@ -414,7 +416,7 @@ fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result
 fn run_terminal(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
-    histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
+    histories: &mut CanonicalHistories,
 ) -> Result<(), String> {
     let hide_cursor = io::stdout().is_terminal();
     let mut stdout = io::stdout().lock();
@@ -456,18 +458,26 @@ fn run_stream_terminal<R: BufRead>(
     let _cursor_guard =
         CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
     let mut frame_state = TerminalFrameState::default();
-    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let mut histories = init_canonical_stream_histories(first_frame.len(), config.history);
     let color_enabled = colors_enabled(config.color_mode);
 
     let mut current = first_frame;
     loop {
-        update_stream_histories(&mut histories, &current, config.history);
+        update_canonical_stream_histories(&mut histories, &current, config.history);
         let width = config
             .width
             .or_else(render::terminal_width)
             .unwrap_or(80)
             .max(16);
-        let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(&current);
+        let lines = render::render_stream_lines(
+            config,
+            width,
+            color_enabled,
+            &projected_histories,
+            &projected_values,
+        );
         write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
@@ -495,18 +505,26 @@ fn run_external_stream_terminal(
     let _cursor_guard =
         CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
     let mut frame_state = TerminalFrameState::default();
-    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let mut histories = init_canonical_stream_histories(first_frame.len(), config.history);
     let color_enabled = colors_enabled(config.color_mode);
 
     let mut current = first_frame;
     loop {
-        update_stream_histories(&mut histories, &current, config.history);
+        update_canonical_stream_histories(&mut histories, &current, config.history);
         let width = config
             .width
             .or_else(render::terminal_width)
             .unwrap_or(80)
             .max(16);
-        let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(&current);
+        let lines = render::render_stream_lines(
+            config,
+            width,
+            color_enabled,
+            &projected_histories,
+            &projected_values,
+        );
         write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
@@ -712,7 +730,7 @@ fn write_cursor_visibility<W: Write>(stdout: &mut W, visible: bool) -> io::Resul
 fn run_i3bar(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
-    histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
+    histories: &mut CanonicalHistories,
 ) -> Result<(), String> {
     let mut stdout = io::stdout().lock();
     writeln!(stdout, "{}", json!({"version": 1, "click_events": false})).map_err(io_to_string)?;
@@ -754,7 +772,7 @@ fn run_stream_i3bar<R: BufRead>(
     writeln!(stdout, "[").map_err(io_to_string)?;
 
     let mut first = true;
-    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let mut histories = init_canonical_stream_histories(first_frame.len(), config.history);
     let width = config
         .width
         .or_else(render::terminal_width)
@@ -763,8 +781,11 @@ fn run_stream_i3bar<R: BufRead>(
 
     let mut current = first_frame;
     loop {
-        update_stream_histories(&mut histories, &current, config.history);
-        let lines = render::render_stream_lines(config, width, false, &histories, &current);
+        update_canonical_stream_histories(&mut histories, &current, config.history);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(&current);
+        let lines =
+            render::render_stream_lines(config, width, false, &projected_histories, &projected_values);
         let frame = i3bar_frame_json(&lines).to_string();
 
         if !first {
@@ -802,7 +823,7 @@ fn run_external_stream_i3bar(
     writeln!(stdout, "[").map_err(io_to_string)?;
 
     let mut first = true;
-    let mut histories = init_stream_histories(first_frame.len(), config.history);
+    let mut histories = init_canonical_stream_histories(first_frame.len(), config.history);
     let width = config
         .width
         .or_else(render::terminal_width)
@@ -811,8 +832,11 @@ fn run_external_stream_i3bar(
 
     let mut current = first_frame;
     loop {
-        update_stream_histories(&mut histories, &current, config.history);
-        let lines = render::render_stream_lines(config, width, false, &histories, &current);
+        update_canonical_stream_histories(&mut histories, &current, config.history);
+        let projected_histories = project_stream_histories(&histories, current.len());
+        let projected_values = project_stream_values(&current);
+        let lines =
+            render::render_stream_lines(config, width, false, &projected_histories, &projected_values);
         let frame = i3bar_frame_json(&lines).to_string();
 
         if !first {
@@ -844,25 +868,14 @@ fn run_external_stream_i3bar(
 fn sample_lines(
     config: &config::Config,
     sampler: &mut metrics::Sampler,
-    histories: &mut HashMap<MetricKind, VecDeque<MetricValue>>,
+    histories: &mut CanonicalHistories,
 ) -> Result<Vec<String>, String> {
     let requested_metrics = config.layout.metrics();
-    let sample = sampler.sample(requested_metrics).map_err(monlin_error)?;
-    let values = &sample.values;
-    let headlines = &sample.headlines;
-
-    for metric in requested_metrics {
-        if let Some(history) = histories.get_mut(metric) {
-            if let Some(value) = values.get(metric).copied() {
-                if history.len() == config.history.max(1) {
-                    history.pop_front();
-                }
-                history.push_back(value);
-            } else {
-                history.clear();
-            }
-        }
-    }
+    let sample = sampler.sample_canonical(requested_metrics).map_err(monlin_error)?;
+    update_canonical_metric_histories(histories, &sample, requested_metrics, config.history);
+    let values = project_metric_values(&sample);
+    let headlines = project_metric_headlines(&sample);
+    let projected_histories = project_metric_histories(histories, requested_metrics);
 
     let width = config
         .width
@@ -877,32 +890,16 @@ fn sample_lines(
         config,
         width,
         color_enabled,
-        histories,
+        &projected_histories,
         &config.layout,
-        values,
-        headlines,
+        &values,
+        &headlines,
     );
     if lines.is_empty() {
         lines.push(String::new());
     }
 
     Ok(lines)
-}
-
-fn init_stream_histories(series_count: usize, history_len: usize) -> Vec<VecDeque<f64>> {
-    (0..series_count)
-        .map(|_| VecDeque::with_capacity(history_len.max(1)))
-        .collect()
-}
-
-fn update_stream_histories(histories: &mut [VecDeque<f64>], frame: &[f64], history_len: usize) {
-    let limit = history_len.max(1);
-    for (history, value) in histories.iter_mut().zip(frame.iter().copied()) {
-        if history.len() == limit {
-            history.pop_front();
-        }
-        history.push_back(value.clamp(0.0, 1.0));
-    }
 }
 
 fn read_next_stream_frame<R: BufRead>(
@@ -932,7 +929,6 @@ fn parse_stream_frame(line: &str, expected_columns: Option<usize>) -> Result<Vec
         .map(|token| {
             token
                 .parse::<f64>()
-                .map(|value| (value / 100.0).clamp(0.0, 1.0))
                 .map_err(|_| format!("invalid stream value: {token}"))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1111,15 +1107,141 @@ fn i3bar_frame_json(lines: &[String]) -> serde_json::Value {
     serde_json::Value::Array(blocks)
 }
 
-fn init_histories(
+fn init_canonical_metric_histories(
     metrics: &[MetricKind],
     history_len: usize,
-) -> HashMap<MetricKind, VecDeque<MetricValue>> {
+) -> CanonicalHistories {
     let mut histories = HashMap::with_capacity(metrics.len());
     for metric in metrics {
-        histories.insert(*metric, VecDeque::with_capacity(history_len.max(1)));
+        histories.insert(
+            Source::Metric(*metric),
+            VecDeque::with_capacity(history_len.max(1)),
+        );
     }
     histories
+}
+
+fn init_canonical_stream_histories(series_count: usize, history_len: usize) -> CanonicalHistories {
+    let mut histories = HashMap::with_capacity(series_count);
+    for index in 0..series_count {
+        histories.insert(
+            Source::StreamColumn(index),
+            VecDeque::with_capacity(history_len.max(1)),
+        );
+    }
+    histories
+}
+
+fn update_canonical_metric_histories(
+    histories: &mut CanonicalHistories,
+    sample: &CanonicalSample,
+    metrics: &[MetricKind],
+    history_len: usize,
+) {
+    let limit = history_len.max(1);
+    for metric in metrics {
+        let source = Source::Metric(*metric);
+        if let Some(history) = histories.get_mut(&source) {
+            if let Some(value) = sample.values.get(&source).copied() {
+                if history.len() == limit {
+                    history.pop_front();
+                }
+                history.push_back(value);
+            } else {
+                history.clear();
+            }
+        }
+    }
+}
+
+fn update_canonical_stream_histories(
+    histories: &mut CanonicalHistories,
+    frame: &[f64],
+    history_len: usize,
+) {
+    let limit = history_len.max(1);
+    for (index, raw) in frame.iter().copied().enumerate() {
+        let source = Source::StreamColumn(index);
+        if let Some(history) = histories.get_mut(&source) {
+            if history.len() == limit {
+                history.pop_front();
+            }
+            history.push_back(CanonicalValue::from_stream_percent(raw));
+        }
+    }
+}
+
+fn project_metric_histories(
+    histories: &CanonicalHistories,
+    metrics: &[MetricKind],
+) -> HashMap<MetricKind, VecDeque<MetricValue>> {
+    metrics
+        .iter()
+        .map(|metric| {
+            let history = histories
+                .get(&Source::Metric(*metric))
+                .map(|samples| {
+                    samples
+                        .iter()
+                        .copied()
+                        .filter_map(CanonicalValue::normalized_metric_value)
+                        .collect::<VecDeque<_>>()
+                })
+                .unwrap_or_default();
+            (*metric, history)
+        })
+        .collect()
+}
+
+fn project_metric_values(sample: &CanonicalSample) -> HashMap<MetricKind, MetricValue> {
+    sample
+        .values
+        .iter()
+        .filter_map(|(source, value)| match source {
+            Source::Metric(metric) => value.normalized_metric_value().map(|value| (*metric, value)),
+            Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
+        })
+        .collect()
+}
+
+fn project_metric_headlines(sample: &CanonicalSample) -> HashMap<MetricKind, metrics::HeadlineValue> {
+    sample
+        .headlines
+        .iter()
+        .filter_map(|(source, headline)| match source {
+            Source::Metric(metric) => Some((*metric, *headline)),
+            Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
+        })
+        .collect()
+}
+
+fn project_stream_histories(histories: &CanonicalHistories, series_count: usize) -> Vec<VecDeque<f64>> {
+    (0..series_count)
+        .map(|index| {
+            histories
+                .get(&Source::StreamColumn(index))
+                .map(|samples| {
+                    samples
+                        .iter()
+                        .filter_map(|sample| match sample {
+                            CanonicalValue::Scalar { normalized, .. } => Some(*normalized),
+                            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => None,
+                        })
+                        .collect::<VecDeque<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn project_stream_values(frame: &[f64]) -> Vec<f64> {
+    frame.iter()
+        .copied()
+        .map(|raw| match CanonicalValue::from_stream_percent(raw) {
+            CanonicalValue::Scalar { normalized, .. } => normalized,
+            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => 0.0,
+        })
+        .collect()
 }
 
 fn colors_enabled(mode: ColorMode) -> bool {
@@ -1248,13 +1370,13 @@ mod tests {
 
     #[test]
     fn init_histories_keeps_requested_metrics_and_minimum_capacity() {
-        let histories = init_histories(&[MetricKind::Cpu, MetricKind::Net], 0);
+        let histories = init_canonical_metric_histories(&[MetricKind::Cpu, MetricKind::Net], 0);
 
         assert_eq!(histories.len(), 2);
-        assert!(histories.contains_key(&MetricKind::Cpu));
-        assert!(histories.contains_key(&MetricKind::Net));
-        assert_eq!(histories[&MetricKind::Cpu].capacity(), 1);
-        assert_eq!(histories[&MetricKind::Net].capacity(), 1);
+        assert!(histories.contains_key(&Source::Metric(MetricKind::Cpu)));
+        assert!(histories.contains_key(&Source::Metric(MetricKind::Net)));
+        assert_eq!(histories[&Source::Metric(MetricKind::Cpu)].capacity(), 1);
+        assert_eq!(histories[&Source::Metric(MetricKind::Net)].capacity(), 1);
     }
 
     #[test]
@@ -1297,17 +1419,23 @@ mod tests {
 
     #[test]
     fn update_stream_histories_clamps_and_truncates() {
-        let mut histories = init_stream_histories(2, 2);
-        update_stream_histories(&mut histories, &[1.2, -0.5], 2);
-        update_stream_histories(&mut histories, &[0.4, 0.6], 2);
-        update_stream_histories(&mut histories, &[0.8, 0.2], 2);
+        let mut histories = init_canonical_stream_histories(2, 2);
+        update_canonical_stream_histories(&mut histories, &[120.0, -50.0], 2);
+        update_canonical_stream_histories(&mut histories, &[40.0, 60.0], 2);
+        update_canonical_stream_histories(&mut histories, &[80.0, 20.0], 2);
 
         assert_eq!(
-            histories[0].iter().copied().collect::<Vec<_>>(),
+            project_stream_histories(&histories, 2)[0]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
             vec![0.4, 0.8]
         );
         assert_eq!(
-            histories[1].iter().copied().collect::<Vec<_>>(),
+            project_stream_histories(&histories, 2)[1]
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
             vec![0.6, 0.2]
         );
     }
@@ -1316,7 +1444,7 @@ mod tests {
     fn read_next_stream_frame_skips_blank_lines_and_parses_percentages() {
         let mut reader = io::Cursor::new(b"\n\n10 20 30\n".as_slice());
         let frame = read_next_stream_frame(&mut reader, None).unwrap().unwrap();
-        assert_eq!(frame, vec![0.1, 0.2, 0.3]);
+        assert_eq!(frame, vec![10.0, 20.0, 30.0]);
     }
 
     #[test]
@@ -1333,7 +1461,7 @@ mod tests {
     #[test]
     fn parse_stream_frame_parses_percentages() {
         let frame = parse_stream_frame("10 20 30", None).unwrap();
-        assert_eq!(frame, vec![0.1, 0.2, 0.3]);
+        assert_eq!(frame, vec![10.0, 20.0, 30.0]);
     }
 
     #[test]
@@ -1351,7 +1479,7 @@ mod tests {
             pending: String::new(),
         };
         let frame = poller.poll(None, true).unwrap().unwrap();
-        assert_eq!(frame, vec![0.3, 0.4]);
+        assert_eq!(frame, vec![30.0, 40.0]);
 
         let _ = fs::remove_file(path);
     }
@@ -1370,11 +1498,11 @@ mod tests {
             offset: 0,
             pending: String::new(),
         };
-        assert_eq!(poller.poll(None, true).unwrap(), Some(vec![0.1, 0.2]));
+        assert_eq!(poller.poll(None, true).unwrap(), Some(vec![10.0, 20.0]));
         assert_eq!(poller.poll(None, false).unwrap(), None);
 
         fs::write(&path, "10 20\n30 40\n").unwrap();
-        assert_eq!(poller.poll(None, false).unwrap(), Some(vec![0.3, 0.4]));
+        assert_eq!(poller.poll(None, false).unwrap(), Some(vec![30.0, 40.0]));
         assert_eq!(poller.poll(None, false).unwrap(), None);
 
         let _ = fs::remove_file(path);
@@ -1388,7 +1516,7 @@ mod tests {
         )
         .unwrap();
         let frame = frame.unwrap();
-        assert_eq!(frame, vec![0.3, 0.4]);
+        assert_eq!(frame, vec![30.0, 40.0]);
     }
 
     #[test]
@@ -1424,17 +1552,17 @@ mod tests {
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
         sampler.prime(metrics).unwrap();
-        let mut histories = init_histories(metrics, config.history);
+        let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
-        let history = histories.get(&MetricKind::Cpu).unwrap();
+        let history = histories.get(&Source::Metric(MetricKind::Cpu)).unwrap();
 
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].is_empty());
         assert_eq!(history.len(), 1);
 
         let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
-        let history = histories.get(&MetricKind::Cpu).unwrap();
+        let history = histories.get(&Source::Metric(MetricKind::Cpu)).unwrap();
 
         assert_eq!(lines.len(), 1);
         assert_eq!(history.len(), 1);
@@ -1453,7 +1581,7 @@ mod tests {
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
         sampler.prime(metrics).unwrap();
-        let mut histories = init_histories(metrics, config.history);
+        let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         assert!(run_terminal(&config, &mut sampler, &mut histories).is_ok());
     }
@@ -1472,7 +1600,7 @@ mod tests {
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
         sampler.prime(metrics).unwrap();
-        let mut histories = init_histories(metrics, config.history);
+        let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         assert!(run_i3bar(&config, &mut sampler, &mut histories).is_ok());
     }

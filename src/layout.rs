@@ -296,7 +296,7 @@ impl LayoutItem {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
     Metric(MetricKind),
     StreamColumn(usize),

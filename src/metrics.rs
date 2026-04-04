@@ -5,7 +5,7 @@ use std::io;
 use std::os::raw::{c_char, c_int, c_ulong};
 use std::time::{Duration, Instant};
 
-use crate::layout::MetricKind;
+use crate::layout::{MetricKind, Source};
 use rand::rngs::SmallRng;
 use rand::SeedableRng;
 use rand_distr::{Beta, Distribution, Normal};
@@ -56,6 +56,27 @@ pub struct Sample {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CanonicalValue {
+    Scalar {
+        normalized: f64,
+        absolute: Option<f64>,
+    },
+    Split {
+        upper_normalized: f64,
+        lower_normalized: f64,
+        upper_absolute: Option<f64>,
+        lower_absolute: Option<f64>,
+    },
+    Unavailable,
+}
+
+#[derive(Debug)]
+pub struct CanonicalSample {
+    pub values: HashMap<Source, CanonicalValue>,
+    pub headlines: HashMap<Source, HeadlineValue>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeadlineValue {
     Scalar(f64),
     Memory {
@@ -98,6 +119,30 @@ impl MetricValue {
         match self {
             Self::Single(value) => value,
             Self::Split { lower, .. } => lower,
+        }
+    }
+}
+
+impl CanonicalValue {
+    pub fn normalized_metric_value(self) -> Option<MetricValue> {
+        match self {
+            Self::Scalar { normalized, .. } => Some(MetricValue::Single(normalized)),
+            Self::Split {
+                upper_normalized,
+                lower_normalized,
+                ..
+            } => Some(MetricValue::Split {
+                upper: upper_normalized,
+                lower: lower_normalized,
+            }),
+            Self::Unavailable => None,
+        }
+    }
+
+    pub fn from_stream_percent(raw: f64) -> Self {
+        Self::Scalar {
+            normalized: (raw / 100.0).clamp(0.0, 1.0),
+            absolute: Some(raw.max(0.0)),
         }
     }
 }
@@ -301,6 +346,27 @@ impl Sampler {
         Ok(Sample { values, headlines })
     }
 
+    pub fn sample_canonical(&mut self, metrics: &[MetricKind]) -> io::Result<CanonicalSample> {
+        let sample = self.sample(metrics)?;
+        let mut values = HashMap::with_capacity(sample.values.len());
+        let mut headlines = HashMap::with_capacity(sample.headlines.len());
+
+        for metric in metrics {
+            let source = Source::Metric(*metric);
+            if let Some(value) = sample.values.get(metric).copied() {
+                let headline = sample
+                    .headlines
+                    .get(metric)
+                    .copied()
+                    .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value()));
+                values.insert(source.clone(), canonicalize_metric_value(*metric, value, headline));
+                headlines.insert(source, headline);
+            }
+        }
+
+        Ok(CanonicalSample { values, headlines })
+    }
+
     fn sample_cpu(&mut self) -> io::Result<f64> {
         let current = read_cpu_counters()?;
         let usage = self
@@ -426,6 +492,73 @@ impl Sampler {
             .map(|point| point.value)
             .fold(1.0_f64, f64::max);
         (rate / scale).clamp(0.0, 1.0)
+    }
+}
+
+fn canonicalize_metric_value(
+    metric: MetricKind,
+    value: MetricValue,
+    headline: HeadlineValue,
+) -> CanonicalValue {
+    match (metric, value) {
+        (MetricKind::Cpu, MetricValue::Single(normalized))
+        | (MetricKind::Rnd, MetricValue::Single(normalized))
+        | (MetricKind::Gpu, MetricValue::Single(normalized))
+        | (MetricKind::Vram, MetricValue::Single(normalized))
+        | (MetricKind::Memory, MetricValue::Single(normalized))
+        | (MetricKind::Storage, MetricValue::Single(normalized))
+        | (MetricKind::Ingress, MetricValue::Single(normalized))
+        | (MetricKind::Egress, MetricValue::Single(normalized)) => CanonicalValue::Scalar {
+            normalized,
+            absolute: canonical_metric_absolute(metric, headline),
+        },
+        (MetricKind::Sys, MetricValue::Split { upper, lower })
+        | (MetricKind::Gfx, MetricValue::Split { upper, lower }) => CanonicalValue::Split {
+            upper_normalized: upper,
+            lower_normalized: lower,
+            upper_absolute: None,
+            lower_absolute: None,
+        },
+        (MetricKind::Io, MetricValue::Split { upper, lower })
+        | (MetricKind::Net, MetricValue::Split { upper, lower }) => {
+            let total = headline.scalar().unwrap_or(0.0);
+            CanonicalValue::Split {
+                upper_normalized: upper,
+                lower_normalized: lower,
+                upper_absolute: Some(total),
+                lower_absolute: Some(total),
+            }
+        }
+        (_, MetricValue::Single(normalized)) => CanonicalValue::Scalar {
+            normalized,
+            absolute: canonical_metric_absolute(metric, headline),
+        },
+        (_, MetricValue::Split { upper, lower }) => CanonicalValue::Split {
+            upper_normalized: upper,
+            lower_normalized: lower,
+            upper_absolute: None,
+            lower_absolute: None,
+        },
+    }
+}
+
+fn canonical_metric_absolute(metric: MetricKind, headline: HeadlineValue) -> Option<f64> {
+    match (metric, headline) {
+        (_, HeadlineValue::Scalar(value)) => Some(value.max(0.0)),
+        (
+            MetricKind::Memory,
+            HeadlineValue::Memory {
+                available_bytes, ..
+            },
+        ) => Some(available_bytes as f64),
+        (
+            MetricKind::Storage,
+            HeadlineValue::Storage {
+                used_bytes,
+                total_bytes,
+            },
+        ) => Some(total_bytes.saturating_sub(used_bytes) as f64),
+        _ => None,
     }
 }
 

@@ -222,7 +222,7 @@ struct Cli {
         short = 'c',
         long = "colors",
         value_delimiter = ',',
-        help = "Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020"
+        help = "Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
     )]
     colors: Vec<String>,
 
