@@ -12,6 +12,8 @@ colorous = "1.0"
 palette = "0.7"
 rand = { version = "0.8", features = ["small_rng"] }
 rand_distr = "0.4"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shell-words = "1.1"
 splines = "5"
+toml = "0.8"

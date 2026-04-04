@@ -1,4 +1,5 @@
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -21,7 +22,8 @@ Metrics:
 Notes:
   Layout is the canonical interface.
   Without a layout, monlin defaults to avail.
-  Default args can be read from $XDG_CONFIG_HOME/monlin/config or ~/.config/monlin/config.
+  Defaults can be read from $XDG_CONFIG_HOME/monlin/config.toml or ~/.config/monlin/config.toml.
+  Legacy shell-word configs in .../config are still supported.
   Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.hum:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
@@ -181,6 +183,7 @@ struct Cli {
     history: usize,
 
     #[arg(
+        short = 'i',
         long = "interval-ms",
         default_value_t = DEFAULT_INTERVAL_MS,
         help = "Sampling interval in milliseconds"
@@ -240,10 +243,9 @@ struct Cli {
     #[arg(
         short = 'c',
         long = "colors",
-        value_delimiter = ',',
         help = "Colors: a named palette like gruvbox or solarized, a named colormap like turbo or viridis, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
     )]
-    colors: Vec<String>,
+    colors: Option<String>,
 
     #[arg(long = "color", value_enum, default_value_t = ColorMode::Auto, help = "When to emit ANSI colors")]
     color_mode: ColorMode,
@@ -259,6 +261,79 @@ struct Cli {
 
     #[arg(short = 'h', long = "help", action = ArgAction::SetTrue, help = "Show help text")]
     show_help: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfigFormat {
+    LegacyArgs,
+    Toml,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ConfigSource {
+    path: PathBuf,
+    format: ConfigFormat,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct TomlConfig {
+    layout: Option<String>,
+    history: Option<usize>,
+    #[serde(alias = "interval-ms")]
+    interval_ms: Option<u64>,
+    align: Option<String>,
+    packed: Option<bool>,
+    label: Option<String>,
+    #[serde(alias = "labels")]
+    stream_labels: Option<StringList>,
+    #[serde(alias = "stream-layout")]
+    stream_layout: Option<String>,
+    space: Option<String>,
+    #[serde(alias = "engine")]
+    layout_engine: Option<String>,
+    renderer: Option<String>,
+    colors: Option<StringList>,
+    #[serde(alias = "color")]
+    color_mode: Option<String>,
+    #[serde(alias = "output")]
+    output_mode: Option<String>,
+    width: Option<usize>,
+    once: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum StringList {
+    Single(String),
+    Many(Vec<String>),
+}
+
+impl StringList {
+    fn into_csv(self) -> Option<String> {
+        match self {
+            Self::Single(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            }
+            Self::Many(values) => {
+                let values = values
+                    .into_iter()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                if values.is_empty() {
+                    None
+                } else {
+                    Some(values.join(","))
+                }
+            }
+        }
+    }
 }
 
 pub fn parse_args<I>(args: I) -> Result<Config, String>
@@ -335,8 +410,12 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
     } else {
         document
     };
-    let colors = (!cli.colors.is_empty())
-        .then(|| expand_color_specs(&cli.colors))
+    let colors = cli
+        .colors
+        .as_deref()
+        .map(split_color_tokens)
+        .transpose()?
+        .map(|tokens| expand_color_specs(&tokens))
         .transpose()?;
 
     Ok(Config {
@@ -402,39 +481,69 @@ fn cli_requests_subcommand(args: &[String]) -> bool {
 }
 
 fn load_default_config_args() -> Result<Vec<String>, String> {
-    let Some(path) = default_config_path() else {
+    let Some(source) = default_config_source() else {
         return Ok(Vec::new());
     };
-    load_config_args_from_path(&path)
+    load_config_args_from_path(&source.path, source.format)
 }
 
-fn load_config_args_from_path(path: &std::path::Path) -> Result<Vec<String>, String> {
+fn load_config_args_from_path(
+    path: &std::path::Path,
+    format: ConfigFormat,
+) -> Result<Vec<String>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
 
     let raw = fs::read_to_string(path)
         .map_err(|error| format!("failed to read config file {}: {error}", path.display()))?;
-    parse_config_contents(&raw)
-        .map_err(|error| format!("invalid config file {}: {error}", path.display()))
+    match format {
+        ConfigFormat::LegacyArgs => parse_config_contents(&raw),
+        ConfigFormat::Toml => parse_toml_config_contents(&raw),
+    }
+    .map_err(|error| format!("invalid config file {}: {error}", path.display()))
 }
 
-fn default_config_path() -> Option<PathBuf> {
+fn default_config_source() -> Option<ConfigSource> {
     if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
         if !xdg_config_home.trim().is_empty() {
-            return Some(PathBuf::from(xdg_config_home).join("monlin").join("config"));
+            let root = PathBuf::from(xdg_config_home).join("monlin");
+            let toml_path = root.join("config.toml");
+            if toml_path.is_file() {
+                return Some(ConfigSource {
+                    path: toml_path,
+                    format: ConfigFormat::Toml,
+                });
+            }
+            let legacy_path = root.join("config");
+            if legacy_path.is_file() {
+                return Some(ConfigSource {
+                    path: legacy_path,
+                    format: ConfigFormat::LegacyArgs,
+                });
+            }
         }
     }
 
-    env::var("HOME")
+    let home = env::var("HOME")
         .ok()
-        .filter(|home| !home.trim().is_empty())
-        .map(|home| {
-            PathBuf::from(home)
-                .join(".config")
-                .join("monlin")
-                .join("config")
-        })
+        .filter(|home| !home.trim().is_empty())?;
+    let root = PathBuf::from(home).join(".config").join("monlin");
+    let toml_path = root.join("config.toml");
+    if toml_path.is_file() {
+        return Some(ConfigSource {
+            path: toml_path,
+            format: ConfigFormat::Toml,
+        });
+    }
+    let legacy_path = root.join("config");
+    if legacy_path.is_file() {
+        return Some(ConfigSource {
+            path: legacy_path,
+            format: ConfigFormat::LegacyArgs,
+        });
+    }
+    None
 }
 
 fn parse_config_contents(raw: &str) -> Result<Vec<String>, String> {
@@ -452,6 +561,73 @@ fn parse_config_contents(raw: &str) -> Result<Vec<String>, String> {
     }
 
     Ok(args)
+}
+
+fn parse_toml_config_contents(raw: &str) -> Result<Vec<String>, String> {
+    let config = toml::from_str::<TomlConfig>(raw).map_err(|error| error.to_string())?;
+    Ok(toml_config_to_args(config))
+}
+
+fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(layout) = non_empty_string(config.layout) {
+        args.push(layout);
+    }
+    if let Some(history) = config.history {
+        args.push("--history".to_owned());
+        args.push(history.to_string());
+    }
+    if let Some(interval_ms) = config.interval_ms {
+        args.push("--interval-ms".to_owned());
+        args.push(interval_ms.to_string());
+    }
+    push_flag_value(&mut args, "--align", config.align);
+    if config.packed.unwrap_or(false) {
+        args.push("--packed".to_owned());
+    }
+    push_flag_value(&mut args, "--label", config.label);
+    if let Some(labels) = config.stream_labels.and_then(StringList::into_csv) {
+        args.push("--labels".to_owned());
+        args.push(labels);
+    }
+    push_flag_value(&mut args, "--stream-layout", config.stream_layout);
+    push_flag_value(&mut args, "--space", config.space);
+    push_flag_value(&mut args, "--engine", config.layout_engine);
+    push_flag_value(&mut args, "--renderer", config.renderer);
+    if let Some(colors) = config.colors.and_then(StringList::into_csv) {
+        args.push("--colors".to_owned());
+        args.push(colors);
+    }
+    push_flag_value(&mut args, "--color", config.color_mode);
+    push_flag_value(&mut args, "--output", config.output_mode);
+    if let Some(width) = config.width {
+        args.push("--width".to_owned());
+        args.push(width.to_string());
+    }
+    if config.once.unwrap_or(false) {
+        args.push("--once".to_owned());
+    }
+
+    args
+}
+
+fn push_flag_value(args: &mut Vec<String>, flag: &str, value: Option<String>) {
+    if let Some(value) = non_empty_string(value) {
+        args.push(flag.to_owned());
+        args.push(value);
+    }
+}
+
+fn non_empty_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_owned())
+        }
+    })
 }
 
 fn parse_external_input(
@@ -534,6 +710,21 @@ fn expand_color_specs(tokens: &[String]) -> Result<Vec<ColorSpec>, String> {
     }
 
     Ok(specs)
+}
+
+fn split_color_tokens(raw: &str) -> Result<Vec<String>, String> {
+    let tokens = raw
+        .split(',')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+
+    if tokens.is_empty() {
+        return Err("at least one color token is required".to_owned());
+    }
+
+    Ok(tokens)
 }
 
 fn parse_prefixed_color(body: &str, raw: &str) -> Result<ColorSpec, String> {
@@ -656,7 +847,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse(items: &[&str]) -> Config {
-        parse_args(items.iter().map(|item| item.to_string())).unwrap()
+        parse_args_from_vec(items.iter().map(|item| item.to_string()).collect()).unwrap()
     }
 
     fn unique_temp_dir(name: &str) -> PathBuf {
@@ -708,6 +899,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_toml_config_contents() {
+        let args = parse_toml_config_contents(
+            r#"
+            align = "right"
+            label = "my host"
+            packed = true
+            colors = ["gruvbox", "320"]
+            renderer = "block"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--align",
+                "right",
+                "--packed",
+                "--label",
+                "my host",
+                "--renderer",
+                "block",
+                "--colors",
+                "gruvbox,320",
+            ]
+        );
+    }
+
+    #[test]
     fn loads_default_args_from_xdg_config_file() {
         let root = unique_temp_dir("xdg");
         let config_dir = root.join("monlin");
@@ -715,10 +934,31 @@ mod tests {
         fs::create_dir_all(&config_dir).unwrap();
         fs::write(&path, "--align right\n-p\n").unwrap();
 
-        let args = load_config_args_from_path(&path).unwrap();
+        let args = load_config_args_from_path(&path, ConfigFormat::LegacyArgs).unwrap();
         fs::remove_dir_all(&root).ok();
 
         assert_eq!(args, vec!["--align", "right", "-p"]);
+    }
+
+    #[test]
+    fn loads_toml_args_from_config_file() {
+        let root = unique_temp_dir("toml");
+        let config_dir = root.join("monlin");
+        let path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &path,
+            r#"
+            colors = "gruvbox"
+            renderer = "block"
+            "#,
+        )
+        .unwrap();
+
+        let args = load_config_args_from_path(&path, ConfigFormat::Toml).unwrap();
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(args, vec!["--renderer", "block", "--colors", "gruvbox"]);
     }
 
     #[test]
@@ -728,6 +968,41 @@ mod tests {
         args.extend(vec!["--align".to_owned(), "left".to_owned()]);
         let config = parse_args_from_vec(args).unwrap();
         assert_eq!(config.align, Align::Left);
+    }
+
+    #[test]
+    fn command_line_colors_override_config_file_colors() {
+        let mut args = vec!["monlin".to_owned()];
+        args.extend(parse_config_contents("--colors rainbow\n").unwrap());
+        args.extend(vec!["--colors".to_owned(), "turbo".to_owned()]);
+        let config = parse_args_from_vec(args).unwrap();
+        assert_eq!(
+            config.colors,
+            Some(vec![ColorSpec::Map(crate::color::ColorMapKind::Turbo)])
+        );
+    }
+
+    #[test]
+    fn command_line_flags_override_toml_config_file_defaults() {
+        let mut args = vec!["monlin".to_owned()];
+        args.extend(
+            parse_toml_config_contents(
+                r#"
+                align = "right"
+                renderer = "block"
+                "#,
+            )
+            .unwrap(),
+        );
+        args.extend(vec![
+            "--align".to_owned(),
+            "left".to_owned(),
+            "--renderer".to_owned(),
+            "braille".to_owned(),
+        ]);
+        let config = parse_args_from_vec(args).unwrap();
+        assert_eq!(config.align, Align::Left);
+        assert_eq!(config.renderer, Renderer::Braille);
     }
 
     #[test]
@@ -762,6 +1037,12 @@ mod tests {
     fn parses_i3bar_output_mode() {
         let config = parse(&["monlin", "--output", "i3bar"]);
         assert_eq!(config.output_mode, OutputMode::I3bar);
+    }
+
+    #[test]
+    fn parses_short_interval_flag() {
+        let config = parse(&["monlin", "-i", "250"]);
+        assert_eq!(config.interval_ms, 250);
     }
 
     #[test]
@@ -1001,6 +1282,12 @@ mod tests {
         let config = parse(&["monlin", "--colors", "warm,320"]);
         assert_eq!(config.colors.as_ref().unwrap().len(), 7);
         assert_eq!(config.colors.as_ref().unwrap()[6], ColorSpec::Angle(320.0));
+    }
+
+    #[test]
+    fn split_color_tokens_rejects_empty_input() {
+        let error = split_color_tokens(" , ").unwrap_err();
+        assert!(error.contains("at least one color token"));
     }
 
     #[test]
