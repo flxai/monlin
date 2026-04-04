@@ -7,8 +7,8 @@ use crate::color::{
     gradient_for_with_hues, interpolate, metric_hues_for_visible_hue, paint,
     split_gradients_for_with_hues, visible_hues, BaseHues, ColorSpec,
 };
-use crate::config::{Align, Config, Space, StreamLayout};
-use crate::layout::{Layout, LayoutItem, LayoutView, MetricKind};
+use crate::config::{Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout};
+use crate::layout::{DisplayMode, Layout, LayoutItem, LayoutView, MetricKind};
 use crate::metrics::{HeadlineValue, MetricValue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -20,6 +20,34 @@ pub enum Renderer {
 const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const BRAILLE_LEFT_BITS: [u8; 4] = [6, 2, 1, 0];
 const BRAILLE_RIGHT_BITS: [u8; 4] = [7, 5, 4, 3];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GridColumnSpec {
+    label_width: usize,
+    value_width: usize,
+    graph_width: usize,
+    total_width: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct PackedFraction {
+    num: usize,
+    den: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+struct PackedSpan {
+    start: PackedFraction,
+    end: PackedFraction,
+}
+
+const UNAVAILABLE_GRAPH_BRAILLE: char = '⠄';
+const UNAVAILABLE_GRAPH_BLOCK: char = '░';
+const UNAVAILABLE_GRAPH_COLOR: crate::color::Rgb = crate::color::Rgb {
+    r: 110,
+    g: 110,
+    b: 110,
+};
 
 pub fn render_lines(
     config: &Config,
@@ -50,12 +78,61 @@ pub fn render_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    let effective_layout_engine = match config.layout_engine {
+        LayoutEngine::Auto if layout.rows().len() > 1 => LayoutEngine::Grid,
+        LayoutEngine::Auto => LayoutEngine::Flow,
+        other => other,
+    };
+
+    if layout.rows().len() > 1 {
+        match effective_layout_engine {
+            LayoutEngine::Grid => {
+                return render_grid_lines_with_headlines(
+                    config,
+                    width,
+                    color_enabled,
+                    histories,
+                    layout,
+                    values,
+                    headline_values,
+                );
+            }
+            LayoutEngine::Flex => {
+                return render_flex_lines_with_headlines(
+                    config,
+                    width,
+                    color_enabled,
+                    histories,
+                    layout,
+                    values,
+                    headline_values,
+                );
+            }
+            LayoutEngine::Pack => {
+                return render_pack_lines_with_headlines(
+                    config,
+                    width,
+                    color_enabled,
+                    histories,
+                    layout,
+                    values,
+                    headline_values,
+                );
+            }
+            LayoutEngine::Auto | LayoutEngine::Flow => {}
+        }
+    }
+
     let label_width = layout
-        .metrics()
+        .rows()
         .iter()
-        .map(|metric| metric.short_label().chars().count())
+        .flat_map(|items| items.iter())
+        .map(|item| display_label_width(item.metric(), item.display()))
         .max()
         .unwrap_or(0);
+    let stable_column_widths = matches!(config.space, Space::Stable).then(|| {
+        stable_layout_column_widths(config, width, layout, values, headline_values, label_width)
+    });
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let mut offset = 0;
@@ -76,9 +153,705 @@ pub fn render_lines_with_headlines(
                 headline_values,
                 label_width,
                 row_hues,
+                stable_column_widths.as_deref(),
             )
         })
         .collect()
+}
+
+fn render_pack_lines_with_headlines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+) -> Vec<String> {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let packed_text_widths = packed_span_text_widths(
+        layout,
+        values,
+        headline_values,
+        matches!(config.space, Space::Stable),
+    );
+    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let mut offset = 0;
+
+    layout
+        .rows()
+        .iter()
+        .map(|items| {
+            let row_hues = &all_hues[offset..offset + items.len()];
+            offset += items.len();
+            let row_specs = pack_row_specs(
+                config,
+                width,
+                &prefix,
+                items,
+                values,
+                headline_values,
+                &packed_text_widths,
+            );
+            let segments = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let metric = item.metric();
+                    let history = histories.get(&metric).cloned().unwrap_or_default();
+                    let item_hues =
+                        metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
+                    if let Some(value) = values.get(&metric).copied() {
+                        render_grid_segment(
+                            *item,
+                            &history,
+                            value,
+                            headline_values.get(&metric).copied(),
+                            row_specs[index],
+                            config.renderer,
+                            Some(&item_hues),
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    } else {
+                        render_unavailable_grid_segment(
+                            *item,
+                            row_specs[index],
+                            config.renderer,
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+        })
+        .collect()
+}
+
+fn render_flex_lines_with_headlines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+) -> Vec<String> {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let column_text_widths = shared_column_text_widths(
+        layout,
+        values,
+        headline_values,
+        matches!(config.space, Space::Stable),
+    );
+    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let mut offset = 0;
+
+    layout
+        .rows()
+        .iter()
+        .map(|items| {
+            let row_hues = &all_hues[offset..offset + items.len()];
+            offset += items.len();
+            let row_specs = flex_row_specs(
+                config,
+                width,
+                &prefix,
+                items,
+                values,
+                headline_values,
+                &column_text_widths,
+            );
+            let segments = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let metric = item.metric();
+                    let history = histories.get(&metric).cloned().unwrap_or_default();
+                    let item_hues =
+                        metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
+                    if let Some(value) = values.get(&metric).copied() {
+                        render_grid_segment(
+                            *item,
+                            &history,
+                            value,
+                            headline_values.get(&metric).copied(),
+                            row_specs[index],
+                            config.renderer,
+                            Some(&item_hues),
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    } else {
+                        render_unavailable_grid_segment(
+                            *item,
+                            row_specs[index],
+                            config.renderer,
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+        })
+        .collect()
+}
+
+fn render_grid_lines_with_headlines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+) -> Vec<String> {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let column_specs = grid_column_specs(config, width, layout, values, headline_values);
+    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let mut offset = 0;
+
+    layout
+        .rows()
+        .iter()
+        .map(|items| {
+            let row_hues = &all_hues[offset..offset + items.len()];
+            offset += items.len();
+            let segments = items
+                .iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    let metric = item.metric();
+                    let history = histories.get(&metric).cloned().unwrap_or_default();
+                    let item_hues =
+                        metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
+                    if let Some(value) = values.get(&metric).copied() {
+                        render_grid_segment(
+                            *item,
+                            &history,
+                            value,
+                            headline_values.get(&metric).copied(),
+                            column_specs[index],
+                            config.renderer,
+                            Some(&item_hues),
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    } else {
+                        render_unavailable_grid_segment(
+                            *item,
+                            column_specs[index],
+                            config.renderer,
+                            color_enabled,
+                            matches!(config.space, Space::Stable),
+                        )
+                    }
+                })
+                .collect::<Vec<_>>();
+            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+        })
+        .collect()
+}
+
+fn grid_column_specs(
+    config: &Config,
+    width: usize,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+) -> Vec<GridColumnSpec> {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let column_count = layout
+        .rows()
+        .iter()
+        .map(|items| items.len())
+        .max()
+        .unwrap_or(0);
+    if column_count == 0 {
+        return Vec::new();
+    }
+
+    let stable_layout = matches!(config.space, Space::Stable);
+    let mut label_widths = vec![0; column_count];
+    let mut value_widths = vec![0; column_count];
+    let mut column_items =
+        vec![
+            LayoutItem::with_constraints(
+                MetricKind::Cpu,
+                LayoutView::Default,
+                DisplayMode::Full,
+                None,
+                1,
+                None,
+                None
+            );
+            column_count
+        ];
+    let mut column_item_seen = vec![false; column_count];
+
+    for items in layout.rows() {
+        for (index, item) in items.iter().enumerate() {
+            let metric = item.metric();
+            label_widths[index] = label_widths[index].max(display_label_width(metric, item.display()));
+            value_widths[index] = value_widths[index].max(if let Some(value) = values.get(&metric).copied() {
+                display_value_width(
+                    metric,
+                    item.view(),
+                    item.display(),
+                    value,
+                    headline_values.get(&metric).copied(),
+                    stable_layout,
+                )
+            } else {
+                unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+            });
+            let merged_basis = match (
+                column_item_seen[index],
+                column_items[index].basis(),
+                item.basis(),
+            ) {
+                (false, _, basis) => basis,
+                (true, Some(left), Some(right)) => Some(left.max(right)),
+                (true, Some(left), None) => Some(left),
+                (true, None, Some(right)) => Some(right),
+                (true, None, None) => None,
+            };
+            let item_grow_hint = if item.grow() == 0 {
+                item.basis().unwrap_or(0)
+            } else {
+                item.grow()
+            };
+            let merged_grow = if column_item_seen[index] {
+                column_items[index].grow().max(item_grow_hint)
+            } else {
+                item_grow_hint
+            };
+            let merged_max = match (
+                column_item_seen[index],
+                column_items[index].max_width(),
+                item.max_width(),
+            ) {
+                (false, _, max) => max,
+                (true, Some(left), Some(right)) => Some(left.max(right)),
+                (true, Some(left), None) => Some(left),
+                (true, None, Some(right)) => Some(right),
+                (true, None, None) => None,
+            };
+            let merged_min = match (
+                column_item_seen[index],
+                column_items[index].min_width(),
+                item.min_width(),
+            ) {
+                (false, _, min) => min,
+                (true, Some(left), Some(right)) => Some(left.max(right)),
+                (true, Some(left), None) => Some(left),
+                (true, None, Some(right)) => Some(right),
+                (true, None, None) => None,
+            };
+            column_items[index] = LayoutItem::with_constraints(
+                metric,
+                item.view(),
+                item.display(),
+                merged_basis,
+                merged_grow,
+                merged_max,
+                merged_min,
+            );
+            column_item_seen[index] = true;
+        }
+    }
+
+    let fixed_widths = label_widths
+        .iter()
+        .zip(&value_widths)
+        .map(|(label, value)| label + 1 + value)
+        .collect::<Vec<_>>();
+    let separators = column_count.saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+    let fixed_total = fixed_widths.iter().sum::<usize>();
+    let graph_widths = if segment_space >= fixed_total + column_count {
+        split_weighted_width(
+            segment_space - fixed_total - column_count,
+            &normalized_items_for_sizing(&column_items),
+        )
+    } else {
+        vec![0; column_count]
+    };
+
+    fixed_widths
+        .into_iter()
+        .zip(label_widths)
+        .zip(value_widths)
+        .zip(graph_widths)
+        .map(
+            |(((fixed, label_width), value_width), graph_width)| GridColumnSpec {
+                label_width,
+                value_width,
+                graph_width,
+                total_width: if graph_width > 0 {
+                    fixed + 1 + graph_width
+                } else {
+                    fixed
+                },
+            },
+        )
+        .collect()
+}
+
+fn shared_column_text_widths(
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    stable_layout: bool,
+) -> Vec<(usize, usize)> {
+    let column_count = layout
+        .rows()
+        .iter()
+        .map(|items| items.len())
+        .max()
+        .unwrap_or(0);
+    let mut text_widths = vec![(0, 0); column_count];
+
+    for items in layout.rows() {
+        for (index, item) in items.iter().enumerate() {
+            let metric = item.metric();
+            text_widths[index].0 = text_widths[index]
+                .0
+                .max(display_label_width(metric, item.display()));
+            text_widths[index].1 = text_widths[index].1.max(if let Some(value) = values.get(&metric).copied() {
+                display_value_width(
+                    metric,
+                    item.view(),
+                    item.display(),
+                    value,
+                    headline_values.get(&metric).copied(),
+                    stable_layout,
+                )
+            } else {
+                unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+            });
+        }
+    }
+
+    text_widths
+}
+
+fn packed_span_text_widths(
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    stable_layout: bool,
+) -> HashMap<PackedSpan, (usize, usize)> {
+    let mut text_widths = HashMap::new();
+
+    for items in layout.rows() {
+        for (item, span) in items.iter().zip(packed_row_spans(items)) {
+            let metric = item.metric();
+            let label_width = display_label_width(metric, item.display());
+            let value_width = if let Some(value) = values.get(&metric).copied() {
+                display_value_width(
+                    metric,
+                    item.view(),
+                    item.display(),
+                    value,
+                    headline_values.get(&metric).copied(),
+                    stable_layout,
+                )
+            } else {
+                unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+            };
+            let entry = text_widths.entry(span).or_insert((0, 0));
+            entry.0 = entry.0.max(label_width);
+            entry.1 = entry.1.max(value_width);
+        }
+    }
+
+    text_widths
+}
+
+fn flex_row_specs(
+    config: &Config,
+    width: usize,
+    prefix: &str,
+    items: &[LayoutItem],
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    column_text_widths: &[(usize, usize)],
+) -> Vec<GridColumnSpec> {
+    let count = items.len();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let stable_layout = matches!(config.space, Space::Stable);
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let label_widths = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            column_text_widths
+                .get(index)
+                .map(|(label_width, _)| *label_width)
+                .unwrap_or_else(|| display_label_width(item.metric(), item.display()))
+        })
+        .collect::<Vec<_>>();
+    let value_widths = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            column_text_widths
+                .get(index)
+                .map(|(_, value_width)| *value_width)
+                .unwrap_or_else(|| {
+                    let metric = item.metric();
+                    if let Some(value) = values.get(&metric).copied() {
+                        display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            value,
+                            headline_values.get(&metric).copied(),
+                            stable_layout,
+                        )
+                    } else {
+                        unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    let fixed_widths = label_widths
+        .iter()
+        .zip(&value_widths)
+        .map(|(label, value)| label + 1 + value)
+        .collect::<Vec<_>>();
+    let separators = count.saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+    let total_widths = split_weighted_width(segment_space, &normalized_items_for_sizing(items));
+
+    fixed_widths
+        .into_iter()
+        .zip(label_widths)
+        .zip(value_widths)
+        .zip(total_widths)
+        .map(|(((fixed, label_width), value_width), total_width)| {
+            let graph_width = if total_width > fixed {
+                total_width.saturating_sub(fixed + 1)
+            } else {
+                0
+            };
+            GridColumnSpec {
+                label_width,
+                value_width,
+                graph_width,
+                total_width,
+            }
+        })
+        .collect()
+}
+
+fn pack_row_specs(
+    config: &Config,
+    width: usize,
+    prefix: &str,
+    items: &[LayoutItem],
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    packed_text_widths: &HashMap<PackedSpan, (usize, usize)>,
+) -> Vec<GridColumnSpec> {
+    let count = items.len();
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let stable_layout = matches!(config.space, Space::Stable);
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let spans = packed_row_spans(items);
+    let label_widths = items
+        .iter()
+        .zip(spans.iter())
+        .map(|(item, span)| {
+            packed_text_widths
+                .get(span)
+                .map(|(label_width, _)| *label_width)
+                .unwrap_or_else(|| display_label_width(item.metric(), item.display()))
+        })
+        .collect::<Vec<_>>();
+    let value_widths = items
+        .iter()
+        .zip(spans.iter())
+        .map(|(item, span)| {
+            packed_text_widths
+                .get(span)
+                .map(|(_, value_width)| *value_width)
+                .unwrap_or_else(|| {
+                    let metric = item.metric();
+                    if let Some(value) = values.get(&metric).copied() {
+                        display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            value,
+                            headline_values.get(&metric).copied(),
+                            stable_layout,
+                        )
+                    } else {
+                        unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    let fixed_widths = label_widths
+        .iter()
+        .zip(&value_widths)
+        .map(|(label, value)| label + 1 + value)
+        .collect::<Vec<_>>();
+    let separators = count.saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+    let total_widths = split_weighted_width(segment_space, &normalized_items_for_sizing(items));
+
+    fixed_widths
+        .into_iter()
+        .zip(label_widths)
+        .zip(value_widths)
+        .zip(total_widths)
+        .map(|(((fixed, label_width), value_width), total_width)| {
+            let graph_width = if total_width > fixed {
+                total_width.saturating_sub(fixed + 1)
+            } else {
+                0
+            };
+            GridColumnSpec {
+                label_width,
+                value_width,
+                graph_width,
+                total_width,
+            }
+        })
+        .collect()
+}
+
+fn packed_row_spans(items: &[LayoutItem]) -> Vec<PackedSpan> {
+    let normalized = normalized_items_for_sizing(items);
+    let total = normalized
+        .iter()
+        .map(|item| item.grow().max(1))
+        .sum::<usize>()
+        .max(1);
+    let mut start = 0usize;
+
+    normalized
+        .iter()
+        .map(|item| {
+            let width = item.grow().max(1);
+            let end = start + width;
+            let span = PackedSpan {
+                start: reduce_fraction(start, total),
+                end: reduce_fraction(end, total),
+            };
+            start = end;
+            span
+        })
+        .collect()
+}
+
+fn reduce_fraction(num: usize, den: usize) -> PackedFraction {
+    let gcd = gcd(num, den).max(1);
+    PackedFraction {
+        num: num / gcd,
+        den: den / gcd,
+    }
+}
+
+fn gcd(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+fn stable_layout_column_widths(
+    config: &Config,
+    width: usize,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    label_width: usize,
+) -> Vec<usize> {
+    let prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let column_count = layout
+        .rows()
+        .iter()
+        .map(|items| items.len())
+        .max()
+        .unwrap_or(0);
+    if column_count == 0 {
+        return Vec::new();
+    }
+
+    let mut fixed_widths = vec![0; column_count];
+    for items in layout.rows() {
+        for (index, item) in items.iter().enumerate() {
+            let metric = item.metric();
+                fixed_widths[index] =
+                fixed_widths[index].max(if let Some(value) = values.get(&metric).copied() {
+                    segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        value,
+                        headline_values.get(&metric).copied(),
+                        label_width,
+                        true,
+                    )
+                } else {
+                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, true)
+                });
+        }
+    }
+
+    let separators = column_count.saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+    let fixed_total = fixed_widths.iter().sum::<usize>();
+    if segment_space >= fixed_total + column_count {
+        let graph_widths =
+            split_stream_widths(segment_space - fixed_total - column_count, column_count);
+        fixed_widths
+            .into_iter()
+            .zip(graph_widths)
+            .map(|(fixed, graph)| fixed + 1 + graph)
+            .collect()
+    } else {
+        split_stream_widths(segment_space, column_count)
+    }
 }
 
 pub fn render_stream_lines(
@@ -92,6 +865,10 @@ pub fn render_stream_lines(
         return vec![String::new()];
     }
 
+    if let Some(groups) = &config.stream_groups {
+        return render_stream_group_lines(config, width, color_enabled, histories, values, groups);
+    }
+
     match config.stream_layout {
         StreamLayout::Columns => vec![render_stream_columns_line(
             config,
@@ -100,10 +877,252 @@ pub fn render_stream_lines(
             histories,
             values,
         )],
-        StreamLayout::Lines => {
-            render_stream_rows(config, width, color_enabled, histories, values)
+        StreamLayout::Lines => render_stream_rows(config, width, color_enabled, histories, values),
+    }
+}
+
+fn render_stream_group_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    values: &[f64],
+    groups: &[StreamGroup],
+) -> Vec<String> {
+    let max_ref = groups
+        .iter()
+        .flat_map(|group| group.rows.iter())
+        .flat_map(|row| row.iter())
+        .map(|item| item.column_index + 1)
+        .max()
+        .unwrap_or(values.len())
+        .max(values.len());
+    let stream_hues = visible_hues(max_ref, config.colors.as_deref());
+    let outer_prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+
+    let mut lines = Vec::new();
+    for group in groups {
+        let group_prefix = match &group.label {
+            Some(label) => format!("{outer_prefix}{label} "),
+            None => outer_prefix.clone(),
+        };
+        for row in &group.rows {
+            lines.push(render_stream_group_row(
+                config,
+                width,
+                color_enabled,
+                histories,
+                values,
+                row,
+                &group_prefix,
+                &stream_hues,
+            ));
         }
     }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
+fn render_stream_group_row(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    values: &[f64],
+    items: &[StreamItem],
+    prefix: &str,
+    stream_hues: &[ColorSpec],
+) -> String {
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let segments = items
+        .iter()
+        .map(|item| {
+            let label = match item.display {
+                DisplayMode::Full => item.label.clone().unwrap_or_default(),
+                DisplayMode::Value | DisplayMode::Bare => String::new(),
+            };
+            let usage_text = match item.display {
+                DisplayMode::Full | DisplayMode::Value => format!(
+                    "{:>3.0}%",
+                    values[item.column_index].clamp(0.0, 1.0) * 100.0
+                ),
+                DisplayMode::Bare => String::new(),
+            };
+            let separator = if label.is_empty() || usage_text.is_empty() {
+                ""
+            } else {
+                " "
+            };
+            let fixed =
+                label.chars().count() + separator.chars().count() + usage_text.chars().count();
+
+            (item, label, separator, usage_text, fixed)
+        })
+        .collect::<Vec<_>>();
+
+    let sizing_items = items
+        .iter()
+        .map(|item| {
+            LayoutItem::with_constraints(
+                MetricKind::Cpu,
+                LayoutView::Default,
+                DisplayMode::Full,
+                Some(item.basis),
+                item.basis,
+                item.max_width,
+                item.min_width,
+            )
+        })
+        .collect::<Vec<_>>();
+    let count = items.len();
+    let separators = count.saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+
+    let (segment_widths, graph_widths) = match config.space {
+        Space::Stable => {
+            let fixed_total = segments
+                .iter()
+                .map(|(_, label, separator, usage_text, _)| {
+                    label.chars().count()
+                        + separator.chars().count()
+                        + stable_stream_usage_width(usage_text)
+                        + 1
+                })
+                .sum::<usize>();
+            let graph_space = segment_space.saturating_sub(fixed_total);
+            let graph_widths = split_weighted_width(graph_space, &sizing_items);
+            let segment_widths = segments
+                .iter()
+                .zip(graph_widths.iter().copied())
+                .map(|((_, label, separator, usage_text, _), graph_width)| {
+                    label.chars().count()
+                        + separator.chars().count()
+                        + stable_stream_usage_width(usage_text)
+                        + usize::from(graph_width > 0)
+                        + graph_width
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+        Space::Graph => {
+            let fixed_total = segments
+                .iter()
+                .map(|(_, _, _, _, fixed)| fixed + 1)
+                .sum::<usize>();
+            let graph_space = segment_space.saturating_sub(fixed_total);
+            let graph_widths = split_weighted_width(graph_space, &sizing_items);
+            let segment_widths = segments
+                .iter()
+                .zip(graph_widths.iter().copied())
+                .map(|((_, _, _, _, fixed), graph_width)| {
+                    fixed + usize::from(graph_width > 0) + graph_width
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+        Space::Segment => {
+            let segment_widths = split_weighted_width(segment_space, &sizing_items);
+            let graph_widths = segments
+                .iter()
+                .zip(segment_widths.iter().copied())
+                .map(|((_, _, _, _, fixed), segment_width)| {
+                    if segment_width <= *fixed {
+                        0
+                    } else {
+                        segment_width.saturating_sub(*fixed + 1)
+                    }
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+    };
+
+    let rendered = segments
+        .into_iter()
+        .zip(segment_widths.into_iter().zip(graph_widths))
+        .map(
+            |((item, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
+                let metric = stream_metric_for(item.column_index);
+                let metric_history = histories
+                    .get(item.column_index)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .copied()
+                            .map(MetricValue::Single)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let item_hues = metric_hues_for_visible_hue(
+                    metric,
+                    stream_hues[item.column_index % stream_hues.len()],
+                );
+                let display_usage_text = match config.space {
+                    Space::Stable if !usage_text.is_empty() => {
+                        format!(
+                            "{usage_text:>width$}",
+                            width = stable_stream_usage_width(&usage_text)
+                        )
+                    }
+                    Space::Stable | Space::Graph | Space::Segment => usage_text.clone(),
+                };
+                let graph = match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                };
+                let text_only = format!("{label}{separator}{display_usage_text}");
+
+                if graph_width == 0 {
+                    return pad_or_trim_visible(&text_only, segment_width);
+                }
+
+                pad_or_trim_visible(
+                    &match config.align {
+                        Align::Left => {
+                            if text_only.is_empty() {
+                                graph.clone()
+                            } else {
+                                format!("{label}{separator}{display_usage_text} {graph}")
+                            }
+                        }
+                        Align::Right => {
+                            if label.is_empty() {
+                                if display_usage_text.is_empty() {
+                                    graph.clone()
+                                } else {
+                                    format!("{graph} {display_usage_text}")
+                                }
+                            } else {
+                                format!("{label} {graph} {display_usage_text}")
+                            }
+                        }
+                    },
+                    segment_width,
+                )
+            },
+        )
+        .collect::<Vec<_>>();
+
+    pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
 }
 
 fn render_stream_rows(
@@ -136,9 +1155,8 @@ fn render_stream_rows(
                 .map(|label| format!("{label:>label_width$} "))
                 .unwrap_or_default();
             let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
-            let fixed = prefix.chars().count()
-                + row_label.chars().count()
-                + usage_text.chars().count();
+            let fixed =
+                prefix.chars().count() + row_label.chars().count() + usage_text.chars().count();
 
             let graph_width = width.saturating_sub(fixed + 1);
             let metric = stream_metric_for(index);
@@ -152,29 +1170,23 @@ fn render_stream_rows(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            let item_hues = metric_hues_for_visible_hue(
-                metric,
-                stream_hues[index % stream_hues.len()],
-            );
+            let item_hues =
+                metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
             let graph = match config.renderer {
-                Renderer::Braille => {
-                    render_braille_graph(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                    )
-                }
-                Renderer::Block => {
-                    render_block_graph(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                    )
-                }
+                Renderer::Braille => render_braille_graph(
+                    &metric_history,
+                    graph_width,
+                    metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
+                Renderer::Block => render_block_graph(
+                    &metric_history,
+                    graph_width,
+                    metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
             };
 
             pad_or_trim_visible(
@@ -215,82 +1227,78 @@ fn render_stream_columns_line(
                 .unwrap_or_default();
             let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
             let separator = if label.is_empty() { "" } else { " " };
-            let fixed = label.chars().count() + separator.chars().count() + usage_text.chars().count();
+            let fixed =
+                label.chars().count() + separator.chars().count() + usage_text.chars().count();
 
             (index, label, separator, usage_text, fixed)
         })
         .collect::<Vec<_>>();
-    let (segment_widths, graph_widths) =
-        stream_column_widths(config.space, inner_width, &segments);
+    let (segment_widths, graph_widths) = stream_column_widths(config.space, inner_width, &segments);
 
     let segments = segments
         .into_iter()
         .zip(segment_widths.into_iter().zip(graph_widths))
-        .map(|((index, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
-            let metric = stream_metric_for(index);
-            let metric_history = histories
-                .get(index)
-                .map(|history| {
-                    history
-                        .iter()
-                        .copied()
-                        .map(MetricValue::Single)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let item_hues = metric_hues_for_visible_hue(
-                metric,
-                stream_hues[index % stream_hues.len()],
-            );
-            let display_usage_text = match config.space {
-                Space::Stable => {
-                    format!(
-                        "{usage_text:>width$}",
-                        width = stable_stream_usage_width(&usage_text)
-                    )
-                }
-                Space::Graph | Space::Segment => usage_text.clone(),
-            };
-            let graph = match config.renderer {
-                Renderer::Braille => {
-                    render_braille_graph(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                    )
-                }
-                Renderer::Block => {
-                    render_block_graph(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                    )
-                }
-            };
-            let text_only = format!("{label}{separator}{display_usage_text}");
-
-            if graph_width == 0 {
-                return pad_or_trim_visible(&text_only, segment_width);
-            }
-
-            pad_or_trim_visible(
-                &match config.align {
-                    Align::Left => format!("{label}{separator}{display_usage_text} {graph}"),
-                    Align::Right => {
-                        if label.is_empty() {
-                            format!("{graph} {display_usage_text}")
-                        } else {
-                            format!("{label} {graph} {display_usage_text}")
-                        }
+        .map(
+            |((index, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
+                let metric = stream_metric_for(index);
+                let metric_history = histories
+                    .get(index)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .copied()
+                            .map(MetricValue::Single)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let item_hues =
+                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
+                let display_usage_text = match config.space {
+                    Space::Stable => {
+                        format!(
+                            "{usage_text:>width$}",
+                            width = stable_stream_usage_width(&usage_text)
+                        )
                     }
-                },
-                segment_width,
-            )
-        })
+                    Space::Graph | Space::Segment => usage_text.clone(),
+                };
+                let graph = match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                };
+                let text_only = format!("{label}{separator}{display_usage_text}");
+
+                if graph_width == 0 {
+                    return pad_or_trim_visible(&text_only, segment_width);
+                }
+
+                pad_or_trim_visible(
+                    &match config.align {
+                        Align::Left => format!("{label}{separator}{display_usage_text} {graph}"),
+                        Align::Right => {
+                            if label.is_empty() {
+                                format!("{graph} {display_usage_text}")
+                            } else {
+                                format!("{label} {graph} {display_usage_text}")
+                            }
+                        }
+                    },
+                    segment_width,
+                )
+            },
+        )
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
@@ -336,7 +1344,10 @@ fn stream_column_widths(
             (segment_widths, graph_widths)
         }
         Space::Graph => {
-            let fixed_total = segments.iter().map(|(_, _, _, _, fixed)| fixed + 1).sum::<usize>();
+            let fixed_total = segments
+                .iter()
+                .map(|(_, _, _, _, fixed)| fixed + 1)
+                .sum::<usize>();
             let graph_space = inner_width
                 .saturating_sub(separators)
                 .saturating_sub(fixed_total);
@@ -383,50 +1394,83 @@ fn render_row(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
     label_width: usize,
     row_hues: &[ColorSpec],
+    stable_column_widths: Option<&[usize]>,
 ) -> String {
     let prefix = config
         .label
         .as_ref()
         .map(|label| format!("{label} "))
         .unwrap_or_default();
-
+    let stable_layout = matches!(config.space, Space::Stable);
     let inner_width = width.saturating_sub(prefix.chars().count());
     let separators = items.len().saturating_sub(1);
     let segment_space = inner_width.saturating_sub(separators);
 
-    let fixed_widths = items
-        .iter()
-        .map(|item| {
-            let metric = item.metric();
-            let value = values
-                .get(&metric)
-                .copied()
-                .unwrap_or(MetricValue::Single(0.0));
-            segment_fixed_width(
-                metric,
-                item.view(),
-                value,
-                headline_values.get(&metric).copied(),
-                label_width,
-            )
-        })
-        .collect::<Vec<_>>();
-    let fixed_total = fixed_widths.iter().sum::<usize>();
-
-    let graph_widths = if !items.is_empty() && segment_space >= fixed_total + items.len() {
-        split_weighted_width(segment_space - fixed_total - items.len(), items)
-    } else {
-        vec![0; items.len()]
-    };
-
-    let widths = if graph_widths.iter().any(|width| *width > 0) {
-        fixed_widths
+    let (widths, graph_widths) = if let Some(stable_column_widths) = stable_column_widths {
+        let widths = stable_column_widths[..items.len()].to_vec();
+        let graph_widths = items
             .iter()
-            .zip(&graph_widths)
-            .map(|(fixed, graph)| fixed + 1 + graph)
-            .collect::<Vec<_>>()
+            .enumerate()
+            .map(|(index, item)| {
+                let metric = item.metric();
+                let fixed = if let Some(value) = values.get(&metric).copied() {
+                    segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        value,
+                        headline_values.get(&metric).copied(),
+                        label_width,
+                        stable_layout,
+                    )
+                } else {
+                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, stable_layout)
+                };
+                widths[index].saturating_sub(fixed + 1)
+            })
+            .collect::<Vec<_>>();
+        (widths, graph_widths)
     } else {
-        split_weighted_width(segment_space, items)
+        let fixed_widths = items
+            .iter()
+            .map(|item| {
+                let metric = item.metric();
+                if let Some(value) = values.get(&metric).copied() {
+                    segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        value,
+                        headline_values.get(&metric).copied(),
+                        label_width,
+                        stable_layout,
+                    )
+                } else {
+                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, stable_layout)
+                }
+            })
+            .collect::<Vec<_>>();
+        let fixed_total = fixed_widths.iter().sum::<usize>();
+
+        let graph_widths = if !items.is_empty() && segment_space >= fixed_total + items.len() {
+            split_weighted_width(
+                segment_space - fixed_total - items.len(),
+                &normalized_items_for_sizing(items),
+            )
+        } else {
+            vec![0; items.len()]
+        };
+
+        let widths = if graph_widths.iter().any(|width| *width > 0) {
+            fixed_widths
+                .iter()
+                .zip(&graph_widths)
+                .map(|(fixed, graph)| fixed + 1 + graph)
+                .collect::<Vec<_>>()
+        } else {
+            split_weighted_width(segment_space, items)
+        };
+        (widths, graph_widths)
     };
 
     let segments = items
@@ -437,39 +1481,47 @@ fn render_row(
         .map(|(index, ((item, width), graph_width))| {
             let metric = item.metric();
             let history = histories.get(&metric).cloned().unwrap_or_default();
-            let value = values
-                .get(&metric)
-                .copied()
-                .unwrap_or(MetricValue::Single(0.0));
-            let item_hues = metric_hues_for_visible_hue(
-                metric,
-                row_hues[index % row_hues.len()],
-            );
-            if graph_width > 0 {
-                render_segment_with_graph_width(
+            let item_hues = metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
+            if let Some(value) = values.get(&metric).copied() {
+                if graph_width > 0 {
+                    render_segment_with_graph_width(
+                        *item,
+                        &history,
+                        value,
+                        headline_values.get(&metric).copied(),
+                        label_width,
+                        graph_width,
+                        config.align,
+                        config.renderer,
+                        Some(&item_hues),
+                        color_enabled,
+                        stable_layout,
+                    )
+                } else {
+                    render_segment_with_headline(
+                        *item,
+                        &history,
+                        value,
+                        headline_values.get(&metric).copied(),
+                        width,
+                        label_width,
+                        config.align,
+                        config.renderer,
+                        Some(&item_hues),
+                        color_enabled,
+                        stable_layout,
+                    )
+                }
+            } else {
+                render_unavailable_segment(
                     *item,
-                    &history,
-                    value,
-                    headline_values.get(&metric).copied(),
+                    width,
                     label_width,
                     graph_width,
                     config.align,
                     config.renderer,
-                    Some(&item_hues),
                     color_enabled,
-                )
-            } else {
-                render_segment_with_headline(
-                    *item,
-                    &history,
-                    value,
-                    headline_values.get(&metric).copied(),
-                    width,
-                    label_width,
-                    config.align,
-                    config.renderer,
-                    Some(&item_hues),
-                    color_enabled,
+                    stable_layout,
                 )
             }
         })
@@ -513,6 +1565,7 @@ fn render_segment(
         renderer,
         None,
         color_enabled,
+        false,
     )
 }
 
@@ -614,6 +1667,28 @@ fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
     widths
 }
 
+fn normalized_items_for_sizing(items: &[LayoutItem]) -> Vec<LayoutItem> {
+    items
+        .iter()
+        .map(|item| {
+            let grow = if item.grow() == 0 {
+                item.basis().unwrap_or(0)
+            } else {
+                item.grow()
+            };
+            LayoutItem::with_constraints(
+                item.metric(),
+                item.view(),
+                item.display(),
+                item.basis(),
+                grow,
+                item.max_width(),
+                item.min_width(),
+            )
+        })
+        .collect()
+}
+
 fn split_stream_widths(total: usize, count: usize) -> Vec<usize> {
     if count == 0 {
         return Vec::new();
@@ -637,10 +1712,18 @@ fn render_segment_with_headline(
     renderer: Renderer,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    stable_layout: bool,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) =
-        segment_text_parts(metric, item.view(), value, headline_value, label_width);
+    let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
+        metric,
+        item.view(),
+        item.display(),
+        value,
+        headline_value,
+        label_width,
+        stable_layout,
+    );
 
     if width <= fixed {
         return pad_or_trim_visible(
@@ -652,7 +1735,9 @@ fn render_segment_with_headline(
     let graph_width = width.saturating_sub(fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
-        Renderer::Braille => render_braille_graph(&samples, graph_width, metric, hues, color_enabled),
+        Renderer::Braille => {
+            render_braille_graph(&samples, graph_width, metric, hues, color_enabled)
+        }
         Renderer::Block => render_block_graph(&samples, graph_width, metric, hues, color_enabled),
     };
 
@@ -676,13 +1761,23 @@ fn render_segment_with_graph_width(
     renderer: Renderer,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    stable_layout: bool,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) =
-        segment_text_parts(metric, item.view(), value, headline_value, label_width);
+    let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
+        metric,
+        item.view(),
+        item.display(),
+        value,
+        headline_value,
+        label_width,
+        stable_layout,
+    );
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
-        Renderer::Braille => render_braille_graph(&samples, graph_width, metric, hues, color_enabled),
+        Renderer::Braille => {
+            render_braille_graph(&samples, graph_width, metric, hues, color_enabled)
+        }
         Renderer::Block => render_block_graph(&samples, graph_width, metric, hues, color_enabled),
     };
     let width = fixed + 1 + graph_width;
@@ -696,36 +1791,325 @@ fn render_segment_with_graph_width(
     )
 }
 
+fn render_unavailable_segment(
+    item: LayoutItem,
+    width: usize,
+    label_width: usize,
+    graph_width: usize,
+    align: Align,
+    renderer: Renderer,
+    color_enabled: bool,
+    stable_layout: bool,
+) -> String {
+    let metric = item.metric();
+    let (label, label_usage_separator, usage_text, fixed) =
+        unavailable_segment_text_parts(metric, item.view(), item.display(), label_width, stable_layout);
+    let label = paint_unavailable_text(&label, color_enabled);
+    let usage_text = paint_unavailable_text(&usage_text, color_enabled);
+    let graph = render_unavailable_graph(graph_width, renderer, color_enabled);
+
+    let text = if graph_width > 0 {
+        match align {
+            Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
+            Align::Right => format!("{label} {graph} {usage_text}"),
+        }
+    } else {
+        format!("{label}{label_usage_separator}{usage_text}")
+    };
+
+    pad_or_trim_visible(&text, width.max(fixed))
+}
+
+fn render_grid_segment(
+    item: LayoutItem,
+    history: &VecDeque<MetricValue>,
+    value: MetricValue,
+    headline_value: Option<HeadlineValue>,
+    spec: GridColumnSpec,
+    renderer: Renderer,
+    hues: Option<&BaseHues>,
+    color_enabled: bool,
+    stable_layout: bool,
+) -> String {
+    let metric = item.metric();
+    let usage_text = segment_usage_text(metric, item.view(), value, headline_value, stable_layout);
+    let samples = history.iter().copied().collect::<Vec<_>>();
+    let graph = match renderer {
+        Renderer::Braille => {
+            render_braille_graph(&samples, spec.graph_width, metric, hues, color_enabled)
+        }
+        Renderer::Block => {
+            render_block_graph(&samples, spec.graph_width, metric, hues, color_enabled)
+        }
+    };
+
+    let text = render_grid_text(
+        item.display(),
+        metric.short_label(),
+        &usage_text,
+        spec,
+        Some(&graph),
+    );
+
+    pad_or_trim_visible(&text, spec.total_width)
+}
+
+fn render_unavailable_grid_segment(
+    item: LayoutItem,
+    spec: GridColumnSpec,
+    renderer: Renderer,
+    color_enabled: bool,
+    stable_layout: bool,
+) -> String {
+    let metric = item.metric();
+    let usage_text = unavailable_usage_text(metric, item.view(), stable_layout);
+    let graph = render_unavailable_graph(spec.graph_width, renderer, color_enabled);
+    let text = render_grid_text(
+        item.display(),
+        &paint_unavailable_text(metric.short_label(), color_enabled),
+        &paint_unavailable_text(&usage_text, color_enabled),
+        spec,
+        Some(&graph),
+    );
+
+    pad_or_trim_visible(&text, spec.total_width)
+}
+
+fn render_grid_text(
+    display: DisplayMode,
+    label: &str,
+    usage_text: &str,
+    spec: GridColumnSpec,
+    graph: Option<&str>,
+) -> String {
+    match display {
+        DisplayMode::Full => {
+            let label = format!("{label:<label_width$}", label_width = spec.label_width);
+            let usage_text = format!("{usage_text:>value_width$}", value_width = spec.value_width);
+            match (graph, spec.graph_width > 0) {
+                (Some(graph), true) => format!("{label} {usage_text} {graph}"),
+                _ => format!("{label} {usage_text}"),
+            }
+        }
+        DisplayMode::Value => {
+            let usage_text = format!("{usage_text:>value_width$}", value_width = spec.value_width);
+            match (graph, spec.graph_width > 0) {
+                (Some(graph), true) => format!("{usage_text} {graph}"),
+                _ => usage_text,
+            }
+        }
+        DisplayMode::Bare => match (graph, spec.graph_width > 0) {
+            (Some(graph), true) => graph.to_owned(),
+            _ => String::new(),
+        },
+    }
+}
+
 fn segment_text_parts(
     metric: MetricKind,
     view: LayoutView,
+    display: DisplayMode,
     value: MetricValue,
     headline_value: Option<HeadlineValue>,
     _label_width: usize,
+    stable_layout: bool,
 ) -> (String, &'static str, String, usize) {
-    let label = metric.short_label().to_owned();
-    let usage_text = metric.format_value(
-        view,
-        value.headline_value(),
-        &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
-    );
-    let label_usage_separator = match metric {
-        MetricKind::Vram => "",
-        _ => " ",
+    let label = match display {
+        DisplayMode::Full => metric.short_label().to_owned(),
+        DisplayMode::Value | DisplayMode::Bare => String::new(),
+    };
+    let usage_text = match display {
+        DisplayMode::Full | DisplayMode::Value => {
+            segment_usage_text(metric, view, value, headline_value, stable_layout)
+        }
+        DisplayMode::Bare => String::new(),
+    };
+    let label_usage_separator = match (display, metric) {
+        (DisplayMode::Full, MetricKind::Vram) => "",
+        (DisplayMode::Full, _) => " ",
+        (DisplayMode::Value | DisplayMode::Bare, _) => "",
     };
     let fixed =
         label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
     (label, label_usage_separator, usage_text, fixed)
 }
 
-fn segment_fixed_width(
+fn unavailable_segment_text_parts(
+    metric: MetricKind,
+    view: LayoutView,
+    display: DisplayMode,
+    _label_width: usize,
+    stable_layout: bool,
+) -> (String, &'static str, String, usize) {
+    let label = match display {
+        DisplayMode::Full => metric.short_label().to_owned(),
+        DisplayMode::Value | DisplayMode::Bare => String::new(),
+    };
+    let usage_text = match display {
+        DisplayMode::Full | DisplayMode::Value => unavailable_usage_text(metric, view, stable_layout),
+        DisplayMode::Bare => String::new(),
+    };
+    let label_usage_separator = match (display, metric) {
+        (DisplayMode::Full, MetricKind::Vram) => "",
+        (DisplayMode::Full, _) => " ",
+        (DisplayMode::Value | DisplayMode::Bare, _) => "",
+    };
+    let fixed =
+        visible_width(&label) + label_usage_separator.chars().count() + visible_width(&usage_text);
+    (label, label_usage_separator, usage_text, fixed)
+}
+
+fn segment_usage_text(
     metric: MetricKind,
     view: LayoutView,
     value: MetricValue,
     headline_value: Option<HeadlineValue>,
-    label_width: usize,
+    stable_layout: bool,
+) -> String {
+    let usage_text = metric.format_value(
+        view,
+        value.headline_value(),
+        &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
+    );
+    if stable_layout {
+        format!(
+            "{usage_text:>width$}",
+            width = stable_layout_usage_width(metric, view)
+        )
+    } else {
+        usage_text
+    }
+}
+
+fn unavailable_usage_text(metric: MetricKind, view: LayoutView, stable_layout: bool) -> String {
+    let text = match effective_view(metric, view) {
+        LayoutView::Pct => "N/A",
+        LayoutView::Hum => "N/A",
+        LayoutView::Free => "N/A",
+        LayoutView::Default => unreachable!(),
+    };
+    if stable_layout {
+        format!(
+            "{text:>width$}",
+            width = stable_layout_usage_width(metric, view)
+        )
+    } else {
+        text.to_owned()
+    }
+}
+
+fn display_label_width(metric: MetricKind, display: DisplayMode) -> usize {
+    match display {
+        DisplayMode::Full => metric.short_label().chars().count(),
+        DisplayMode::Value | DisplayMode::Bare => 0,
+    }
+}
+
+fn display_value_width(
+    metric: MetricKind,
+    view: LayoutView,
+    display: DisplayMode,
+    value: MetricValue,
+    headline_value: Option<HeadlineValue>,
+    stable_layout: bool,
 ) -> usize {
-    segment_text_parts(metric, view, value, headline_value, label_width).3
+    match display {
+        DisplayMode::Full | DisplayMode::Value => {
+            segment_usage_text(metric, view, value, headline_value, stable_layout)
+                .chars()
+                .count()
+        }
+        DisplayMode::Bare => 0,
+    }
+}
+
+fn unavailable_display_value_width(
+    metric: MetricKind,
+    view: LayoutView,
+    display: DisplayMode,
+    stable_layout: bool,
+) -> usize {
+    match display {
+        DisplayMode::Full | DisplayMode::Value => {
+            unavailable_usage_text(metric, view, stable_layout)
+                .chars()
+                .count()
+        }
+        DisplayMode::Bare => 0,
+    }
+}
+
+fn segment_fixed_width(
+    metric: MetricKind,
+    view: LayoutView,
+    display: DisplayMode,
+    value: MetricValue,
+    headline_value: Option<HeadlineValue>,
+    label_width: usize,
+    stable_layout: bool,
+) -> usize {
+    segment_text_parts(
+        metric,
+        view,
+        display,
+        value,
+        headline_value,
+        label_width,
+        stable_layout,
+    )
+    .3
+}
+
+fn unavailable_segment_fixed_width(
+    metric: MetricKind,
+    view: LayoutView,
+    display: DisplayMode,
+    label_width: usize,
+    stable_layout: bool,
+) -> usize {
+    unavailable_segment_text_parts(metric, view, display, label_width, stable_layout).3
+}
+
+fn effective_view(metric: MetricKind, view: LayoutView) -> LayoutView {
+    match view {
+        LayoutView::Default => metric.default_view(),
+        other => other,
+    }
+}
+
+fn stable_layout_usage_width(metric: MetricKind, view: LayoutView) -> usize {
+    let effective_view = effective_view(metric, view);
+
+    match effective_view {
+        LayoutView::Pct => 4,
+        LayoutView::Hum => match metric {
+            MetricKind::Io | MetricKind::Net | MetricKind::Ingress | MetricKind::Egress => 4,
+            MetricKind::Memory | MetricKind::Storage => 9,
+            _ => 4,
+        },
+        LayoutView::Free => match metric {
+            MetricKind::Memory | MetricKind::Storage => 4,
+            _ => 4,
+        },
+        LayoutView::Default => unreachable!(),
+    }
+}
+
+fn render_unavailable_graph(width: usize, renderer: Renderer, color_enabled: bool) -> String {
+    let glyph = match renderer {
+        Renderer::Braille => UNAVAILABLE_GRAPH_BRAILLE,
+        Renderer::Block => UNAVAILABLE_GRAPH_BLOCK,
+    };
+    let graph = glyph.to_string().repeat(width);
+    paint(&graph, UNAVAILABLE_GRAPH_COLOR, color_enabled)
+}
+
+fn paint_unavailable_text(text: &str, color_enabled: bool) -> String {
+    if !color_enabled {
+        return text.to_owned();
+    }
+
+    format!("\x1b[30;48;2;210;210;210m{text}\x1b[0m")
 }
 
 fn pad_or_trim_visible(text: &str, width: usize) -> String {
@@ -857,10 +2241,10 @@ fn render_split_braille_graph(
     let mut out = String::new();
 
     for index in 0..width {
-        let upper = quantize_half_level(uppers.get(index).copied().unwrap_or(0.0));
-        let lower = quantize_half_level(lowers.get(index).copied().unwrap_or(0.0));
         let upper_intensity = uppers.get(index).copied().unwrap_or(0.0);
         let lower_intensity = lowers.get(index).copied().unwrap_or(0.0);
+        let upper = quantize_visible_half_level(upper_intensity);
+        let lower = quantize_visible_half_level(lower_intensity);
 
         out.push_str(&render_split_cell(
             upper,
@@ -927,6 +2311,15 @@ fn quantize_half_level(sample: f64) -> usize {
     (sample.clamp(0.0, 1.0) * 4.0).round() as usize
 }
 
+fn quantize_visible_half_level(sample: f64) -> usize {
+    let level = quantize_half_level(sample);
+    if sample > 0.0 && level == 0 {
+        1
+    } else {
+        level
+    }
+}
+
 fn braille_cell(left_level: usize, right_level: usize) -> char {
     let mut bits = 0_u32;
 
@@ -965,7 +2358,11 @@ fn render_split_cell(
     color_enabled: bool,
 ) -> String {
     if upper_level == 0 && lower_level == 0 {
-        return "⠀".to_owned();
+        let ch = braille_half_cell(1, 1).to_string();
+        let upper_color = interpolate(upper_gradient, 0.0);
+        let lower_color = interpolate(lower_gradient, 0.0);
+        let color = blend_split_color(1, 1, upper_color, lower_color);
+        return paint(&ch, color, color_enabled);
     }
 
     let ch = braille_half_cell(upper_level, lower_level).to_string();
@@ -1098,8 +2495,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1162,8 +2561,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: layout.clone(),
             renderer: Renderer::Block,
             color_mode: ColorMode::Never,
@@ -1225,8 +2626,10 @@ mod tests {
             align: Align::Left,
             label: Some("host".to_owned()),
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: crate::layout::parse_layout_spec("cpu gpu").unwrap(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1279,8 +2682,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: crate::layout::parse_layout_spec("cpu ram spc io net").unwrap(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1366,15 +2771,21 @@ mod tests {
             ),
         ]);
         let headlines = HashMap::from([
-            (MetricKind::Memory, HeadlineValue::Memory {
-                used_bytes: 15 * 1024 * 1024 * 1024,
-                available_bytes: 17 * 1024 * 1024 * 1024,
-                total_bytes: 32 * 1024 * 1024 * 1024,
-            }),
-            (MetricKind::Storage, HeadlineValue::Storage {
-                used_bytes: 12,
-                total_bytes: 1024,
-            }),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 15 * 1024 * 1024 * 1024,
+                    available_bytes: 17 * 1024 * 1024 * 1024,
+                    total_bytes: 32 * 1024 * 1024 * 1024,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 12,
+                    total_bytes: 1024,
+                },
+            ),
             (MetricKind::Io, HeadlineValue::Scalar(16.0 * 1024.0)),
             (MetricKind::Net, HeadlineValue::Scalar(14.0 * 1024.0)),
         ]);
@@ -1390,7 +2801,7 @@ mod tests {
         )[0];
 
         assert_eq!(visible_width(line), 80);
-        assert!(line.contains("net 14K/s "), "unexpected row: {line}");
+        assert!(line.contains("net  14K "), "unexpected row: {line}");
     }
 
     #[test]
@@ -1401,8 +2812,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1416,7 +2829,10 @@ mod tests {
             debug_colors_steps: None,
             show_help: false,
         };
-        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let histories = vec![
+            VecDeque::from(vec![0.0, 0.25]),
+            VecDeque::from(vec![0.5, 0.75]),
+        ];
         let values = vec![0.25, 0.75];
 
         let lines = render_stream_lines(&config, 24, false, &histories, &values);
@@ -1434,8 +2850,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1449,7 +2867,10 @@ mod tests {
             debug_colors_steps: None,
             show_help: false,
         };
-        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let histories = vec![
+            VecDeque::from(vec![0.0, 0.25]),
+            VecDeque::from(vec![0.5, 0.75]),
+        ];
         let values = vec![0.25, 0.75];
 
         let lines = render_stream_lines(&config, 28, false, &histories, &values);
@@ -1472,8 +2893,10 @@ mod tests {
                 "a".to_owned(),
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             ]),
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1538,8 +2961,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Stable,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1565,6 +2990,938 @@ mod tests {
     }
 
     #[test]
+    fn stable_native_rows_align_columns_across_rows() {
+        fn visible_offset(line: &str, token: &str) -> usize {
+            let byte_index = line
+                .find(token)
+                .unwrap_or_else(|| panic!("missing token {token:?} in {line:?}"));
+            visible_width(&line[..byte_index])
+        }
+
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Flow,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.07)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Storage,
+                VecDeque::from(vec![MetricValue::Single(0.89)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                }]),
+            ),
+            (
+                MetricKind::Net,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.2,
+                }]),
+            ),
+            (
+                MetricKind::Sys,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.4,
+                    lower: 0.4,
+                }]),
+            ),
+            (
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.25)]),
+            ),
+            (
+                MetricKind::Egress,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.2,
+                },
+            ),
+            (
+                MetricKind::Sys,
+                MetricValue::Split {
+                    upper: 0.4,
+                    lower: 0.4,
+                },
+            ),
+            (MetricKind::Ingress, MetricValue::Single(0.25)),
+            (MetricKind::Egress, MetricValue::Single(0.2)),
+        ]);
+        let headlines = HashMap::from([
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 15 * 1024 * 1024 * 1024,
+                    available_bytes: 17 * 1024 * 1024 * 1024,
+                    total_bytes: 32 * 1024 * 1024 * 1024,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18,
+                    total_bytes: 1024,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(32.0 * 1024.0)),
+            (MetricKind::Net, HeadlineValue::Scalar(1.2 * 1024.0)),
+            (MetricKind::Ingress, HeadlineValue::Scalar(1.0 * 1024.0)),
+            (MetricKind::Egress, HeadlineValue::Scalar(200.0)),
+        ]);
+
+        let lines = render_lines_with_headlines(
+            &config, 80, false, &histories, &layout, &values, &headlines,
+        );
+
+        assert_eq!(
+            visible_offset(&lines[0], " ram "),
+            visible_offset(&lines[1], " sys ")
+        );
+        assert_eq!(
+            visible_offset(&lines[0], " spc "),
+            visible_offset(&lines[1], " in ")
+        );
+        assert_eq!(
+            visible_offset(&lines[0], " io "),
+            visible_offset(&lines[1], " out ")
+        );
+    }
+
+    #[test]
+    fn grid_engine_aligns_graph_starts_across_rows() {
+        fn graph_start(line: &str, token: &str) -> usize {
+            let byte_index = line
+                .find(token)
+                .unwrap_or_else(|| panic!("missing token {token:?} in {line:?}"));
+            visible_width(&line[..byte_index]) + visible_width(token)
+        }
+
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Grid,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.07)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Storage,
+                VecDeque::from(vec![MetricValue::Single(0.89)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                }]),
+            ),
+            (
+                MetricKind::Net,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.2,
+                }]),
+            ),
+            (
+                MetricKind::Sys,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.4,
+                    lower: 0.4,
+                }]),
+            ),
+            (
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.25)]),
+            ),
+            (
+                MetricKind::Egress,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.2,
+                },
+            ),
+            (
+                MetricKind::Sys,
+                MetricValue::Split {
+                    upper: 0.4,
+                    lower: 0.4,
+                },
+            ),
+            (MetricKind::Ingress, MetricValue::Single(0.25)),
+            (MetricKind::Egress, MetricValue::Single(0.2)),
+        ]);
+        let headlines = HashMap::from([
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 15 * 1024 * 1024 * 1024,
+                    available_bytes: 17 * 1024 * 1024 * 1024,
+                    total_bytes: 32 * 1024 * 1024 * 1024,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18,
+                    total_bytes: 1024,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(32.0 * 1024.0)),
+            (MetricKind::Net, HeadlineValue::Scalar(12.0 * 1024.0)),
+            (MetricKind::Ingress, HeadlineValue::Scalar(526.0)),
+            (MetricKind::Egress, HeadlineValue::Scalar(12.0 * 1024.0)),
+        ]);
+
+        let lines = render_lines_with_headlines(
+            &config, 80, false, &histories, &layout, &values, &headlines,
+        );
+
+        assert_eq!(
+            graph_start(&lines[0], "ram  17G "),
+            graph_start(&lines[1], "sys  40% ")
+        );
+        assert_eq!(
+            graph_start(&lines[0], "spc 1.0K "),
+            graph_start(&lines[1], "in  526B ")
+        );
+        assert_eq!(
+            graph_start(&lines[0], "io   32K "),
+            graph_start(&lines[1], "out  12K ")
+        );
+    }
+
+    #[test]
+    fn auto_engine_uses_grid_for_multiline_layouts() {
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
+        let grid_config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Grid,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let auto_config = Config {
+            layout_engine: LayoutEngine::Auto,
+            ..grid_config.clone()
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.07)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Storage,
+                VecDeque::from(vec![MetricValue::Single(0.89)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                }]),
+            ),
+            (
+                MetricKind::Net,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.6,
+                    lower: 0.4,
+                }]),
+            ),
+            (
+                MetricKind::Sys,
+                VecDeque::from(vec![MetricValue::Single(0.45)]),
+            ),
+            (
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.3)]),
+            ),
+            (
+                MetricKind::Egress,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.6,
+                    lower: 0.4,
+                },
+            ),
+            (MetricKind::Sys, MetricValue::Single(0.45)),
+            (MetricKind::Ingress, MetricValue::Single(0.3)),
+            (MetricKind::Egress, MetricValue::Single(0.2)),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(7.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 47 * gib,
+                    available_bytes: 17 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18 * gib,
+                    total_bytes: 1024 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+            (MetricKind::Net, HeadlineValue::Scalar(5300.0)),
+            (MetricKind::Sys, HeadlineValue::Scalar(45.0)),
+            (MetricKind::Ingress, HeadlineValue::Scalar(3100.0)),
+            (MetricKind::Egress, HeadlineValue::Scalar(2300.0)),
+        ]);
+
+        let auto_lines = render_lines_with_headlines(
+            &auto_config,
+            80,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+        let grid_lines = render_lines_with_headlines(
+            &grid_config,
+            80,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+
+        assert_eq!(auto_lines, grid_lines);
+    }
+
+    #[test]
+    fn auto_engine_uses_flow_for_single_line_layouts() {
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io").unwrap();
+        let base_config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Flow,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let auto_config = Config {
+            layout_engine: LayoutEngine::Auto,
+            ..base_config.clone()
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.07)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Storage,
+                VecDeque::from(vec![MetricValue::Single(0.89)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                }]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(7.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 47 * gib,
+                    available_bytes: 17 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18 * gib,
+                    total_bytes: 1024 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+        ]);
+
+        let auto_lines = render_lines_with_headlines(
+            &auto_config,
+            80,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+        let flow_lines = render_lines_with_headlines(
+            &base_config,
+            80,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+
+        assert_eq!(auto_lines, flow_lines);
+    }
+
+    #[test]
+    fn flex_engine_spans_underfull_rows_across_tracks() {
+        let layout = crate::layout::parse_layout_spec("cpu ram spc, io").unwrap();
+        let base_config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Grid,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(60),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let flex_config = Config {
+            layout_engine: LayoutEngine::Flex,
+            ..base_config.clone()
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.07)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Storage,
+                VecDeque::from(vec![MetricValue::Single(0.89)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                }]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(7.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 47 * gib,
+                    available_bytes: 17 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18 * gib,
+                    total_bytes: 1024 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+        ]);
+
+        let grid_lines = render_lines_with_headlines(
+            &base_config,
+            60,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+        let flex_lines = render_lines_with_headlines(
+            &flex_config,
+            60,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+
+        assert_eq!(grid_lines.len(), 2);
+        assert_eq!(flex_lines.len(), 2);
+        assert!(visible_width(flex_lines[1].trim_end()) > visible_width(grid_lines[1].trim_end()));
+    }
+
+    #[test]
+    fn flex_engine_honors_basis_hints_for_first_row_tracks() {
+        let layout = crate::layout::parse_layout_spec("cpu:4 ram:8 spc:16, io, net").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Flex,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.07)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (MetricKind::Storage, MetricValue::Single(0.89)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.2,
+                    lower: 0.1,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.3,
+                    lower: 0.2,
+                },
+            ),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(7.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 47 * gib,
+                    available_bytes: 17 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (
+                MetricKind::Storage,
+                HeadlineValue::Storage {
+                    used_bytes: 18 * gib,
+                    total_bytes: 1024 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+            (MetricKind::Net, HeadlineValue::Scalar(150.0)),
+        ]);
+
+        let specs = grid_column_specs(&config, 80, &layout, &values, &headline_values);
+        assert_eq!(specs.len(), 3);
+        assert!(specs[0].graph_width < specs[1].graph_width);
+        assert!(specs[1].graph_width < specs[2].graph_width);
+    }
+
+    #[test]
+    fn flex_engine_shares_column_text_widths_across_rows() {
+        let layout =
+            crate::layout::parse_layout_spec("cpu:3 ram:1, io:1 net:1, cpu:1 ram:1").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Flex,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(100),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.04)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                },
+            ),
+            (
+                MetricKind::Net,
+                MetricValue::Split {
+                    upper: 0.1,
+                    lower: 0.2,
+                },
+            ),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(4.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 46 * gib,
+                    available_bytes: 18 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+            (MetricKind::Net, HeadlineValue::Scalar(2560.0)),
+        ]);
+        let prefix = String::new();
+        let shared_text_widths =
+            shared_column_text_widths(&layout, &values, &headline_values, true);
+        let row_specs = flex_row_specs(
+            &config,
+            100,
+            &prefix,
+            &layout.rows()[1],
+            &values,
+            &headline_values,
+            &shared_text_widths,
+        );
+
+        assert_eq!(row_specs.len(), 2);
+        assert_eq!(row_specs[0].label_width, 3);
+        assert_eq!(row_specs[0].value_width, 4);
+        assert_eq!(row_specs[1].label_width, 3);
+        assert_eq!(row_specs[1].value_width, 4);
+    }
+
+    #[test]
+    fn flex_engine_aligns_equal_normalized_spans_across_rows() {
+        fn visible_offset(line: &str, token: &str) -> usize {
+            let byte_index = line
+                .find(token)
+                .unwrap_or_else(|| panic!("missing token {token:?} in {line:?}"));
+            visible_width(&line[..byte_index])
+        }
+
+        let layout = crate::layout::parse_layout_spec("cpu:3 ram:1, ram:1 cpu:2 io:1").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Flex,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(100),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Cpu,
+                VecDeque::from(vec![MetricValue::Single(0.02)]),
+            ),
+            (
+                MetricKind::Memory,
+                VecDeque::from(vec![MetricValue::Single(0.44)]),
+            ),
+            (
+                MetricKind::Io,
+                VecDeque::from(vec![MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                }]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Cpu, MetricValue::Single(0.02)),
+            (MetricKind::Memory, MetricValue::Single(0.44)),
+            (
+                MetricKind::Io,
+                MetricValue::Split {
+                    upper: 0.0,
+                    lower: 0.0,
+                },
+            ),
+        ]);
+        let gib = 1024_u64 * 1024 * 1024;
+        let headline_values = HashMap::from([
+            (MetricKind::Cpu, HeadlineValue::Scalar(2.0)),
+            (
+                MetricKind::Memory,
+                HeadlineValue::Memory {
+                    used_bytes: 47 * gib,
+                    available_bytes: 17 * gib,
+                    total_bytes: 64 * gib,
+                },
+            ),
+            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+        ]);
+
+        let lines = render_lines_with_headlines(
+            &config,
+            100,
+            false,
+            &histories,
+            &layout,
+            &values,
+            &headline_values,
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            visible_offset(&lines[0], "ram "),
+            visible_offset(&lines[1], "io ")
+        );
+    }
+
+    #[test]
+    fn unavailable_metrics_remain_visible_in_layout() {
+        let layout = crate::layout::parse_layout_spec("gpu gfx vram, cpu gpu").unwrap();
+        let config = Config {
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Stable,
+            layout_engine: LayoutEngine::Grid,
+            layout: layout.clone(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Always,
+            output_mode: OutputMode::Terminal,
+            width: Some(80),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([(
+            MetricKind::Cpu,
+            VecDeque::from(vec![MetricValue::Single(0.07)]),
+        )]);
+        let values = HashMap::from([(MetricKind::Cpu, MetricValue::Single(0.07))]);
+        let headlines = HashMap::from([(MetricKind::Cpu, HeadlineValue::Scalar(7.0))]);
+
+        let lines = render_lines_with_headlines(
+            &config, 80, true, &histories, &layout, &values, &headlines,
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("gpu"));
+        assert!(lines[0].contains("gfx"));
+        assert!(lines[0].contains("vram"));
+        assert!(lines[1].contains("cpu"));
+        assert!(lines[1].contains("gpu"));
+        assert!(lines[0].contains("\x1b[30;48;2;210;210;210m"));
+        assert!(lines[0].contains("N/A"));
+    }
+
+    #[test]
     fn stream_lines_layout_renders_one_row_per_series() {
         let config = Config {
             history: 8,
@@ -1572,8 +3929,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_groups: None,
             stream_layout: StreamLayout::Lines,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: Layout::default(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1587,14 +3946,25 @@ mod tests {
             debug_colors_steps: None,
             show_help: false,
         };
-        let histories = vec![VecDeque::from(vec![0.0, 0.25]), VecDeque::from(vec![0.5, 0.75])];
+        let histories = vec![
+            VecDeque::from(vec![0.0, 0.25]),
+            VecDeque::from(vec![0.5, 0.75]),
+        ];
         let values = vec![0.25, 0.75];
 
         let lines = render_stream_lines(&config, 28, false, &histories, &values);
 
         assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("wifi  25%"), "unexpected first row: {}", lines[0]);
-        assert!(lines[1].starts_with(" vpn  75%"), "unexpected second row: {}", lines[1]);
+        assert!(
+            lines[0].starts_with("wifi  25%"),
+            "unexpected first row: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with(" vpn  75%"),
+            "unexpected second row: {}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -1625,19 +3995,18 @@ mod tests {
     }
 
     #[test]
-    fn grow_uses_slash_syntax_in_parsed_layouts() {
-        let layout = crate::layout::parse_layout_spec("cpu:12/2 ram:10 net.hum/3").unwrap();
-        let widths = split_weighted_width(30, &layout.rows()[0]);
-        assert_eq!(widths, vec![16, 10, 4]);
+    fn slash_grow_syntax_is_rejected() {
+        let error = crate::layout::parse_layout_spec("cpu:12/2 ram:10 net.hum").unwrap_err();
+        assert!(error.contains("invalid metric syntax"));
     }
 
     #[test]
     fn width_allocation_conformance_matrix() {
         let cases = [
-            ("cpu:12/2 ram:10 net.hum/3", 30, vec![16, 10, 4]),
-            ("cpu:12/2+14 ram:10 net.hum/3", 30, vec![14, 10, 6]),
+            ("cpu:12 ram:10 net.hum", 30, vec![16, 13, 1]),
+            ("cpu:12+14 ram:10 net.hum", 30, vec![14, 14, 2]),
             ("cpu-8 ram-4", 6, vec![4, 2]),
-            ("cpu:12/2+20-8 ram+14-6", 24, vec![16, 8]),
+            ("cpu:12+20-8 ram+14-6", 24, vec![18, 6]),
         ];
 
         for (spec, total, expected) in cases {
@@ -1686,6 +4055,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Cpu,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     Some(12),
                     2,
                     Some(14),
@@ -1694,6 +4064,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Memory,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     Some(10),
                     1,
                     None,
@@ -1713,6 +4084,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Cpu,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     None,
                     1,
                     None,
@@ -1721,6 +4093,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Memory,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     None,
                     1,
                     None,
@@ -1740,6 +4113,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Cpu,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     None,
                     1,
                     None,
@@ -1748,6 +4122,7 @@ mod tests {
                 LayoutItem::with_constraints(
                     MetricKind::Memory,
                     LayoutView::Default,
+                    DisplayMode::Full,
                     None,
                     1,
                     None,
@@ -1768,8 +4143,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1840,8 +4217,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1937,8 +4316,10 @@ mod tests {
             align: Align::Left,
             label: None,
             stream_labels: None,
+            stream_groups: None,
             stream_layout: StreamLayout::Columns,
             space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
             layout: layout.clone(),
             renderer: Renderer::Braille,
             color_mode: ColorMode::Never,
@@ -1975,7 +4356,7 @@ mod tests {
             &config, 24, false, &histories, &layout, &values, &headlines,
         );
 
-        assert!(lines[0].contains("3.5M/s"));
+        assert!(lines[0].contains("3.5M"));
     }
 
     #[test]
@@ -1994,9 +4375,10 @@ mod tests {
             Renderer::Braille,
             None,
             false,
+            false,
         );
 
-        assert!(segment.contains("net 0B/s"));
+        assert!(segment.contains("net   0B"));
     }
 
     #[test]
@@ -2012,9 +4394,10 @@ mod tests {
             Renderer::Braille,
             None,
             false,
+            false,
         );
 
-        assert!(segment.contains("vram0%"));
+        assert!(segment.contains("vram  0%"));
     }
 
     #[test]
@@ -2033,6 +4416,7 @@ mod tests {
             Renderer::Braille,
             None,
             false,
+            false,
         );
         let io_large = render_segment_with_headline(
             item(MetricKind::Io),
@@ -2048,10 +4432,11 @@ mod tests {
             Renderer::Braille,
             None,
             false,
+            false,
         );
 
-        assert!(io_small.starts_with("io 105K/s "));
-        assert!(io_large.starts_with("io 14M/s "));
+        assert!(io_small.starts_with("io 105K "));
+        assert!(io_large.starts_with("io  14M "));
     }
 
     #[test]
@@ -2069,6 +4454,7 @@ mod tests {
             Align::Left,
             Renderer::Braille,
             None,
+            false,
             false,
         );
 
@@ -2118,6 +4504,7 @@ mod tests {
                 Align::Left,
                 Renderer::Braille,
                 None,
+                false,
                 false,
             );
 
@@ -2198,6 +4585,49 @@ mod tests {
         );
 
         assert_eq!(graph, "⠿");
+    }
+
+    #[test]
+    fn tiny_nonzero_split_values_do_not_disappear() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 0.01,
+                lower: 0.0,
+            }],
+            1,
+            MetricKind::Net,
+            None,
+            false,
+        );
+
+        assert_ne!(graph, "⠀");
+    }
+
+    #[test]
+    fn zero_split_values_render_with_darkest_split_color() {
+        let graph = render_braille_graph(
+            &[MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            }],
+            1,
+            MetricKind::Net,
+            None,
+            true,
+        );
+
+        let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Net).unwrap();
+        let expected = blend_split_color(
+            1,
+            1,
+            interpolate(upper_gradient, 0.0),
+            interpolate(lower_gradient, 0.0),
+        );
+        assert_ne!(graph, "⠀");
+        assert!(graph.contains(&format!(
+            "\x1b[38;2;{};{};{}m",
+            expected.r, expected.g, expected.b
+        )));
     }
 
     #[test]

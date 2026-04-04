@@ -2,7 +2,7 @@ use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::color::{named_palette, ColorSpec, Rgb};
-use crate::layout::{parse_layout_spec, Layout};
+use crate::layout::{parse_layout_spec, DisplayMode, Layout};
 use crate::render::Renderer;
 
 const DEFAULT_INTERVAL_MS: u64 = 1000;
@@ -15,10 +15,13 @@ Metrics:
 
 Notes:
   Layout is the canonical interface.
-  Item syntax is metric[.view][:basis][/grow][+max][-min], e.g. net.hum:12/2+20-8.
+  Item syntax is metric[.view][:size][+max][-min], e.g. net.hum:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
+  Use f:/path/to/file to poll a file for numeric rows, or p:command to poll a shell command.
+  Prefix external sources with label1,label2= to label their stream columns, e.g. cpu,ram=p:echo 10 20.
+  Stream layouts can reference stdin columns explicitly with @1, @2, ... and groups, e.g. graph=(cpu=@1 ram=@2).
 ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -54,6 +57,15 @@ pub enum Space {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum LayoutEngine {
+    Auto,
+    Flow,
+    Flex,
+    Grid,
+    Pack,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CompletionShell {
     Bash,
     Elvish,
@@ -68,11 +80,31 @@ pub enum ExternalInputSource {
     Process(String),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamItem {
+    pub label: Option<String>,
+    pub column_index: usize,
+    pub display: DisplayMode,
+    pub basis: usize,
+    pub max_width: Option<usize>,
+    pub min_width: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamGroup {
+    pub label: Option<String>,
+    pub rows: Vec<Vec<StreamItem>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
 enum DebugCommand {
     #[command(about = "Print sampled metric color ramps")]
     Colors {
-        #[arg(long, default_value_t = 10, help = "Number of glyph samples to print per metric")]
+        #[arg(
+            long,
+            default_value_t = 10,
+            help = "Number of glyph samples to print per metric"
+        )]
         steps: usize,
     },
 }
@@ -98,8 +130,10 @@ pub struct Config {
     pub align: Align,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
+    pub stream_groups: Option<Vec<StreamGroup>>,
     pub stream_layout: StreamLayout,
     pub space: Space,
+    pub layout_engine: LayoutEngine,
     pub layout: Layout,
     pub renderer: Renderer,
     pub color_mode: ColorMode,
@@ -128,7 +162,7 @@ struct Cli {
 
     #[arg(
         value_name = "LAYOUT",
-        help = "Layout DSL, e.g. 'sys gfx io net' or 'cpu:12/2 ram:10 net.hum/3'"
+        help = "Layout DSL, e.g. 'sys gfx io net' or 'cpu:12 ram:10 net.hum'"
     )]
     layout_parts: Vec<String>,
 
@@ -171,6 +205,15 @@ struct Cli {
         help = "How streamed columns allocate width: stable prefixes, compact equal graph space, or equal total segment space"
     )]
     space: Space,
+
+    #[arg(
+        short = 'e',
+        long = "engine",
+        value_enum,
+        default_value_t = LayoutEngine::Auto,
+        help = "How native layouts arrange rows: automatic (grid for multiline, flow for single-line), row-local flow, proportional flex spanning, or multiline grid alignment"
+    )]
+    layout_engine: LayoutEngine,
 
     #[arg(long, value_enum, default_value_t = Renderer::Braille, help = "Graph renderer to use")]
     renderer: Renderer,
@@ -225,20 +268,33 @@ where
     }
 
     let joined_layout = cli.layout_parts.join(" ");
-    let external_input = if cli.layout_parts.is_empty() {
-        None
+    let (external_input, inline_stream_labels) = if cli.layout_parts.is_empty() {
+        (None, None)
     } else {
         parse_external_input(&joined_layout)?
     };
     if external_input.is_some() && force_stream_input {
         return Err("'-' cannot be combined with f:... or p:... input sources".to_owned());
     }
-
-    let layout = if external_input.is_some() || cli.layout_parts.is_empty() {
-        Layout::default()
+    let stream_groups = if external_input.is_none()
+        && !joined_layout.trim().is_empty()
+        && looks_like_stream_group_spec(&joined_layout)
+    {
+        Some(parse_stream_groups_spec(&joined_layout)?)
     } else {
-        parse_layout_spec(&joined_layout)?
+        None
     };
+    if (inline_stream_labels.is_some() || stream_groups.is_some()) && !cli.stream_labels.is_empty()
+    {
+        return Err("inline stream labels cannot be combined with --labels".to_owned());
+    }
+
+    let layout =
+        if external_input.is_some() || stream_groups.is_some() || cli.layout_parts.is_empty() {
+            Layout::default()
+        } else {
+            parse_layout_spec(&joined_layout)?
+        };
     let colors = (!cli.colors.is_empty())
         .then(|| expand_color_specs(&cli.colors))
         .transpose()?;
@@ -248,9 +304,15 @@ where
         interval_ms: cli.interval_ms,
         align: cli.align,
         label: cli.label,
-        stream_labels: (!cli.stream_labels.is_empty()).then_some(cli.stream_labels),
+        stream_labels: if !cli.stream_labels.is_empty() {
+            Some(cli.stream_labels)
+        } else {
+            inline_stream_labels
+        },
+        stream_groups,
         stream_layout: cli.stream_layout,
         space: cli.space,
+        layout_engine: cli.layout_engine,
         layout,
         renderer: cli.renderer,
         colors,
@@ -275,7 +337,33 @@ where
     })
 }
 
-fn parse_external_input(raw: &str) -> Result<Option<ExternalInputSource>, String> {
+fn parse_external_input(
+    raw: &str,
+) -> Result<(Option<ExternalInputSource>, Option<Vec<String>>), String> {
+    if let Some(source) = parse_external_input_source(raw)? {
+        return Ok((Some(source), None));
+    }
+
+    let Some((label_part, source_part)) = raw.split_once('=') else {
+        return Ok((None, None));
+    };
+
+    let Some(source) = parse_external_input_source(source_part)? else {
+        return Ok((None, None));
+    };
+
+    let labels = label_part
+        .split(',')
+        .map(parse_stream_label)
+        .collect::<Result<Vec<_>, _>>()?;
+    if labels.is_empty() {
+        return Err("external input labels must be non-empty".to_owned());
+    }
+
+    Ok((Some(source), Some(labels)))
+}
+
+fn parse_external_input_source(raw: &str) -> Result<Option<ExternalInputSource>, String> {
     if let Some(path) = raw.strip_prefix("f:") {
         let path = path.trim();
         if path.is_empty() {
@@ -400,6 +488,311 @@ fn parse_stream_label(raw: &str) -> Result<String, String> {
     }
 }
 
+fn looks_like_stream_group_spec(raw: &str) -> bool {
+    raw.contains('@') || raw.contains("=(") || raw.starts_with('(')
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum StreamToken {
+    Word(String),
+    Equals,
+    Comma,
+    LParen,
+    RParen,
+}
+
+fn tokenize_stream_spec(spec: &str) -> Result<Vec<StreamToken>, String> {
+    let mut tokens = Vec::new();
+    let chars = spec.chars().collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            index += 1;
+            continue;
+        }
+
+        match ch {
+            '=' => {
+                tokens.push(StreamToken::Equals);
+                index += 1;
+            }
+            ',' => {
+                tokens.push(StreamToken::Comma);
+                index += 1;
+            }
+            '(' => {
+                tokens.push(StreamToken::LParen);
+                index += 1;
+            }
+            ')' => {
+                tokens.push(StreamToken::RParen);
+                index += 1;
+            }
+            _ => {
+                let mut word = String::new();
+                while index < chars.len() {
+                    let ch = chars[index];
+                    if ch.is_whitespace() || matches!(ch, '=' | ',' | '(' | ')') {
+                        break;
+                    }
+                    if matches!(ch, '"' | '\'') {
+                        let quote = ch;
+                        index += 1;
+                        let start = index;
+                        while index < chars.len() && chars[index] != quote {
+                            index += 1;
+                        }
+                        if index >= chars.len() {
+                            return Err("unterminated quoted string in stream layout".to_owned());
+                        }
+                        word.extend(chars[start..index].iter());
+                        index += 1;
+                        continue;
+                    }
+
+                    word.push(ch);
+                    index += 1;
+                }
+
+                if word.is_empty() {
+                    return Err("invalid empty token in stream layout".to_owned());
+                }
+                tokens.push(StreamToken::Word(word));
+            }
+        }
+    }
+
+    Ok(tokens)
+}
+
+struct StreamParser {
+    tokens: Vec<StreamToken>,
+    index: usize,
+}
+
+impl StreamParser {
+    fn new(tokens: Vec<StreamToken>) -> Self {
+        Self { tokens, index: 0 }
+    }
+
+    fn peek(&self) -> Option<&StreamToken> {
+        self.tokens.get(self.index)
+    }
+
+    fn peek_n(&self, offset: usize) -> Option<&StreamToken> {
+        self.tokens.get(self.index + offset)
+    }
+
+    fn next(&mut self) -> Option<StreamToken> {
+        let token = self.tokens.get(self.index).cloned();
+        if token.is_some() {
+            self.index += 1;
+        }
+        token
+    }
+
+    fn at_end(&self) -> bool {
+        self.index >= self.tokens.len()
+    }
+}
+
+fn parse_stream_groups_spec(spec: &str) -> Result<Vec<StreamGroup>, String> {
+    let tokens = tokenize_stream_spec(spec)?;
+    if tokens.is_empty() {
+        return Err("stream layout must contain at least one @N reference".to_owned());
+    }
+
+    let mut parser = StreamParser::new(tokens);
+    let starts_with_group = matches!(
+        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
+        (
+            Some(StreamToken::Word(_)),
+            Some(StreamToken::Equals),
+            Some(StreamToken::LParen)
+        )
+    ) || matches!(parser.peek(), Some(StreamToken::LParen));
+
+    if starts_with_group {
+        let mut groups = Vec::new();
+        while !parser.at_end() {
+            groups.push(parse_stream_group(&mut parser)?);
+        }
+        Ok(groups)
+    } else {
+        Ok(vec![StreamGroup {
+            label: None,
+            rows: parse_stream_rows(&mut parser, false)?,
+        }])
+    }
+}
+
+fn parse_stream_group(parser: &mut StreamParser) -> Result<StreamGroup, String> {
+    let label = if matches!(
+        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
+        (
+            Some(StreamToken::Word(_)),
+            Some(StreamToken::Equals),
+            Some(StreamToken::LParen)
+        )
+    ) {
+        match parser.next() {
+            Some(StreamToken::Word(label)) => {
+                expect_stream_token(parser, StreamToken::Equals)?;
+                Some(label)
+            }
+            _ => unreachable!(),
+        }
+    } else {
+        None
+    };
+
+    expect_stream_token(parser, StreamToken::LParen)?;
+    let rows = parse_stream_rows(parser, true)?;
+    expect_stream_token(parser, StreamToken::RParen)?;
+    Ok(StreamGroup { label, rows })
+}
+
+fn parse_stream_rows(
+    parser: &mut StreamParser,
+    stop_at_rparen: bool,
+) -> Result<Vec<Vec<StreamItem>>, String> {
+    let mut rows = Vec::new();
+    let mut current = Vec::new();
+
+    loop {
+        match parser.peek() {
+            None => break,
+            Some(StreamToken::RParen) if stop_at_rparen => break,
+            Some(StreamToken::Comma) => {
+                parser.next();
+                if current.is_empty() {
+                    return Err("stream rows cannot be empty".to_owned());
+                }
+                rows.push(current);
+                current = Vec::new();
+            }
+            _ => current.push(parse_stream_item(parser)?),
+        }
+    }
+
+    if current.is_empty() && rows.is_empty() {
+        return Err("stream layout must contain at least one @N item".to_owned());
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+
+    Ok(rows)
+}
+
+fn parse_stream_item(parser: &mut StreamParser) -> Result<StreamItem, String> {
+    let label = if matches!(
+        (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
+        (
+            Some(StreamToken::Word(_)),
+            Some(StreamToken::Equals),
+            Some(StreamToken::Word(_))
+        )
+    ) {
+        let label = match parser.next() {
+            Some(StreamToken::Word(label)) => label,
+            _ => unreachable!(),
+        };
+        expect_stream_token(parser, StreamToken::Equals)?;
+        Some(label)
+    } else {
+        None
+    };
+
+    let source = match parser.next() {
+        Some(StreamToken::Word(word)) => word,
+        Some(other) => return Err(format!("unexpected token in stream item: {:?}", other)),
+        None => return Err("unexpected end of stream layout".to_owned()),
+    };
+
+    let (source, min_width) = parse_positive_stream_suffix(&source, '-', "stream min width")?;
+    let (source, max_width) = parse_positive_stream_suffix(source, '+', "stream max width")?;
+
+    let (source, basis) = match source.split_once(':') {
+        Some((head, basis)) => {
+            let parsed = basis
+                .parse::<usize>()
+                .map_err(|_| format!("invalid stream size: {basis}"))?;
+            if parsed == 0 {
+                return Err("stream sizes must be greater than zero".to_owned());
+            }
+            (head, parsed)
+        }
+        None => (source, 1),
+    };
+
+    let mut parts = source.split('.');
+    let source_token = parts.next().unwrap_or_default();
+    let mut display = DisplayMode::Full;
+    for suffix in parts {
+        if let Some(parsed_display) = DisplayMode::parse(suffix) {
+            if display != DisplayMode::Full {
+                return Err(format!("duplicate display mode: {suffix}"));
+            }
+            display = parsed_display;
+            continue;
+        }
+        return Err(format!("unknown stream suffix: {suffix}"));
+    }
+
+    let Some(column) = source_token.strip_prefix('@') else {
+        return Err(format!("unknown stream source: {source_token}"));
+    };
+    let parsed_column = column
+        .parse::<usize>()
+        .map_err(|_| format!("invalid stream column reference: @{column}"))?;
+    if parsed_column == 0 {
+        return Err("stream column references are 1-based; use @1, @2, ...".to_owned());
+    }
+
+    Ok(StreamItem {
+        label,
+        column_index: parsed_column - 1,
+        display,
+        basis,
+        max_width,
+        min_width,
+    })
+}
+
+fn expect_stream_token(parser: &mut StreamParser, expected: StreamToken) -> Result<(), String> {
+    let actual = parser.next();
+    if actual.as_ref() == Some(&expected) {
+        Ok(())
+    } else {
+        Err(format!(
+            "unexpected token in stream layout: expected {:?}, got {:?}",
+            expected, actual
+        ))
+    }
+}
+
+fn parse_positive_stream_suffix<'a>(
+    token: &'a str,
+    delimiter: char,
+    label: &str,
+) -> Result<(&'a str, Option<usize>), String> {
+    match token.rsplit_once(delimiter) {
+        Some((head, value)) => {
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| format!("invalid {label}: {value}"))?;
+            if parsed == 0 {
+                return Err(format!("{label}s must be greater than zero"));
+            }
+            Ok((head, Some(parsed)))
+        }
+        None => Ok((token, None)),
+    }
+}
+
 pub fn help_text() -> String {
     let mut command = Cli::command();
     let mut help = Vec::new();
@@ -417,6 +810,7 @@ pub fn clap_command() -> clap::Command {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
+    use std::path::PathBuf;
 
     fn parse(items: &[&str]) -> Config {
         parse_args(items.iter().map(|item| item.to_string())).unwrap()
@@ -470,11 +864,7 @@ mod tests {
         let config = parse(&["monlin", "--labels", "wifi,eth,vpn"]);
         assert_eq!(
             config.stream_labels,
-            Some(vec![
-                "wifi".to_owned(),
-                "eth".to_owned(),
-                "vpn".to_owned()
-            ])
+            Some(vec!["wifi".to_owned(), "eth".to_owned(), "vpn".to_owned()])
         );
     }
 
@@ -488,6 +878,140 @@ mod tests {
     fn parses_space_mode() {
         let config = parse(&["monlin", "--space", "segment"]);
         assert_eq!(config.space, Space::Segment);
+    }
+
+    #[test]
+    fn parses_layout_engine() {
+        let config = parse(&["monlin", "--engine", "grid"]);
+        assert_eq!(config.layout_engine, LayoutEngine::Grid);
+    }
+
+    #[test]
+    fn parses_flex_layout_engine() {
+        let config = parse(&["monlin", "--engine", "flex"]);
+        assert_eq!(config.layout_engine, LayoutEngine::Flex);
+    }
+
+    #[test]
+    fn parses_pack_layout_engine() {
+        let config = parse(&["monlin", "--engine", "pack"]);
+        assert_eq!(config.layout_engine, LayoutEngine::Pack);
+    }
+
+    #[test]
+    fn defaults_to_auto_layout_engine() {
+        let config = parse(&["monlin"]);
+        assert_eq!(config.layout_engine, LayoutEngine::Auto);
+    }
+
+    #[test]
+    fn parses_file_input_source() {
+        let config = parse(&["monlin", "f:/tmp/data.log"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::File(PathBuf::from("/tmp/data.log")))
+        );
+    }
+
+    #[test]
+    fn parses_process_input_source() {
+        let config = parse(&["monlin", "p:printf '10 20\\n'"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::Process("printf '10 20\\n'".to_owned()))
+        );
+    }
+
+    #[test]
+    fn parses_labeled_file_input_source() {
+        let config = parse(&["monlin", "cpu,ram=f:/tmp/data.log"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::File(PathBuf::from("/tmp/data.log")))
+        );
+        assert_eq!(
+            config.stream_labels,
+            Some(vec!["cpu".to_owned(), "ram".to_owned()])
+        );
+    }
+
+    #[test]
+    fn parses_labeled_process_input_source() {
+        let config = parse(&["monlin", "cpu=p:printf '10\\n'"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::Process("printf '10\\n'".to_owned()))
+        );
+        assert_eq!(config.stream_labels, Some(vec!["cpu".to_owned()]));
+    }
+
+    #[test]
+    fn rejects_combining_inline_external_labels_with_flag_labels() {
+        let error = parse_args(
+            ["monlin", "--labels", "a,b", "cpu,ram=p:printf '10 20\\n'"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot be combined with --labels"));
+    }
+
+    #[test]
+    fn parses_stream_column_layout_items() {
+        let config = parse(&["monlin", "cpu=@1", "ram=@2"]);
+        assert_eq!(
+            config.stream_groups,
+            Some(vec![StreamGroup {
+                label: None,
+                rows: vec![vec![
+                    StreamItem {
+                        label: Some("cpu".to_owned()),
+                        column_index: 0,
+                        display: DisplayMode::Full,
+                        basis: 1,
+                        max_width: None,
+                        min_width: None,
+                    },
+                    StreamItem {
+                        label: Some("ram".to_owned()),
+                        column_index: 1,
+                        display: DisplayMode::Full,
+                        basis: 1,
+                        max_width: None,
+                        min_width: None,
+                    }
+                ]],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_labeled_stream_groups() {
+        let config = parse(&["monlin", "\"two randoms\"=(\"1st program\"=@1, 2nd=@2)"]);
+        assert_eq!(
+            config.stream_groups,
+            Some(vec![StreamGroup {
+                label: Some("two randoms".to_owned()),
+                rows: vec![
+                    vec![StreamItem {
+                        label: Some("1st program".to_owned()),
+                        column_index: 0,
+                        display: DisplayMode::Full,
+                        basis: 1,
+                        max_width: None,
+                        min_width: None,
+                    }],
+                    vec![StreamItem {
+                        label: Some("2nd".to_owned()),
+                        column_index: 1,
+                        display: DisplayMode::Full,
+                        basis: 1,
+                        max_width: None,
+                        min_width: None,
+                    }]
+                ],
+            }])
+        );
     }
 
     #[test]
@@ -692,9 +1216,14 @@ mod tests {
     #[test]
     fn help_text_documents_current_layout_syntax() {
         let help = help_text();
-        assert!(help.contains("metric[.view][:basis][/grow][+max][-min]"));
+        assert!(help.contains("metric[.view][:size][+max][-min]"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
-        assert!(help.contains("cpu rnd sys"));
         assert!(help.contains("named palettes like default/pastel/neon"));
+    }
+
+    #[test]
+    fn palette_names_are_known_to_config_layer() {
+        assert!(crate::color::palette_names().contains(&"default"));
+        assert!(crate::color::palette_names().contains(&"rainbow"));
     }
 }

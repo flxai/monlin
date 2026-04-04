@@ -54,7 +54,10 @@ fn debug_colors_command_prints_metric_rows() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
-    assert!(lines.len() >= 10, "unexpected debug colors output: {stdout}");
+    assert!(
+        lines.len() >= 10,
+        "unexpected debug colors output: {stdout}"
+    );
     assert!(lines.iter().any(|line| line.starts_with("cpu ")));
     assert!(lines.iter().any(|line| line.starts_with("net ")));
 }
@@ -76,7 +79,7 @@ fn once_mode_exits_successfully() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("sys"));
+    assert!(stdout.contains("cpu"));
     assert!(stdout.lines().count() >= 2);
 }
 
@@ -250,14 +253,7 @@ fn dash_forces_stdin_stream_mode() {
 fn stream_mode_uses_explicit_labels() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([
-            "-",
-            "--once",
-            "--width",
-            "32",
-            "--color",
-            "never",
-            "--labels",
-            "wifi,vpn",
+            "-", "--once", "--width", "32", "--color", "never", "--labels", "wifi,vpn",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -320,8 +316,14 @@ fn stream_mode_lines_layout_preserves_old_per_series_rows() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2, "unexpected stream output: {stdout}");
-    assert!(lines[0].starts_with("wifi  10%"), "unexpected first row: {stdout}");
-    assert!(lines[1].starts_with(" vpn  20%"), "unexpected second row: {stdout}");
+    assert!(
+        lines[0].starts_with("wifi  10%"),
+        "unexpected first row: {stdout}"
+    );
+    assert!(
+        lines[1].starts_with(" vpn  20%"),
+        "unexpected second row: {stdout}"
+    );
 }
 
 #[test]
@@ -356,5 +358,8 @@ fn stream_mode_rejects_mismatched_labels() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("--labels expected 2 entries"), "unexpected stderr: {stderr}");
+    assert!(
+        stderr.contains("--labels expected 2 entries"),
+        "unexpected stderr: {stderr}"
+    );
 }

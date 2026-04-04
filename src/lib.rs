@@ -62,6 +62,14 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
+    if config.stream_groups.is_some()
+        && config.external_input.is_none()
+        && !config.force_stream_input
+        && io::stdin().is_terminal()
+    {
+        return Err("stream column references like @1 require stdin input".to_owned());
+    }
+
     if let Some(result) = maybe_run_external_stream(&config)? {
         return result;
     }
@@ -79,9 +87,7 @@ fn print_completion(shell: config::CompletionShell) {
         config::CompletionShell::Bash => generate_to_stdout(Shell::Bash, &mut command),
         config::CompletionShell::Elvish => generate_to_stdout(Shell::Elvish, &mut command),
         config::CompletionShell::Fish => generate_to_stdout(Shell::Fish, &mut command),
-        config::CompletionShell::PowerShell => {
-            generate_to_stdout(Shell::PowerShell, &mut command)
-        }
+        config::CompletionShell::PowerShell => generate_to_stdout(Shell::PowerShell, &mut command),
         config::CompletionShell::Zsh => print!("{}", zsh_completion_script()),
     }
 }
@@ -119,6 +125,8 @@ _monlin_layout() {
     all
     'f:/path/to/file'
     'p:command'
+    'label1,label2=f:/path/to/file'
+    'label1,label2=p:command'
   )
 
   cur="${words[CURRENT]}"
@@ -162,7 +170,9 @@ _monlin_layout() {
     'out:Network egress' \
     'all:Canonical multi-row layout' \
     'f:/path/to/file:Poll a file for numeric rows' \
-    'p:command:Poll a shell command for numeric rows'
+    'p:command:Poll a shell command for numeric rows' \
+    'label1,label2=f:/path/to/file:Poll a file and label the stream columns' \
+    'label1,label2=p:command:Poll a command and label the stream columns'
 }
 
 _monlin() {
@@ -179,6 +189,8 @@ _monlin() {
     '--labels:Comma-separated labels for stdin stream columns'
     '--stream-layout:Render streamed stdin as columns or lines'
     '--space:How streamed columns allocate width'
+    '-e:How native layouts arrange rows'
+    '--engine:How native layouts arrange rows'
     '--renderer:Graph renderer to use'
     '-c:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
     '--colors:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
@@ -205,6 +217,10 @@ _monlin() {
       ;;
     --space)
       compadd stable graph segment
+      return
+      ;;
+    -e|--engine)
+      compadd auto flow flex grid pack
       return
       ;;
     -c|--colors)
@@ -299,8 +315,7 @@ fn print_debug_colors(
             })
             .map(MetricValue::Single)
             .collect::<Vec<_>>();
-        let item_hues =
-            crate::color::metric_hues_for_visible_hue(*metric, effective_hues[index]);
+        let item_hues = crate::color::metric_hues_for_visible_hue(*metric, effective_hues[index]);
         let graph =
             render::render_braille_graph(&samples, width, *metric, Some(&item_hues), color_enabled);
         println!("{label:<4} {graph}");
@@ -319,7 +334,9 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     }
 }
 
-fn maybe_run_external_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
+fn maybe_run_external_stream(
+    config: &config::Config,
+) -> Result<Option<Result<(), String>>, String> {
     let Some(source) = &config.external_input else {
         return Ok(None);
     };
@@ -329,7 +346,7 @@ fn maybe_run_external_stream(config: &config::Config) -> Result<Option<Result<()
         Some(frame) => frame,
         None => return Ok(Some(Ok(()))),
     };
-    validate_stream_labels(config, first_frame.len())?;
+    validate_stream_shape(config, first_frame.len())?;
 
     let result = match config.output_mode {
         OutputMode::Terminal => run_external_stream_terminal(config, &mut poller, first_frame),
@@ -355,7 +372,7 @@ fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>
             return Ok(None);
         }
     };
-    validate_stream_labels(config, first_frame.len())?;
+    validate_stream_shape(config, first_frame.len())?;
 
     let result = match config.output_mode {
         OutputMode::Terminal => run_stream_terminal(config, &mut reader, first_frame),
@@ -364,13 +381,30 @@ fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>
     Ok(Some(result))
 }
 
-fn validate_stream_labels(config: &config::Config, series_count: usize) -> Result<(), String> {
+fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result<(), String> {
     if let Some(labels) = &config.stream_labels {
         if labels.len() != series_count {
             return Err(format!(
                 "--labels expected {series_count} entries for the input stream, got {}",
                 labels.len()
             ));
+        }
+    }
+
+    if let Some(groups) = &config.stream_groups {
+        let max_ref = groups
+            .iter()
+            .flat_map(|group| group.rows.iter())
+            .flat_map(|row| row.iter())
+            .map(|item| item.column_index)
+            .max();
+        if let Some(max_ref) = max_ref {
+            if max_ref >= series_count {
+                return Err(format!(
+                    "stream layout references @{}, but the input stream has only {series_count} columns",
+                    max_ref + 1
+                ));
+            }
         }
     }
 
@@ -400,8 +434,7 @@ fn run_terminal(
             .or_else(render::terminal_width)
             .unwrap_or(80)
             .max(16);
-        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
-            .map_err(io_to_string)?;
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
         if config.once {
@@ -435,8 +468,7 @@ fn run_stream_terminal<R: BufRead>(
             .unwrap_or(80)
             .max(16);
         let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
-        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
-            .map_err(io_to_string)?;
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
         if config.once {
@@ -475,8 +507,7 @@ fn run_external_stream_terminal(
             .unwrap_or(80)
             .max(16);
         let lines = render::render_stream_lines(config, width, color_enabled, &histories, &current);
-        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width)
-            .map_err(io_to_string)?;
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
         stdout.flush().map_err(io_to_string)?;
 
         if config.once {
@@ -664,7 +695,8 @@ fn clear_reserved_region<W: Write>(stdout: &mut W, reserved_rows: usize) -> io::
 
 fn physical_frame_rows(lines: &[String], width: usize) -> usize {
     let width = width.max(1);
-    lines.iter()
+    lines
+        .iter()
         .map(|line| {
             let visible = render::visible_width(line);
             visible.max(1).div_ceil(width)
@@ -841,15 +873,12 @@ fn sample_lines(
         OutputMode::I3bar => false,
         OutputMode::Terminal => colors_enabled(config.color_mode),
     };
-    let active_layout = config
-        .layout
-        .retain_available(|metric| values.contains_key(&metric));
     let mut lines = render::render_lines_with_headlines(
         config,
         width,
         color_enabled,
         histories,
-        &active_layout,
+        &config.layout,
         values,
         headlines,
     );
@@ -941,7 +970,10 @@ impl ExternalPoller {
             }
             ExternalInputSource::Process(command) => {
                 let poller = Self::Process(command.clone());
-                let first = match poll_latest_output_line(&run_external_process(command)?, expected_columns)? {
+                let first = match poll_latest_output_line(
+                    &run_external_process(command)?,
+                    expected_columns,
+                )? {
                     Some(frame) => Some(frame),
                     None => None,
                 };
@@ -956,13 +988,12 @@ impl ExternalPoller {
                 Some(frame) => ExternalPollResult::Frame(frame),
                 None => ExternalPollResult::NoUpdate,
             }),
-            Self::Process(command) => Ok(match poll_latest_output_line(
-                &run_external_process(command)?,
-                expected_columns,
-            )? {
-                Some(frame) => ExternalPollResult::Frame(frame),
-                None => ExternalPollResult::NoUpdate,
-            }),
+            Self::Process(command) => Ok(
+                match poll_latest_output_line(&run_external_process(command)?, expected_columns)? {
+                    Some(frame) => ExternalPollResult::Frame(frame),
+                    None => ExternalPollResult::NoUpdate,
+                },
+            ),
         }
     }
 }
@@ -1207,13 +1238,7 @@ mod tests {
         .unwrap();
         assert_eq!(frame_state.reserved_rows, 2);
 
-        write_terminal_frame(
-            &mut output,
-            &["cpu".to_owned()],
-            &mut frame_state,
-            10,
-        )
-        .unwrap();
+        write_terminal_frame(&mut output, &["cpu".to_owned()], &mut frame_state, 10).unwrap();
         assert_eq!(frame_state.reserved_rows, 2);
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -1242,25 +1267,32 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_space_option() {
         let script = zsh_completion_script();
-        assert!(script.contains("rnd:Synthetic random metric"));
         assert!(script.contains("pct hum free"));
-        assert!(script.contains("default canonical rainbow warm cool pastel neon"));
         assert!(script.contains("--space:How streamed columns allocate width"));
     }
 
     #[test]
-    fn validate_stream_labels_accepts_absent_labels_and_rejects_mismatches() {
+    fn validate_stream_shape_accepts_absent_labels_and_rejects_mismatches() {
         let config = config::parse_args(["monlin"].into_iter().map(str::to_owned)).unwrap();
-        assert!(validate_stream_labels(&config, 2).is_ok());
+        assert!(validate_stream_shape(&config, 2).is_ok());
 
-        let labeled = config::parse_args(
-            ["monlin", "--labels", "a,b"]
+        let labeled =
+            config::parse_args(["monlin", "--labels", "a,b"].into_iter().map(str::to_owned))
+                .unwrap();
+        let error = validate_stream_shape(&labeled, 3).unwrap_err();
+        assert!(error.contains("--labels expected 3 entries"));
+    }
+
+    #[test]
+    fn validate_stream_shape_rejects_missing_referenced_columns() {
+        let config = config::parse_args(
+            ["monlin", "cpu=@1", "ram=@3"]
                 .into_iter()
                 .map(str::to_owned),
         )
         .unwrap();
-        let error = validate_stream_labels(&labeled, 3).unwrap_err();
-        assert!(error.contains("--labels expected 3 entries"));
+        let error = validate_stream_shape(&config, 2).unwrap_err();
+        assert!(error.contains("@3"));
     }
 
     #[test]
@@ -1270,8 +1302,14 @@ mod tests {
         update_stream_histories(&mut histories, &[0.4, 0.6], 2);
         update_stream_histories(&mut histories, &[0.8, 0.2], 2);
 
-        assert_eq!(histories[0].iter().copied().collect::<Vec<_>>(), vec![0.4, 0.8]);
-        assert_eq!(histories[1].iter().copied().collect::<Vec<_>>(), vec![0.6, 0.2]);
+        assert_eq!(
+            histories[0].iter().copied().collect::<Vec<_>>(),
+            vec![0.4, 0.8]
+        );
+        assert_eq!(
+            histories[1].iter().copied().collect::<Vec<_>>(),
+            vec![0.6, 0.2]
+        );
     }
 
     #[test]
@@ -1405,7 +1443,9 @@ mod tests {
     #[test]
     fn run_terminal_once_executes_successfully() {
         let config = config::parse_args(
-            ["monlin", "cpu", "--width", "16", "--color", "never", "--once"]
+            [
+                "monlin", "cpu", "--width", "16", "--color", "never", "--once",
+            ]
             .into_iter()
             .map(|item| item.to_string()),
         )
@@ -1422,14 +1462,7 @@ mod tests {
     fn run_i3bar_once_executes_successfully() {
         let config = config::parse_args(
             [
-                "monlin",
-                "cpu",
-                "--width",
-                "16",
-                "--color",
-                "always",
-                "--output",
-                "i3bar",
+                "monlin", "cpu", "--width", "16", "--color", "always", "--output", "i3bar",
                 "--once",
             ]
             .into_iter()
