@@ -1,4 +1,5 @@
 use crate::layout::MetricKind;
+use chromata::{popular, Theme};
 use palette::{Clamp, FromColor, Lab, LabHue, Lch, Mix, Srgb};
 use splines::{Interpolation, Key, Spline};
 use std::sync::OnceLock;
@@ -38,6 +39,20 @@ pub fn palette_names() -> &'static [&'static str] {
         "cool",
         "pastel",
         "neon",
+        "solarized",
+        "solarized-light",
+        "gruvbox",
+        "gruvbox-light",
+        "nord",
+        "catppuccin",
+        "catppuccin-latte",
+        "catppuccin-frappe",
+        "catppuccin-macchiato",
+        "catppuccin-mocha",
+        "tokyonight",
+        "tokyonight-storm",
+        "tokyonight-light",
+        "dracula",
     ]
 }
 
@@ -132,10 +147,48 @@ pub fn named_palette(name: &str) -> Option<Vec<ColorSpec>> {
                 hue: 320.0,
             },
         ],
+        "solarized" => theme_palette(&popular::solarized::DARK),
+        "solarized-light" => theme_palette(&popular::solarized::LIGHT),
+        "gruvbox" => theme_palette(&popular::gruvbox::DARK),
+        "gruvbox-light" => theme_palette(&popular::gruvbox::LIGHT),
+        "nord" => theme_palette(&popular::nord::THEME),
+        "catppuccin" | "catppuccin-mocha" => theme_palette(&popular::catppuccin::MOCHA),
+        "catppuccin-latte" => theme_palette(&popular::catppuccin::LATTE),
+        "catppuccin-frappe" => theme_palette(&popular::catppuccin::FRAPPE),
+        "catppuccin-macchiato" => theme_palette(&popular::catppuccin::MACCHIATO),
+        "tokyonight" => theme_palette(&popular::tokyo_night::DARK),
+        "tokyonight-storm" => theme_palette(&popular::tokyo_night::STORM),
+        "tokyonight-light" => theme_palette(&popular::tokyo_night::LIGHT),
+        "dracula" => theme_palette(&popular::dracula::THEME),
         _ => return None,
     };
 
     Some(palette)
+}
+
+fn theme_palette(theme: &Theme) -> Vec<ColorSpec> {
+    [
+        theme.red,
+        theme.orange,
+        theme.yellow,
+        theme.green,
+        theme.cyan,
+        theme.blue,
+        theme.purple,
+        theme.magenta,
+    ]
+    .into_iter()
+    .flatten()
+    .map(color_spec_from_chromata)
+    .collect()
+}
+
+fn color_spec_from_chromata(color: chromata::Color) -> ColorSpec {
+    ColorSpec::Rgb(Rgb {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -696,5 +749,32 @@ mod tests {
         assert!(palette_names().contains(&"default"));
         assert!(palette_names().contains(&"pastel"));
         assert!(palette_names().contains(&"neon"));
+        assert!(palette_names().contains(&"solarized"));
+        assert!(palette_names().contains(&"gruvbox"));
+        assert!(palette_names().contains(&"nord"));
+        assert!(palette_names().contains(&"catppuccin"));
+        assert!(palette_names().contains(&"tokyonight"));
+        assert!(palette_names().contains(&"dracula"));
+    }
+
+    #[test]
+    fn chromata_theme_palettes_expand_to_eight_rgb_colors() {
+        for name in [
+            "solarized",
+            "gruvbox",
+            "nord",
+            "catppuccin",
+            "tokyonight",
+            "dracula",
+        ] {
+            let palette = named_palette(name).unwrap();
+            assert_eq!(palette.len(), 8, "{name}");
+            assert!(
+                palette
+                    .iter()
+                    .all(|color| matches!(color, ColorSpec::Rgb(_))),
+                "{name}"
+            );
+        }
     }
 }

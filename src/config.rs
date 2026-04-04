@@ -227,7 +227,7 @@ struct Cli {
         short = 'c',
         long = "colors",
         value_delimiter = ',',
-        help = "Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
+        help = "Comma-separated visible-order colors: named palettes like default/gruvbox/solarized/catppuccin, angle 20 or A20, RGB Rff8800, or packed LCh L086078020"
     )]
     colors: Vec<String>,
 
@@ -950,12 +950,14 @@ mod tests {
         let help = help_text();
         assert!(help.contains("metric[.view][:size][+max][-min]"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
-        assert!(help.contains("named palettes like default/pastel/neon"));
+        assert!(help.contains("named palettes like default/gruvbox/solarized/catppuccin"));
     }
 
     #[test]
     fn palette_names_are_known_to_config_layer() {
         assert!(crate::color::palette_names().contains(&"default"));
         assert!(crate::color::palette_names().contains(&"rainbow"));
+        assert!(crate::color::palette_names().contains(&"gruvbox"));
+        assert!(crate::color::palette_names().contains(&"solarized"));
     }
 }
