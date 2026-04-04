@@ -275,19 +275,21 @@ fn render_packed_metric_row(
                 let history = histories.get(&metric).cloned().unwrap_or_default();
                 let samples = history.iter().copied().collect::<Vec<_>>();
                 match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &samples,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &samples,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 }
             } else {
@@ -382,19 +384,21 @@ fn render_packed_document_row(
                 })
                 .unwrap_or_default();
             match config.renderer {
-                Renderer::Braille => render_braille_graph(
+                Renderer::Braille => render_braille_graph_with_options(
                     &metric_history,
                     graph_width,
                     render_metric,
                     Some(&item_hues),
                     color_enabled,
+                    config.solid_colors,
                 ),
-                Renderer::Block => render_block_graph(
+                Renderer::Block => render_block_graph_with_options(
                     &metric_history,
                     graph_width,
                     render_metric,
                     Some(&item_hues),
                     color_enabled,
+                    config.solid_colors,
                 ),
             }
         })
@@ -460,6 +464,7 @@ fn render_pack_lines_with_headlines(
                             config.renderer,
                             Some(&item_hues),
                             color_enabled,
+                            config.solid_colors,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -535,6 +540,7 @@ fn render_flex_lines_with_headlines(
                             config.renderer,
                             Some(&item_hues),
                             color_enabled,
+                            config.solid_colors,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -596,6 +602,7 @@ fn render_grid_lines_with_headlines(
                             config.renderer,
                             Some(&item_hues),
                             color_enabled,
+                            config.solid_colors,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -1348,19 +1355,21 @@ fn render_stream_group_row(
                     Space::Stable | Space::Graph | Space::Segment => usage_text.clone(),
                 };
                 let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 };
                 let text_only = format!("{label}{separator}{display_usage_text}");
@@ -1504,19 +1513,21 @@ fn render_document_row(
                 let item_hues =
                     metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
                 let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &metric_history,
                         graph_width,
                         render_metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &metric_history,
                         graph_width,
                         render_metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 };
                 let text_only = format!("{label}{separator}{usage_text}");
@@ -1667,19 +1678,21 @@ fn render_stream_rows(
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &metric_history,
                         width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &metric_history,
                         width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 }
             })
@@ -1727,19 +1740,21 @@ fn render_stream_rows(
             let item_hues =
                 metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
             let graph = match config.renderer {
-                Renderer::Braille => render_braille_graph(
+                Renderer::Braille => render_braille_graph_with_options(
                     &metric_history,
                     graph_width,
                     metric,
                     Some(&item_hues),
                     color_enabled,
+                    config.solid_colors,
                 ),
-                Renderer::Block => render_block_graph(
+                Renderer::Block => render_block_graph_with_options(
                     &metric_history,
                     graph_width,
                     metric,
                     Some(&item_hues),
                     color_enabled,
+                    config.solid_colors,
                 ),
             };
 
@@ -1782,19 +1797,21 @@ fn render_stream_columns_line(
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 }
             })
@@ -1858,19 +1875,21 @@ fn render_stream_columns_line(
                     Space::Graph | Space::Segment => usage_text.clone(),
                 };
                 let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph(
+                    Renderer::Braille => render_braille_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
-                    Renderer::Block => render_block_graph(
+                    Renderer::Block => render_block_graph_with_options(
                         &metric_history,
                         graph_width,
                         metric,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                     ),
                 };
                 let text_only = format!("{label}{separator}{display_usage_text}");
@@ -2102,6 +2121,7 @@ fn render_row(
                         config.renderer,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                         stable_layout,
                     )
                 } else {
@@ -2116,6 +2136,7 @@ fn render_row(
                         config.renderer,
                         Some(&item_hues),
                         color_enabled,
+                        config.solid_colors,
                         stable_layout,
                     )
                 }
@@ -2172,6 +2193,7 @@ fn render_segment(
         renderer,
         None,
         color_enabled,
+        false,
         false,
     )
 }
@@ -2319,6 +2341,7 @@ fn render_segment_with_headline(
     renderer: Renderer,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    solid_colors: bool,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
@@ -2342,10 +2365,22 @@ fn render_segment_with_headline(
     let graph_width = width.saturating_sub(fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
-        Renderer::Braille => {
-            render_braille_graph(&samples, graph_width, metric, hues, color_enabled)
-        }
-        Renderer::Block => render_block_graph(&samples, graph_width, metric, hues, color_enabled),
+        Renderer::Braille => render_braille_graph_with_options(
+            &samples,
+            graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
+        Renderer::Block => render_block_graph_with_options(
+            &samples,
+            graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
     };
 
     pad_or_trim_visible(
@@ -2368,6 +2403,7 @@ fn render_segment_with_graph_width(
     renderer: Renderer,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    solid_colors: bool,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
@@ -2382,10 +2418,22 @@ fn render_segment_with_graph_width(
     );
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
-        Renderer::Braille => {
-            render_braille_graph(&samples, graph_width, metric, hues, color_enabled)
-        }
-        Renderer::Block => render_block_graph(&samples, graph_width, metric, hues, color_enabled),
+        Renderer::Braille => render_braille_graph_with_options(
+            &samples,
+            graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
+        Renderer::Block => render_block_graph_with_options(
+            &samples,
+            graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
     };
     let width = fixed + 1 + graph_width;
 
@@ -2441,18 +2489,29 @@ fn render_grid_segment(
     renderer: Renderer,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    solid_colors: bool,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
     let usage_text = segment_usage_text(metric, item.view(), value, headline_value, stable_layout);
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph = match renderer {
-        Renderer::Braille => {
-            render_braille_graph(&samples, spec.graph_width, metric, hues, color_enabled)
-        }
-        Renderer::Block => {
-            render_block_graph(&samples, spec.graph_width, metric, hues, color_enabled)
-        }
+        Renderer::Braille => render_braille_graph_with_options(
+            &samples,
+            spec.graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
+        Renderer::Block => render_block_graph_with_options(
+            &samples,
+            spec.graph_width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        ),
     };
 
     let text = render_grid_text(
@@ -2789,6 +2848,7 @@ pub(crate) fn visible_width(text: &str) -> usize {
     width
 }
 
+#[cfg(test)]
 fn render_block_graph(
     samples: &[MetricValue],
     width: usize,
@@ -5149,6 +5209,7 @@ mod tests {
             None,
             false,
             false,
+            false,
         );
 
         assert!(segment.contains("net   0B"));
@@ -5166,6 +5227,7 @@ mod tests {
             Align::Left,
             Renderer::Braille,
             None,
+            false,
             false,
             false,
         );
@@ -5190,6 +5252,7 @@ mod tests {
             None,
             false,
             false,
+            false,
         );
         let io_large = render_segment_with_headline(
             item(MetricKind::Io),
@@ -5204,6 +5267,7 @@ mod tests {
             Align::Left,
             Renderer::Braille,
             None,
+            false,
             false,
             false,
         );
@@ -5227,6 +5291,7 @@ mod tests {
             Align::Left,
             Renderer::Braille,
             None,
+            false,
             false,
             false,
         );
@@ -5279,6 +5344,7 @@ mod tests {
                 None,
                 false,
                 false,
+                false,
             );
 
             assert!(
@@ -5304,6 +5370,39 @@ mod tests {
             "\x1b[38;2;{};{};{}m",
             expected.r, expected.g, expected.b
         )));
+    }
+
+    #[test]
+    fn solid_colors_use_full_palette_color_for_low_values() {
+        let hues = metric_hues_for_visible_hue(
+            MetricKind::Cpu,
+            ColorSpec::Rgb(crate::color::Rgb {
+                r: 251,
+                g: 73,
+                b: 52,
+            }),
+        );
+        let shaded = render_braille_graph_with_options(
+            &[MetricValue::Single(0.01)],
+            1,
+            MetricKind::Cpu,
+            Some(&hues),
+            true,
+            false,
+        );
+        let solid = render_braille_graph_with_options(
+            &[MetricValue::Single(0.01)],
+            1,
+            MetricKind::Cpu,
+            Some(&hues),
+            true,
+            true,
+        );
+        let low = crate::color::gradient_for_with_hues(MetricKind::Cpu, Some(&hues)).low;
+        let high = crate::color::gradient_for_with_hues(MetricKind::Cpu, Some(&hues)).high;
+
+        assert!(shaded.contains(&format!("\x1b[38;2;{};{};{}m", low.r, low.g, low.b)));
+        assert!(solid.contains(&format!("\x1b[38;2;{};{};{}m", high.r, high.g, high.b)));
     }
 
     #[test]
