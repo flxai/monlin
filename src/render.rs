@@ -773,7 +773,7 @@ fn trim_visible(text: &str, width: usize) -> String {
     out
 }
 
-fn visible_width(text: &str) -> usize {
+pub(crate) fn visible_width(text: &str) -> usize {
     let mut width = 0;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -1108,6 +1108,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1171,6 +1172,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1233,6 +1235,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1286,6 +1289,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1407,6 +1411,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1439,6 +1444,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1476,6 +1482,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1541,6 +1548,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1574,6 +1582,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1769,6 +1778,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1840,6 +1850,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
@@ -1936,6 +1947,7 @@ mod tests {
             once: true,
             colors: None,
             force_stream_input: false,
+            external_input: None,
             print_completion: None,
             debug_colors_steps: None,
             show_help: false,
