@@ -608,7 +608,7 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Self::from_rows_with_mode(split_even_rows(all_metrics(), 2), false, true)
+        Self::from_rows_with_mode(default_avail_layout_rows(LayoutView::Default), true, true)
     }
 }
 
@@ -824,6 +824,7 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
         .iter()
         .any(|token| matches!(token, LayoutToken::LParen | LayoutToken::RParen));
     let explicit_rows = spec.contains(',') || spec.contains('\n') || contains_group;
+    let mut force_explicit_rows = false;
 
     let mut parser = LayoutParser::new(tokens);
     let mut flat = Vec::new();
@@ -839,6 +840,7 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
         &mut flat_items,
         &mut hinted_rows,
         &mut filter_available,
+        &mut force_explicit_rows,
     )?;
     if !parser.at_end() {
         return Err("unexpected trailing tokens in layout".to_owned());
@@ -847,7 +849,7 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
         return Err("layout must contain at least one layout item".to_owned());
     }
 
-    if explicit_rows {
+    if explicit_rows || force_explicit_rows {
         return Ok(Document::new(rows, true, filter_available));
     }
 
@@ -874,6 +876,7 @@ fn parse_document_rows(
     flat_items: &mut Vec<Item>,
     hinted_rows: &mut Option<usize>,
     filter_available: &mut bool,
+    force_explicit_rows: &mut bool,
 ) -> Result<Vec<Row>, String> {
     let mut rows = Vec::new();
     let mut current = Vec::new();
@@ -900,18 +903,37 @@ fn parse_document_rows(
                     flat_items,
                     hinted_rows,
                     filter_available,
+                    force_explicit_rows,
                 )?);
                 if matches!(parser.peek(), Some(LayoutToken::Comma)) {
                     parser.next();
                 }
             }
             _ => {
-                let items =
-                    parse_document_entry(parser, explicit_rows, hinted_rows, filter_available)?;
-                for item in items {
-                    push_unique_document_metrics(flat, &item.source);
-                    flat_items.push(item.clone());
-                    current.push(item);
+                let rows_for_entry = parse_document_entry(
+                    parser,
+                    explicit_rows,
+                    hinted_rows,
+                    filter_available,
+                )?;
+                if rows_for_entry.len() == 1 && rows_for_entry[0].label.is_none() {
+                    for item in &rows_for_entry[0].items {
+                        push_unique_document_metrics(flat, &item.source);
+                        flat_items.push(item.clone());
+                        current.push(item.clone());
+                    }
+                } else {
+                    *force_explicit_rows = true;
+                    if !current.is_empty() {
+                        return Err("grouped macros cannot appear inline with other items".to_owned());
+                    }
+                    for row in rows_for_entry {
+                        for item in &row.items {
+                            push_unique_document_metrics(flat, &item.source);
+                            flat_items.push(item.clone());
+                        }
+                        rows.push(row);
+                    }
                 }
             }
         }
@@ -938,6 +960,7 @@ fn parse_document_group(
     flat_items: &mut Vec<Item>,
     hinted_rows: &mut Option<usize>,
     filter_available: &mut bool,
+    force_explicit_rows: &mut bool,
 ) -> Result<Vec<Row>, String> {
     let label = if matches!(
         (parser.peek(), parser.peek_n(1), parser.peek_n(2)),
@@ -968,6 +991,7 @@ fn parse_document_group(
         flat_items,
         hinted_rows,
         filter_available,
+        force_explicit_rows,
     )?;
     expect_layout_token(parser, LayoutToken::RParen)?;
     let _ = explicit_rows;
@@ -979,24 +1003,42 @@ fn parse_document_entry(
     explicit_rows: bool,
     hinted_rows: &mut Option<usize>,
     filter_available: &mut bool,
-) -> Result<Vec<Item>, String> {
+) -> Result<Vec<Row>, String> {
     let token = match parser.next() {
         Some(LayoutToken::Word(word)) => word,
         Some(other) => return Err(format!("unexpected token in layout: {:?}", other)),
         None => return Err("unexpected end of layout".to_owned()),
     };
 
-    if let Some((count, should_filter_available, items)) = parse_all_items(&token)? {
-        if explicit_rows {
-            return Err("all/avail cannot be mixed with explicit row separators".to_owned());
+    if let Some(entry) = parse_all_items(&token)? {
+        match entry {
+            ParsedEntry::Items {
+                count,
+                filter_available: should_filter_available,
+                items,
+            } => {
+                if explicit_rows {
+                    return Err("all/avail cannot be mixed with explicit row separators".to_owned());
+                }
+                *hinted_rows = Some(count);
+                *filter_available |= should_filter_available;
+                return Ok(vec![Row::new(None, items)]);
+            }
+            ParsedEntry::Rows {
+                filter_available: should_filter_available,
+                rows,
+            } => {
+                if explicit_rows {
+                    return Err("all/avail cannot be mixed with explicit row separators".to_owned());
+                }
+                *filter_available |= should_filter_available;
+                return Ok(rows);
+            }
         }
-        *hinted_rows = Some(count);
-        *filter_available |= should_filter_available;
-        return Ok(items);
     }
 
     if let Some(items) = parse_group_alias_items(&token)? {
-        return Ok(items);
+        return Ok(vec![Row::new(None, items)]);
     }
 
     if matches!(parser.peek(), Some(LayoutToken::Equals))
@@ -1007,10 +1049,16 @@ fn parse_document_entry(
             Some(LayoutToken::Word(word)) => word,
             _ => unreachable!(),
         };
-        return Ok(vec![parse_document_source_item(Some(token), &source)?]);
+        return Ok(vec![Row::new(
+            None,
+            vec![parse_document_source_item(Some(token), &source)?],
+        )]);
     }
 
-    Ok(vec![parse_document_source_item(None, &token)?])
+    Ok(vec![Row::new(
+        None,
+        vec![parse_document_source_item(None, &token)?],
+    )])
 }
 
 fn starts_group(parser: &LayoutParser) -> bool {
@@ -1053,7 +1101,19 @@ fn push_unique_document_metrics(metrics: &mut Vec<MetricKind>, source: &Source) 
     }
 }
 
-fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, String> {
+enum ParsedEntry {
+    Items {
+        count: usize,
+        filter_available: bool,
+        items: Vec<Item>,
+    },
+    Rows {
+        filter_available: bool,
+        rows: Vec<Row>,
+    },
+}
+
+fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
     if token.starts_with("all/") || token.starts_with("all:") {
         return Err("invalid all syntax; use 'all', 'avail', or write explicit rows".to_owned());
     }
@@ -1061,11 +1121,26 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
         return Err("invalid avail syntax; use 'avail' or write explicit rows".to_owned());
     }
 
-    let (count, filter_available, view, metrics) = if token == "all" {
-        (2, false, LayoutView::Default, all_metrics().to_vec())
-    } else if token == "avail" {
-        (2, true, LayoutView::Default, all_metrics().to_vec())
-    } else if let Some(view_token) = token.strip_prefix("all.") {
+    if token == "all" {
+        return Ok(Some(ParsedEntry::Items {
+            count: 2,
+            filter_available: false,
+            items: all_metrics()
+                .iter()
+                .copied()
+                .map(|metric| Item::metric(metric, LayoutView::Default, DisplayMode::Full, 1, None, None))
+                .collect(),
+        }));
+    }
+
+    if token == "avail" {
+        return Ok(Some(ParsedEntry::Rows {
+            filter_available: true,
+            rows: default_avail_document_rows(LayoutView::Default),
+        }));
+    }
+
+    let (count, filter_available, view, metrics) = if let Some(view_token) = token.strip_prefix("all.") {
         if view_token.contains(':')
             || view_token.contains('/')
             || view_token.contains('+')
@@ -1088,26 +1163,26 @@ fn parse_all_items(token: &str) -> Result<Option<(usize, bool, Vec<Item>)>, Stri
         {
             return Err("avail does not support size or width constraints".to_owned());
         }
-        (
-            2,
-            true,
-            LayoutView::parse(view_token)
-                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-            all_metrics().to_vec(),
-        )
+        return Ok(Some(ParsedEntry::Rows {
+            filter_available: true,
+            rows: default_avail_document_rows(
+                LayoutView::parse(view_token)
+                    .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+            ),
+        }));
     } else {
         return Ok(None);
     };
 
-    Ok(Some((
+    Ok(Some(ParsedEntry::Items {
         count,
         filter_available,
-        metrics
+        items: metrics
             .iter()
             .copied()
             .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
             .collect(),
-    )))
+    }))
 }
 
 fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
@@ -1321,26 +1396,6 @@ pub fn split_even_width(total: usize, count: usize) -> Vec<usize> {
         .collect()
 }
 
-fn split_even_rows(metrics: &[MetricKind], rows: usize) -> Vec<Vec<LayoutItem>> {
-    let heights = split_even_width(metrics.len(), rows);
-    let mut start = 0;
-
-    heights
-        .into_iter()
-        .filter(|count| *count > 0)
-        .map(|count| {
-            let end = start + count;
-            let row = metrics[start..end]
-                .iter()
-                .copied()
-                .map(|metric| LayoutItem::new(metric, LayoutView::Default, Some(1), 1))
-                .collect::<Vec<_>>();
-            start = end;
-            row
-        })
-        .collect()
-}
-
 fn split_even_rows_items(items: &[LayoutItem], rows: usize) -> Vec<Vec<LayoutItem>> {
     let heights = split_even_width(items.len(), rows);
     let mut start = 0;
@@ -1369,6 +1424,44 @@ fn split_even_rows_document_items(items: &[Item], rows: usize) -> Vec<Row> {
             let row = Row::new(None, items[start..end].to_vec());
             start = end;
             row
+        })
+        .collect()
+}
+
+fn default_avail_metric_rows() -> Vec<Vec<MetricKind>> {
+    vec![
+        vec![
+            MetricKind::Cpu,
+            MetricKind::Gpu,
+            MetricKind::Memory,
+            MetricKind::Vram,
+            MetricKind::Storage,
+        ],
+        vec![MetricKind::Io, MetricKind::Net],
+    ]
+}
+
+fn default_avail_document_rows(view: LayoutView) -> Vec<Row> {
+    default_avail_metric_rows()
+        .into_iter()
+        .map(|row| {
+            Row::new(
+                None,
+                row.into_iter()
+                    .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+fn default_avail_layout_rows(view: LayoutView) -> Vec<Vec<LayoutItem>> {
+    default_avail_metric_rows()
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|metric| LayoutItem::new(metric, view, Some(1), 1))
+                .collect()
         })
         .collect()
 }
@@ -1656,10 +1749,21 @@ mod tests {
     #[test]
     fn avail_expands_to_the_full_metric_set_with_filtering_enabled() {
         let layout = parse_layout_spec("avail").unwrap();
-        assert_eq!(layout.metrics(), all_metrics());
+        assert_eq!(
+            layout.metrics(),
+            &[
+                MetricKind::Cpu,
+                MetricKind::Gpu,
+                MetricKind::Memory,
+                MetricKind::Vram,
+                MetricKind::Storage,
+                MetricKind::Io,
+                MetricKind::Net,
+            ]
+        );
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 6);
-        assert_eq!(layout.rows()[1].len(), 5);
+        assert_eq!(layout.rows()[0].len(), 5);
+        assert_eq!(layout.rows()[1].len(), 2);
         assert!(layout.filter_available());
     }
 
@@ -1718,7 +1822,18 @@ mod tests {
     #[test]
     fn avail_view_expands_to_the_full_metric_set_with_that_view() {
         let layout = parse_layout_spec("avail.pct").unwrap();
-        assert_eq!(layout.metrics(), all_metrics());
+        assert_eq!(
+            layout.metrics(),
+            &[
+                MetricKind::Cpu,
+                MetricKind::Gpu,
+                MetricKind::Memory,
+                MetricKind::Vram,
+                MetricKind::Storage,
+                MetricKind::Io,
+                MetricKind::Net,
+            ]
+        );
         assert_eq!(layout.rows().len(), 2);
         assert!(layout.filter_available());
         assert!(layout

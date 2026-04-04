@@ -559,9 +559,20 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_all_layout() {
+    fn defaults_to_avail_layout() {
         let config = parse(&["monlin"]);
-        assert_eq!(config.layout.metrics(), crate::layout::all_metrics());
+        assert_eq!(
+            config.layout.metrics(),
+            &[
+                MetricKind::Cpu,
+                MetricKind::Gpu,
+                MetricKind::Memory,
+                MetricKind::Vram,
+                MetricKind::Storage,
+                MetricKind::Io,
+                MetricKind::Net,
+            ]
+        );
         assert_eq!(config.layout.rows().len(), 2);
         assert!(config.layout.filter_available());
         assert_eq!(config.output_mode, OutputMode::Terminal);
