@@ -134,6 +134,7 @@ pub struct Config {
     pub history: usize,
     pub interval_ms: u64,
     pub align: Align,
+    pub packed: bool,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
     pub stream_groups: Option<Vec<StreamGroup>>,
@@ -184,6 +185,14 @@ struct Cli {
 
     #[arg(long, value_enum, default_value_t = Align::Left, help = "Place the value before or after the graph")]
     align: Align,
+
+    #[arg(
+        short = 'p',
+        long = "packed",
+        action = ArgAction::SetTrue,
+        help = "Render packed graph-only output without labels, values, or inter-item spacing"
+    )]
+    packed: bool,
 
     #[arg(long, help = "Prefix every rendered line with a label")]
     label: Option<String>,
@@ -326,6 +335,7 @@ where
         history,
         interval_ms: cli.interval_ms,
         align: cli.align,
+        packed: cli.packed,
         label: cli.label,
         stream_labels: if !cli.stream_labels.is_empty() {
             Some(cli.stream_labels)
@@ -637,6 +647,12 @@ mod tests {
     fn parses_stream_layout() {
         let config = parse(&["monlin", "--stream-layout", "lines"]);
         assert_eq!(config.stream_layout, StreamLayout::Lines);
+    }
+
+    #[test]
+    fn parses_packed_flag() {
+        let config = parse(&["monlin", "-p"]);
+        assert!(config.packed);
     }
 
     #[test]

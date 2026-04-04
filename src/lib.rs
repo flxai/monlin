@@ -221,6 +221,8 @@ _monlin() {
     '--history:Number of history samples to retain'
     '--interval-ms:Sampling interval in milliseconds'
     '--align:Place the value before or after the graph'
+    '-p:Render packed graph-only output without labels, values, or inter-item spacing'
+    '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
     '--label:Prefix every rendered line with a label'
     '--labels:Comma-separated labels for stdin stream columns'
     '--stream-layout:Render streamed stdin as columns or lines'

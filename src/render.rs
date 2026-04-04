@@ -79,6 +79,10 @@ pub fn render_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    if config.packed {
+        return render_packed_native_lines(config, width, color_enabled, histories, layout, values);
+    }
+
     let effective_layout_engine = match config.layout_engine {
         LayoutEngine::Auto if layout.rows().len() > 1 => LayoutEngine::Grid,
         LayoutEngine::Auto => LayoutEngine::Flow,
@@ -168,6 +172,17 @@ pub fn render_document_lines(
     document: &Document,
     sample: &CanonicalSample,
 ) -> Vec<String> {
+    if config.packed {
+        return render_packed_document_lines(
+            config,
+            width,
+            color_enabled,
+            histories,
+            document,
+            sample,
+        );
+    }
+
     let total_items = document
         .rows()
         .iter()
@@ -206,6 +221,186 @@ pub fn render_document_lines(
     } else {
         lines
     }
+}
+
+fn render_packed_native_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+) -> Vec<String> {
+    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let mut offset = 0;
+
+    layout
+        .rows()
+        .iter()
+        .map(|items| {
+            let row_hues = &all_hues[offset..offset + items.len()];
+            offset += items.len();
+            render_packed_metric_row(
+                config,
+                width,
+                color_enabled,
+                histories,
+                items,
+                values,
+                row_hues,
+            )
+        })
+        .collect()
+}
+
+fn render_packed_metric_row(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    items: &[LayoutItem],
+    values: &HashMap<MetricKind, MetricValue>,
+    row_hues: &[ColorSpec],
+) -> String {
+    let widths = split_weighted_width(width, &normalized_items_for_sizing(items));
+    let segments = items
+        .iter()
+        .zip(widths)
+        .enumerate()
+        .map(|(index, (item, graph_width))| {
+            let metric = item.metric();
+            let item_hues = metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
+            if values.contains_key(&metric) {
+                let history = histories.get(&metric).cloned().unwrap_or_default();
+                let samples = history.iter().copied().collect::<Vec<_>>();
+                match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &samples,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &samples,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                }
+            } else {
+                render_unavailable_graph(graph_width, config.renderer, color_enabled)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    pad_or_trim_visible(&segments.join(""), width)
+}
+
+fn render_packed_document_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<Source, VecDeque<CanonicalValue>>,
+    document: &Document,
+    sample: &CanonicalSample,
+) -> Vec<String> {
+    let total_items = document
+        .rows()
+        .iter()
+        .map(|row| row.items().len())
+        .sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let mut offset = 0;
+
+    document
+        .rows()
+        .iter()
+        .map(|row| {
+            let row_hues = &all_hues[offset..offset + row.items().len()];
+            offset += row.items().len();
+            render_packed_document_row(
+                config,
+                width,
+                color_enabled,
+                histories,
+                sample,
+                row.items(),
+                row_hues,
+            )
+        })
+        .collect()
+}
+
+fn render_packed_document_row(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<Source, VecDeque<CanonicalValue>>,
+    sample: &CanonicalSample,
+    items: &[Item],
+    row_hues: &[ColorSpec],
+) -> String {
+    let sizing_items = items
+        .iter()
+        .map(|item| {
+            LayoutItem::with_constraints(
+                MetricKind::Cpu,
+                LayoutView::Default,
+                DisplayMode::Bare,
+                Some(item.size()),
+                item.size(),
+                item.max_width(),
+                item.min_width(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let widths = split_weighted_width(width, &sizing_items);
+    let segments = items
+        .iter()
+        .zip(widths)
+        .enumerate()
+        .map(|(index, (item, graph_width))| {
+            let render_metric = document_render_metric(item.source());
+            let item_hues =
+                metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
+            let value = sample.values.get(item.source()).copied();
+            if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                return render_unavailable_graph(graph_width, config.renderer, color_enabled);
+            }
+
+            let metric_history = histories
+                .get(item.source())
+                .map(|history| {
+                    history
+                        .iter()
+                        .copied()
+                        .filter_map(CanonicalValue::normalized_metric_value)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            match config.renderer {
+                Renderer::Braille => render_braille_graph(
+                    &metric_history,
+                    graph_width,
+                    render_metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
+                Renderer::Block => render_block_graph(
+                    &metric_history,
+                    graph_width,
+                    render_metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    pad_or_trim_visible(&segments.join(""), width)
 }
 
 fn render_pack_lines_with_headlines(
@@ -1452,6 +1647,45 @@ fn render_stream_rows(
     histories: &[VecDeque<f64>],
     values: &[f64],
 ) -> Vec<String> {
+    if config.packed {
+        let stream_hues = visible_hues(values.len(), config.colors.as_deref());
+        return values
+            .iter()
+            .enumerate()
+            .map(|(index, _value)| {
+                let metric = stream_metric_for(index);
+                let metric_history = histories
+                    .get(index)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .copied()
+                            .map(MetricValue::Single)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let item_hues =
+                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
+                match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &metric_history,
+                        width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &metric_history,
+                        width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                }
+            })
+            .collect();
+    }
+
     let prefix = config
         .label
         .as_ref()
@@ -1527,6 +1761,47 @@ fn render_stream_columns_line(
     histories: &[VecDeque<f64>],
     values: &[f64],
 ) -> String {
+    if config.packed {
+        let stream_hues = visible_hues(values.len(), config.colors.as_deref());
+        let widths = split_stream_widths(width, values.len());
+        let segments = widths
+            .into_iter()
+            .enumerate()
+            .map(|(index, graph_width)| {
+                let metric = stream_metric_for(index);
+                let metric_history = histories
+                    .get(index)
+                    .map(|history| {
+                        history
+                            .iter()
+                            .copied()
+                            .map(MetricValue::Single)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let item_hues =
+                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
+                match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &metric_history,
+                        graph_width,
+                        metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        return pad_or_trim_visible(&segments.join(""), width);
+    }
+
     let prefix = config
         .label
         .as_ref()
@@ -2829,6 +3104,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -2897,6 +3173,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -2963,6 +3240,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: Some("host".to_owned()),
             stream_labels: None,
             stream_groups: None,
@@ -3020,6 +3298,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3151,6 +3430,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3190,6 +3470,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -3225,12 +3506,76 @@ mod tests {
     }
 
     #[test]
+    fn packed_stream_columns_strip_text_and_spacing() {
+        let config = Config {
+            document: None,
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            packed: true,
+            label: Some("host".to_owned()),
+            stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
+            layout: Layout::default(),
+            renderer: Renderer::Braille,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(12),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            show_help: false,
+        };
+        let histories = vec![
+            VecDeque::from(vec![0.0, 0.25, 0.5]),
+            VecDeque::from(vec![0.5, 0.75, 1.0]),
+        ];
+        let values = vec![0.5, 1.0];
+
+        let lines = render_stream_lines(&config, 12, false, &histories, &values);
+
+        assert_eq!(lines.len(), 1);
+        assert!(
+            !lines[0].contains(' '),
+            "unexpected packed row: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains('%'),
+            "unexpected packed row: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("host"),
+            "unexpected packed row: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("wifi"),
+            "unexpected packed row: {}",
+            lines[0]
+        );
+        assert!(
+            !lines[0].contains("vpn"),
+            "unexpected packed row: {}",
+            lines[0]
+        );
+    }
+
+    #[test]
     fn stream_columns_keep_graph_widths_balanced_with_long_labels() {
         let config = Config {
             document: None,
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: Some(vec![
                 "a".to_owned(),
@@ -3303,6 +3648,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
             stream_groups: None,
@@ -3348,6 +3694,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3493,6 +3840,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3631,6 +3979,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3772,6 +4121,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3880,6 +4230,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3990,6 +4341,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4065,6 +4417,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4151,6 +4504,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4237,6 +4591,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4284,6 +4639,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -4499,6 +4855,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4574,6 +4931,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4674,6 +5032,7 @@ mod tests {
             history: 8,
             interval_ms: 1000,
             align: Align::Left,
+            packed: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
