@@ -573,7 +573,7 @@ mod tests {
                 MetricKind::Net,
             ]
         );
-        assert_eq!(config.layout.rows().len(), 2);
+        assert_eq!(config.layout.rows().len(), 1);
         assert!(config.layout.filter_available());
         assert_eq!(config.output_mode, OutputMode::Terminal);
     }

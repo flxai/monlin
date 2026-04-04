@@ -608,7 +608,7 @@ pub struct Layout {
 
 impl Default for Layout {
     fn default() -> Self {
-        Self::from_rows_with_mode(default_avail_layout_rows(LayoutView::Default), true, true)
+        Self::from_rows_with_mode(default_avail_layout_rows(LayoutView::Default), false, true)
     }
 }
 
@@ -1024,16 +1024,6 @@ fn parse_document_entry(
                 *filter_available |= should_filter_available;
                 return Ok(vec![Row::new(None, items)]);
             }
-            ParsedEntry::Rows {
-                filter_available: should_filter_available,
-                rows,
-            } => {
-                if explicit_rows {
-                    return Err("all/avail cannot be mixed with explicit row separators".to_owned());
-                }
-                *filter_available |= should_filter_available;
-                return Ok(rows);
-            }
         }
     }
 
@@ -1107,10 +1097,6 @@ enum ParsedEntry {
         filter_available: bool,
         items: Vec<Item>,
     },
-    Rows {
-        filter_available: bool,
-        rows: Vec<Row>,
-    },
 }
 
 fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
@@ -1134,9 +1120,14 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
     }
 
     if token == "avail" {
-        return Ok(Some(ParsedEntry::Rows {
+        return Ok(Some(ParsedEntry::Items {
+            count: 1,
             filter_available: true,
-            rows: default_avail_document_rows(LayoutView::Default),
+            items: default_avail_document_rows(LayoutView::Default)
+                .into_iter()
+                .next()
+                .map(|row| row.items)
+                .unwrap_or_default(),
         }));
     }
 
@@ -1163,12 +1154,17 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
         {
             return Err("avail does not support size or width constraints".to_owned());
         }
-        return Ok(Some(ParsedEntry::Rows {
+        return Ok(Some(ParsedEntry::Items {
+            count: 1,
             filter_available: true,
-            rows: default_avail_document_rows(
+            items: default_avail_document_rows(
                 LayoutView::parse(view_token)
                     .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-            ),
+            )
+            .into_iter()
+            .next()
+            .map(|row| row.items)
+            .unwrap_or_default(),
         }));
     } else {
         return Ok(None);
@@ -1429,16 +1425,15 @@ fn split_even_rows_document_items(items: &[Item], rows: usize) -> Vec<Row> {
 }
 
 fn default_avail_metric_rows() -> Vec<Vec<MetricKind>> {
-    vec![
-        vec![
-            MetricKind::Cpu,
-            MetricKind::Gpu,
-            MetricKind::Memory,
-            MetricKind::Vram,
-            MetricKind::Storage,
-        ],
-        vec![MetricKind::Io, MetricKind::Net],
-    ]
+    vec![vec![
+        MetricKind::Cpu,
+        MetricKind::Gpu,
+        MetricKind::Memory,
+        MetricKind::Vram,
+        MetricKind::Storage,
+        MetricKind::Io,
+        MetricKind::Net,
+    ]]
 }
 
 fn default_avail_document_rows(view: LayoutView) -> Vec<Row> {
@@ -1761,9 +1756,8 @@ mod tests {
                 MetricKind::Net,
             ]
         );
-        assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 5);
-        assert_eq!(layout.rows()[1].len(), 2);
+        assert_eq!(layout.rows().len(), 1);
+        assert_eq!(layout.rows()[0].len(), 7);
         assert!(layout.filter_available());
     }
 
@@ -1834,7 +1828,7 @@ mod tests {
                 MetricKind::Net,
             ]
         );
-        assert_eq!(layout.rows().len(), 2);
+        assert_eq!(layout.rows().len(), 1);
         assert!(layout.filter_available());
         assert!(layout
             .rows()
