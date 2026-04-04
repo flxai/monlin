@@ -299,6 +299,7 @@ impl LayoutItem {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
     Metric(MetricKind),
+    SplitMetric(MetricKind, MetricKind),
     StreamColumn(usize),
     File(PathBuf),
     Process(String),
@@ -392,6 +393,26 @@ impl Item {
         }
     }
 
+    pub fn split_metric(
+        label: Option<String>,
+        upper: MetricKind,
+        lower: MetricKind,
+        display: DisplayMode,
+        size: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        Self {
+            label,
+            source: Source::SplitMetric(upper, lower),
+            view: LayoutView::Default,
+            display,
+            size,
+            max_width,
+            min_width,
+        }
+    }
+
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
@@ -434,6 +455,11 @@ impl Item {
             Source::StreamColumn(index) => Err(format!(
                 "stream source @{} cannot yet be lowered into a native layout",
                 index + 1
+            )),
+            Source::SplitMetric(upper, lower) => Err(format!(
+                "split source {}+{} cannot yet be lowered into a native layout",
+                upper.short_label(),
+                lower.short_label()
             )),
             Source::File(ref path) => Err(format!(
                 "file source {} cannot yet be lowered into a native layout",
@@ -526,8 +552,20 @@ impl Document {
         self.rows.iter().all(|row| {
             row.items
                 .iter()
-                .all(|item| matches!(item.source, Source::Metric(_)))
+                .all(|item| matches!(item.source, Source::Metric(_) | Source::SplitMetric(_, _)))
         })
+    }
+
+    pub fn uses_split_metrics(&self) -> bool {
+        self.rows.iter().any(|row| {
+            row.items
+                .iter()
+                .any(|item| matches!(item.source, Source::SplitMetric(_, _)))
+        })
+    }
+
+    pub fn has_row_labels(&self) -> bool {
+        self.rows.iter().any(|row| row.label.is_some())
     }
 
     fn lower(&self) -> Result<Layout, String> {
@@ -993,8 +1031,13 @@ fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
 }
 
 fn push_unique_document_metrics(metrics: &mut Vec<MetricKind>, source: &Source) {
-    if let Source::Metric(metric) = source {
-        push_unique(metrics, *metric);
+    match source {
+        Source::Metric(metric) => push_unique(metrics, *metric),
+        Source::SplitMetric(upper, lower) => {
+            push_unique(metrics, *upper);
+            push_unique(metrics, *lower);
+        }
+        Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => {}
     }
 }
 
@@ -1209,6 +1252,20 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
         ));
     }
 
+    if let Some((upper, lower)) = metric_token.split_once('+') {
+        let upper = MetricKind::parse(upper).ok_or_else(|| format!("unknown metric: {upper}"))?;
+        let lower = MetricKind::parse(lower).ok_or_else(|| format!("unknown metric: {lower}"))?;
+        return Ok(Item::split_metric(
+            label,
+            upper,
+            lower,
+            display,
+            size,
+            max_width,
+            min_width,
+        ));
+    }
+
     let metric =
         MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
     Ok(Item {
@@ -1378,6 +1435,17 @@ mod tests {
         assert_eq!(
             document.rows()[0].items()[1].source(),
             &Source::Process("cut -f 1 -d\\  /proc/loadavg".to_owned())
+        );
+    }
+
+    #[test]
+    fn document_parser_handles_split_metric_sources() {
+        let document = parse_layout_document("spcram=(spc+ram)").unwrap();
+        assert_eq!(document.rows().len(), 1);
+        assert_eq!(document.rows()[0].label(), Some("spcram"));
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &Source::SplitMetric(MetricKind::Storage, MetricKind::Memory)
         );
     }
 

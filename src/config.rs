@@ -301,7 +301,9 @@ where
         || cli.layout_parts.is_empty()
         || document
             .as_ref()
-            .is_some_and(|document| !document.is_native_only())
+            .is_some_and(|document| {
+                !document.is_native_only() || document.uses_split_metrics() || document.has_row_labels()
+            })
     {
         Layout::default()
     } else {

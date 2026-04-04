@@ -82,6 +82,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         return Err("stream column references like @1 require stdin input".to_owned());
     }
 
+    if let Some(result) = maybe_run_document_native(&config)? {
+        return result;
+    }
+
     if let Some(result) = maybe_run_document_sources(&config)? {
         return result;
     }
@@ -385,7 +389,7 @@ fn maybe_run_document_sources(
     if document
         .sources()
         .iter()
-        .any(|source| matches!(source, Source::Metric(_)))
+        .any(|source| matches!(source, Source::Metric(_) | Source::SplitMetric(_, _)))
     {
         return Ok(Some(Err(
             "mixing native metrics with polled sources is not yet supported".to_owned(),
@@ -418,6 +422,32 @@ fn maybe_run_document_sources(
         OutputMode::I3bar => {
             run_document_external_i3bar(&render_config, &sources, &mut pollers, &mut current)
         }
+    };
+    Ok(Some(result))
+}
+
+fn maybe_run_document_native(
+    config: &config::Config,
+) -> Result<Option<Result<(), String>>, String> {
+    let Some(document) = &config.document else {
+        return Ok(None);
+    };
+    if !(document.uses_split_metrics() || document.has_row_labels()) {
+        return Ok(None);
+    }
+    if document.uses_stream_columns() || document.uses_external_sources() || !document.is_native_only() {
+        return Ok(Some(Err(
+            "split sources currently support only native metric pairs like spc+ram".to_owned(),
+        )));
+    }
+
+    let mut sampler = metrics::Sampler::default();
+    let requested_metrics = document_requested_metrics(document);
+    sampler.prime(&requested_metrics).map_err(monlin_error)?;
+    let mut histories = init_canonical_document_histories(document, config.history);
+    let result = match config.output_mode {
+        OutputMode::Terminal => run_document_native_terminal(config, document, &mut sampler, &mut histories),
+        OutputMode::I3bar => run_document_native_i3bar(config, document, &mut sampler, &mut histories),
     };
     Ok(Some(result))
 }
@@ -499,7 +529,7 @@ fn stream_groups_from_stream_document(document: &Document) -> Result<Vec<StreamG
         for item in row.items() {
             let column_index = match item.source() {
                 Source::StreamColumn(index) => *index,
-                Source::Metric(_) | Source::File(_) | Source::Process(_) => {
+                Source::Metric(_) | Source::SplitMetric(_, _) | Source::File(_) | Source::Process(_) => {
                     return Err(
                         "document stream rendering currently supports only @N items".to_owned(),
                     )
@@ -603,6 +633,9 @@ fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result
 fn describe_source(source: &Source) -> String {
     match source {
         Source::Metric(metric) => metric.short_label().to_owned(),
+        Source::SplitMetric(upper, lower) => {
+            format!("{}+{}", upper.short_label(), lower.short_label())
+        }
         Source::StreamColumn(index) => format!("@{}", index + 1),
         Source::File(path) => format!("f:{}", path.display()),
         Source::Process(command) => format!("p:{command}"),
@@ -647,6 +680,68 @@ fn run_terminal(
 
         if config.once {
             writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_document_native_terminal(
+    config: &config::Config,
+    document: &Document,
+    sampler: &mut metrics::Sampler,
+    histories: &mut CanonicalHistories,
+) -> Result<(), String> {
+    let hide_cursor = io::stdout().is_terminal();
+    let mut stdout = io::stdout().lock();
+    let _cursor_guard =
+        CursorVisibilityGuard::new(&mut stdout, hide_cursor).map_err(io_to_string)?;
+    let mut frame_state = TerminalFrameState::default();
+
+    loop {
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        let lines = sample_document_lines(config, document, sampler, histories)?;
+        let width = config
+            .width
+            .or_else(render::terminal_width)
+            .unwrap_or(80)
+            .max(16);
+        write_terminal_frame(&mut stdout, &lines, &mut frame_state, width).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
+            writeln!(stdout).map_err(io_to_string)?;
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn run_document_native_i3bar(
+    config: &config::Config,
+    document: &Document,
+    sampler: &mut metrics::Sampler,
+    histories: &mut CanonicalHistories,
+) -> Result<(), String> {
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, r#"{{"version":1}}"#).map_err(io_to_string)?;
+    writeln!(stdout, "[").map_err(io_to_string)?;
+
+    loop {
+        if config.interval_ms > 0 {
+            thread::sleep(Duration::from_millis(config.interval_ms));
+        }
+
+        let lines = sample_document_lines(config, document, sampler, histories)?;
+        writeln!(stdout, "{},", i3bar_frame_json(&lines)).map_err(io_to_string)?;
+        stdout.flush().map_err(io_to_string)?;
+
+        if config.once {
             break;
         }
     }
@@ -1213,6 +1308,33 @@ fn sample_lines(
     Ok(lines)
 }
 
+fn sample_document_lines(
+    config: &config::Config,
+    document: &Document,
+    sampler: &mut metrics::Sampler,
+    histories: &mut CanonicalHistories,
+) -> Result<Vec<String>, String> {
+    let sample = sample_document_canonical(document, sampler).map_err(monlin_error)?;
+    update_canonical_document_histories(histories, &sample, document, config.history);
+
+    let width = config
+        .width
+        .or_else(render::terminal_width)
+        .unwrap_or(80)
+        .max(16);
+    let color_enabled = match config.output_mode {
+        OutputMode::I3bar => false,
+        OutputMode::Terminal => colors_enabled(config.color_mode),
+    };
+
+    let mut lines =
+        render::render_document_lines(config, width, color_enabled, histories, document, &sample);
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    Ok(lines)
+}
+
 fn read_next_stream_frame<R: BufRead>(
     reader: &mut R,
     expected_columns: Option<usize>,
@@ -1269,7 +1391,7 @@ impl ExternalPoller {
                 pending: String::new(),
             })),
             Source::Process(command) => Ok(Self::Process(command.clone())),
-            Source::Metric(_) | Source::StreamColumn(_) => Err(format!(
+            Source::Metric(_) | Source::SplitMetric(_, _) | Source::StreamColumn(_) => Err(format!(
                 "unsupported polled source: {}",
                 describe_source(source)
             )),
@@ -1447,6 +1569,14 @@ fn init_canonical_metric_histories(
     histories
 }
 
+fn init_canonical_document_histories(document: &Document, history_len: usize) -> CanonicalHistories {
+    let mut histories = HashMap::new();
+    for source in document.sources() {
+        histories.insert(source.clone(), VecDeque::with_capacity(history_len.max(1)));
+    }
+    histories
+}
+
 fn init_canonical_stream_histories(series_count: usize, history_len: usize) -> CanonicalHistories {
     let mut histories = HashMap::with_capacity(series_count);
     for index in 0..series_count {
@@ -1469,6 +1599,27 @@ fn update_canonical_metric_histories(
         let source = Source::Metric(*metric);
         if let Some(history) = histories.get_mut(&source) {
             if let Some(value) = sample.values.get(&source).copied() {
+                if history.len() == limit {
+                    history.pop_front();
+                }
+                history.push_back(value);
+            } else {
+                history.clear();
+            }
+        }
+    }
+}
+
+fn update_canonical_document_histories(
+    histories: &mut CanonicalHistories,
+    sample: &CanonicalSample,
+    document: &Document,
+    history_len: usize,
+) {
+    let limit = history_len.max(1);
+    for source in document.sources() {
+        if let Some(history) = histories.get_mut(source) {
+            if let Some(value) = sample.values.get(source).copied() {
                 if history.len() == limit {
                     history.pop_front();
                 }
@@ -1525,7 +1676,7 @@ fn project_metric_values(sample: &CanonicalSample) -> HashMap<MetricKind, Metric
         .iter()
         .filter_map(|(source, value)| match source {
             Source::Metric(metric) => value.normalized_metric_value().map(|value| (*metric, value)),
-            Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
+            Source::SplitMetric(_, _) | Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
         })
         .collect()
 }
@@ -1536,7 +1687,7 @@ fn project_metric_headlines(sample: &CanonicalSample) -> HashMap<MetricKind, met
         .iter()
         .filter_map(|(source, headline)| match source {
             Source::Metric(metric) => Some((*metric, *headline)),
-            Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
+            Source::SplitMetric(_, _) | Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => None,
         })
         .collect()
 }
@@ -1568,6 +1719,90 @@ fn project_stream_values(frame: &[f64]) -> Vec<f64> {
             CanonicalValue::Split { .. } | CanonicalValue::Unavailable => 0.0,
         })
         .collect()
+}
+
+fn document_requested_metrics(document: &Document) -> Vec<MetricKind> {
+    let mut metrics = Vec::new();
+    for source in document.sources() {
+        collect_source_metrics(source, &mut metrics);
+    }
+    metrics
+}
+
+fn collect_source_metrics(source: &Source, metrics: &mut Vec<MetricKind>) {
+    match source {
+        Source::Metric(metric) => {
+            if !metrics.contains(metric) {
+                metrics.push(*metric);
+            }
+        }
+        Source::SplitMetric(upper, lower) => {
+            if !metrics.contains(upper) {
+                metrics.push(*upper);
+            }
+            if !metrics.contains(lower) {
+                metrics.push(*lower);
+            }
+        }
+        Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => {}
+    }
+}
+
+fn sample_document_canonical(
+    document: &Document,
+    sampler: &mut metrics::Sampler,
+) -> io::Result<CanonicalSample> {
+    let requested_metrics = document_requested_metrics(document);
+    let mut sample = sampler.sample_canonical(&requested_metrics)?;
+
+    for source in document.sources() {
+        let Source::SplitMetric(upper, lower) = source else {
+            continue;
+        };
+        let upper_source = Source::Metric(*upper);
+        let lower_source = Source::Metric(*lower);
+        let Some(upper_value) = sample.values.get(&upper_source).copied() else {
+            sample.values.insert(source.clone(), CanonicalValue::Unavailable);
+            continue;
+        };
+        let Some(lower_value) = sample.values.get(&lower_source).copied() else {
+            sample.values.insert(source.clone(), CanonicalValue::Unavailable);
+            continue;
+        };
+
+        let (upper_normalized, upper_absolute) = match upper_value {
+            CanonicalValue::Scalar {
+                normalized,
+                absolute,
+            } => (normalized, absolute),
+            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
+                sample.values.insert(source.clone(), CanonicalValue::Unavailable);
+                continue;
+            }
+        };
+        let (lower_normalized, lower_absolute) = match lower_value {
+            CanonicalValue::Scalar {
+                normalized,
+                absolute,
+            } => (normalized, absolute),
+            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
+                sample.values.insert(source.clone(), CanonicalValue::Unavailable);
+                continue;
+            }
+        };
+
+        sample.values.insert(
+            source.clone(),
+            CanonicalValue::Split {
+                upper_normalized,
+                lower_normalized,
+                upper_absolute,
+                lower_absolute,
+            },
+        );
+    }
+
+    Ok(sample)
 }
 
 fn colors_enabled(mode: ColorMode) -> bool {
@@ -1938,6 +2173,15 @@ mod tests {
         let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         assert!(run_terminal(&config, &mut sampler, &mut histories).is_ok());
+    }
+
+    #[test]
+    fn document_requested_metrics_include_split_dependencies() {
+        let document = layout::parse_layout_document("spcram=(spc+ram)").unwrap();
+        assert_eq!(
+            document_requested_metrics(&document),
+            vec![MetricKind::Storage, MetricKind::Memory]
+        );
     }
 
     #[test]

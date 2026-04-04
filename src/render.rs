@@ -8,8 +8,8 @@ use crate::color::{
     split_gradients_for_with_hues, visible_hues, BaseHues, ColorSpec,
 };
 use crate::config::{Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout};
-use crate::layout::{DisplayMode, Layout, LayoutItem, LayoutView, MetricKind};
-use crate::metrics::{HeadlineValue, MetricValue};
+use crate::layout::{DisplayMode, Document, Item, Layout, LayoutItem, LayoutView, MetricKind, Source};
+use crate::metrics::{CanonicalSample, CanonicalValue, HeadlineValue, MetricValue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Renderer {
@@ -157,6 +157,50 @@ pub fn render_lines_with_headlines(
             )
         })
         .collect()
+}
+
+pub fn render_document_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<Source, VecDeque<CanonicalValue>>,
+    document: &Document,
+    sample: &CanonicalSample,
+) -> Vec<String> {
+    let total_items = document.rows().iter().map(|row| row.items().len()).sum::<usize>();
+    let all_hues = visible_hues(total_items, config.colors.as_deref());
+    let outer_prefix = config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let mut offset = 0;
+    let mut lines = Vec::new();
+
+    for row in document.rows() {
+        let row_hues = &all_hues[offset..offset + row.items().len()];
+        offset += row.items().len();
+        let prefix = match row.label() {
+            Some(label) => format!("{outer_prefix}{label} "),
+            None => outer_prefix.clone(),
+        };
+        lines.push(render_document_row(
+            config,
+            width,
+            color_enabled,
+            histories,
+            sample,
+            row.items(),
+            &prefix,
+            row_hues,
+        ));
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
 }
 
 fn render_pack_lines_with_headlines(
@@ -1123,6 +1167,239 @@ fn render_stream_group_row(
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
+}
+
+fn render_document_row(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<Source, VecDeque<CanonicalValue>>,
+    sample: &CanonicalSample,
+    items: &[Item],
+    prefix: &str,
+    row_hues: &[ColorSpec],
+) -> String {
+    let inner_width = width.saturating_sub(prefix.chars().count());
+    let segments = items
+        .iter()
+        .map(|item| {
+            let label = document_item_label(item);
+            let usage_text = document_item_usage_text(
+                item,
+                sample.values.get(item.source()).copied(),
+                sample.headlines.get(item.source()).copied(),
+            );
+            let separator = if label.is_empty() || usage_text.is_empty() {
+                ""
+            } else {
+                " "
+            };
+            let fixed =
+                visible_width(&label) + separator.chars().count() + visible_width(&usage_text);
+            (item, label, separator, usage_text, fixed)
+        })
+        .collect::<Vec<_>>();
+
+    let sizing_items = items
+        .iter()
+        .map(|item| {
+            LayoutItem::with_constraints(
+                MetricKind::Cpu,
+                LayoutView::Default,
+                DisplayMode::Full,
+                Some(item.size()),
+                item.size(),
+                item.max_width(),
+                item.min_width(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let separators = items.len().saturating_sub(1);
+    let segment_space = inner_width.saturating_sub(separators);
+
+    let (segment_widths, graph_widths) = match config.space {
+        Space::Stable | Space::Graph => {
+            let fixed_total = segments
+                .iter()
+                .map(|(_, _, _, _, fixed)| fixed + 1)
+                .sum::<usize>();
+            let graph_space = segment_space.saturating_sub(fixed_total);
+            let graph_widths = split_weighted_width(graph_space, &sizing_items);
+            let segment_widths = segments
+                .iter()
+                .zip(graph_widths.iter().copied())
+                .map(|((_, _, _, _, fixed), graph_width)| {
+                    fixed + usize::from(graph_width > 0) + graph_width
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+        Space::Segment => {
+            let segment_widths = split_weighted_width(segment_space, &sizing_items);
+            let graph_widths = segments
+                .iter()
+                .zip(segment_widths.iter().copied())
+                .map(|((_, _, _, _, fixed), segment_width)| {
+                    if segment_width <= *fixed {
+                        0
+                    } else {
+                        segment_width.saturating_sub(*fixed + 1)
+                    }
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+    };
+
+    let rendered = segments
+        .into_iter()
+        .zip(segment_widths.into_iter().zip(graph_widths))
+        .enumerate()
+        .map(|(index, ((item, label, separator, usage_text, fixed), (segment_width, graph_width)))| {
+            let render_metric = document_render_metric(item.source());
+            let metric_history = histories
+                .get(item.source())
+                .map(|history| {
+                    history
+                        .iter()
+                        .copied()
+                        .filter_map(CanonicalValue::normalized_metric_value)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let item_hues =
+                metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
+            let graph = match config.renderer {
+                Renderer::Braille => render_braille_graph(
+                    &metric_history,
+                    graph_width,
+                    render_metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
+                Renderer::Block => render_block_graph(
+                    &metric_history,
+                    graph_width,
+                    render_metric,
+                    Some(&item_hues),
+                    color_enabled,
+                ),
+            };
+            let text_only = format!("{label}{separator}{usage_text}");
+            let value = sample.values.get(item.source()).copied();
+
+            let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                let label = paint_unavailable_text(&label, color_enabled);
+                let usage_text = paint_unavailable_text(&usage_text, color_enabled);
+                let graph = render_unavailable_graph(graph_width, config.renderer, color_enabled);
+                if graph_width == 0 {
+                    format!("{label}{separator}{usage_text}")
+                } else {
+                    match config.align {
+                        Align::Left => {
+                            if text_only.is_empty() {
+                                graph
+                            } else {
+                                format!("{label}{separator}{usage_text} {graph}")
+                            }
+                        }
+                        Align::Right => {
+                            if label.is_empty() {
+                                if usage_text.is_empty() {
+                                    graph
+                                } else {
+                                    format!("{graph} {usage_text}")
+                                }
+                            } else {
+                                format!("{label} {graph} {usage_text}")
+                            }
+                        }
+                    }
+                }
+            } else if graph_width == 0 {
+                pad_or_trim_visible(&text_only, segment_width.max(fixed))
+            } else {
+                pad_or_trim_visible(
+                    &match config.align {
+                        Align::Left => {
+                            if text_only.is_empty() {
+                                graph.clone()
+                            } else {
+                                format!("{label}{separator}{usage_text} {graph}")
+                            }
+                        }
+                        Align::Right => {
+                            if label.is_empty() {
+                                if usage_text.is_empty() {
+                                    graph.clone()
+                                } else {
+                                    format!("{graph} {usage_text}")
+                                }
+                            } else {
+                                format!("{label} {graph} {usage_text}")
+                            }
+                        }
+                    },
+                    segment_width.max(fixed),
+                )
+            };
+
+            if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                pad_or_trim_visible(&text, segment_width.max(fixed))
+            } else {
+                text
+            }
+        })
+        .collect::<Vec<_>>();
+
+    pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
+}
+
+fn document_item_label(item: &Item) -> String {
+    match item.display() {
+        DisplayMode::Full => item
+            .label()
+            .map(str::to_owned)
+            .unwrap_or_else(|| match item.source() {
+                Source::Metric(metric) => metric.short_label().to_owned(),
+                Source::SplitMetric(_, _) => String::new(),
+                Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
+            }),
+        DisplayMode::Value | DisplayMode::Bare => String::new(),
+    }
+}
+
+fn document_item_usage_text(
+    item: &Item,
+    value: Option<CanonicalValue>,
+    headline_value: Option<HeadlineValue>,
+) -> String {
+    if !matches!(item.display(), DisplayMode::Full | DisplayMode::Value) {
+        return String::new();
+    }
+
+    match item.source() {
+        Source::Metric(metric) => value
+            .and_then(CanonicalValue::normalized_metric_value)
+            .map(|value| {
+                metric.format_value(
+                    item.view(),
+                    value.headline_value(),
+                    &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
+                )
+            })
+            .unwrap_or_else(|| "N/A".to_owned()),
+        Source::SplitMetric(_, _) => String::new(),
+        Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
+    }
+}
+
+fn document_render_metric(source: &Source) -> MetricKind {
+    match source {
+        Source::Metric(metric) => *metric,
+        Source::SplitMetric(_, _) => MetricKind::Sys,
+        Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => MetricKind::Cpu,
+    }
 }
 
 fn render_stream_rows(
