@@ -2867,16 +2867,6 @@ fn render_braille_graph_with_options(
     out
 }
 
-fn render_split_braille_graph(
-    samples: &[MetricValue],
-    width: usize,
-    metric: MetricKind,
-    hues: Option<&BaseHues>,
-    color_enabled: bool,
-) -> String {
-    render_split_braille_graph_with_options(samples, width, metric, hues, color_enabled, false)
-}
-
 fn render_split_braille_graph_with_options(
     samples: &[MetricValue],
     width: usize,
