@@ -239,7 +239,9 @@ pub fn split_gradients_for(metric: MetricKind) -> Option<(Gradient, Gradient)> {
 pub fn visible_hues(count: usize, explicit: Option<&[ColorSpec]>) -> Vec<ColorSpec> {
     if let Some(values) = explicit {
         if !values.is_empty() {
-            return values.to_vec();
+            return (0..count)
+                .map(|index| values[index % values.len()])
+                .collect();
         }
     }
 
@@ -605,6 +607,20 @@ mod tests {
                 ColorSpec::Angle(5.0),
                 ColorSpec::Angle(15.0),
                 ColorSpec::Angle(25.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn visible_hues_cycles_short_explicit_palettes() {
+        assert_eq!(
+            visible_hues(5, Some(&[ColorSpec::Angle(10.0), ColorSpec::Angle(20.0)])),
+            vec![
+                ColorSpec::Angle(10.0),
+                ColorSpec::Angle(20.0),
+                ColorSpec::Angle(10.0),
+                ColorSpec::Angle(20.0),
+                ColorSpec::Angle(10.0),
             ]
         );
     }
