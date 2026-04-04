@@ -130,12 +130,12 @@ fn zsh_completion_script() -> &'static str {
     r#"#compdef monlin
 
 _monlin_layout() {
-  local cur token prefix base
-  local -a metrics
-    metrics=(
-        cpu
-        xpu
-        rnd
+  local cur token prefix label_prefix base
+  local -a metric_sources sources suffixes stream_refs sizes
+  metric_sources=(
+    cpu
+    xpu
+    rnd
     sys
     gpu
     vram
@@ -147,41 +147,73 @@ _monlin_layout() {
     storage
     disk
     space
-        spc
-        io
-        net
-        in
-        out
-        rx
-        tx
-        all
-        avail
-    'f:/path/to/file'
-    'p:command'
-    'label1,label2=f:/path/to/file'
-    'label1,label2=p:command'
+    spc
+    io
+    net
+    in
+    out
+    rx
+    tx
+    all
+    avail
   )
+  stream_refs=(@1 @2 @3 @4 @5 @6 @7 @8)
+  sources=($metric_sources $stream_refs 'f:' 'p:' '(')
+  suffixes=(pct hum free full value bare)
+  sizes=(1 2 3 4 6 8 10 12 16 24)
 
   cur="${words[CURRENT]}"
-  token="${cur##*,}"
+  token="${cur##*[\(,]}"
   prefix="${cur%$token}"
+  label_prefix=""
+
+  if [[ "$token" == *"="* ]]; then
+    label_prefix="${token%%=*}="
+    token="${token#*=}"
+  fi
+
+  if [[ "$token" == f:* ]]; then
+    _files -P "${prefix}${label_prefix}f:"
+    return
+  fi
+
+  if [[ "$token" == p:* ]]; then
+    return
+  fi
+
+  if [[ "$token" == *"+"* ]]; then
+    base="${token%+*}+"
+    compadd -Q -P "${prefix}${label_prefix}${base}" -- $metric_sources
+    return
+  fi
+
+  if [[ "$token" == *":"* ]]; then
+    base="${token%%:*}:"
+    compadd -Q -P "${prefix}${label_prefix}${base}" -- $sizes
+    return
+  fi
+
+  if [[ "$token" == @* ]]; then
+    compadd -Q -P "${prefix}${label_prefix}" -- $stream_refs
+    return
+  fi
 
   if [[ "$token" == *.* ]]; then
     base="${token%%.*}"
     case "$base" in
-      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|in|out|rx|tx|all|avail)
-        compadd -Q -P "${prefix}${base}." -- pct hum free
+      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|in|out|rx|tx|all|avail|@*)
+        compadd -Q -P "${prefix}${label_prefix}${base}." -- $suffixes
         return
         ;;
     esac
   fi
 
-  if [[ -n "$prefix" ]]; then
-    compadd -Q -P "$prefix" -- $metrics
+  if [[ -n "$prefix" || -n "$label_prefix" ]]; then
+    compadd -Q -P "${prefix}${label_prefix}" -- $sources
     return
   fi
 
-  _describe -t metrics 'layout item' \
+  _describe -t sources 'layout item or source' \
     'cpu:CPU usage' \
     'xpu:CPU and GPU pair' \
     'rnd:Synthetic random metric' \
@@ -205,10 +237,12 @@ _monlin_layout() {
     'tx:Network transmit' \
     'all:Canonical multi-row layout' \
     'avail:Canonical multi-row layout filtered to available metrics' \
+    '@1:First stdin stream column' \
+    '@2:Second stdin stream column' \
     'f:/path/to/file:Poll a file for numeric rows' \
     'p:command:Poll a shell command for numeric rows' \
-    'label1,label2=f:/path/to/file:Poll a file and label the stream columns' \
-    'label1,label2=p:command:Poll a command and label the stream columns'
+    '(:Start a grouped layout expression' \
+    'label=source:Label a source or group'
 }
 
 _monlin() {
@@ -223,6 +257,7 @@ _monlin() {
     '--align:Place the value before or after the graph'
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'
     '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
+    '--solid-colors:Disable palette or theme shading for full-intensity colors'
     '--label:Prefix every rendered line with a label'
     '--labels:Comma-separated labels for stdin stream columns'
     '--stream-layout:Render streamed stdin as columns or lines'
@@ -2167,7 +2202,9 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_space_option() {
         let script = zsh_completion_script();
-        assert!(script.contains("pct hum free"));
+        assert!(script.contains("pct hum free full value bare"));
+        assert!(script.contains("--solid-colors"));
+        assert!(script.contains("@1"));
         assert!(script.contains("--space:How streamed columns allocate width"));
     }
 
