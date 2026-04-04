@@ -71,6 +71,16 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     {
         return Err("stream column references like @1 require stdin input".to_owned());
     }
+    if config
+        .document
+        .as_ref()
+        .is_some_and(|document| document.uses_stream_columns())
+        && config.external_input.is_none()
+        && !config.force_stream_input
+        && io::stdin().is_terminal()
+    {
+        return Err("stream column references like @1 require stdin input".to_owned());
+    }
 
     if let Some(result) = maybe_run_document_sources(&config)? {
         return result;
@@ -463,6 +473,43 @@ fn stream_groups_from_external_document(
     Ok((groups, ordered_sources))
 }
 
+fn stream_groups_from_stream_document(document: &Document) -> Result<Vec<StreamGroup>, String> {
+    let mut groups: Vec<StreamGroup> = Vec::new();
+
+    for row in document.rows() {
+        let mut rendered_row = Vec::with_capacity(row.items().len());
+        for item in row.items() {
+            let column_index = match item.source() {
+                Source::StreamColumn(index) => *index,
+                Source::Metric(_) | Source::File(_) | Source::Process(_) => {
+                    return Err(
+                        "document stream rendering currently supports only @N items".to_owned(),
+                    )
+                }
+            };
+            rendered_row.push(StreamItem {
+                label: item.label().map(str::to_owned),
+                column_index,
+                display: item.display(),
+                basis: item.size(),
+                max_width: item.max_width(),
+                min_width: item.min_width(),
+            });
+        }
+
+        let row_label = row.label().map(str::to_owned);
+        match groups.last_mut() {
+            Some(group) if group.label == row_label => group.rows.push(rendered_row),
+            _ => groups.push(StreamGroup {
+                label: row_label,
+                rows: vec![rendered_row],
+            }),
+        }
+    }
+
+    Ok(groups)
+}
+
 fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>>, String> {
     let should_probe = config.force_stream_input || !io::stdin().is_terminal();
     if !should_probe {
@@ -480,11 +527,21 @@ fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>
             return Ok(None);
         }
     };
-    validate_stream_shape(config, first_frame.len())?;
+    let groups = config
+        .document
+        .as_ref()
+        .filter(|document| document.uses_stream_columns())
+        .map(stream_groups_from_stream_document)
+        .transpose()?;
+    let mut render_config = config.clone();
+    if let Some(groups) = groups {
+        render_config.stream_groups = Some(groups);
+    }
+    validate_stream_shape(&render_config, first_frame.len())?;
 
-    let result = match config.output_mode {
-        OutputMode::Terminal => run_stream_terminal(config, &mut reader, first_frame),
-        OutputMode::I3bar => run_stream_i3bar(config, &mut reader, first_frame),
+    let result = match render_config.output_mode {
+        OutputMode::Terminal => run_stream_terminal(&render_config, &mut reader, first_frame),
+        OutputMode::I3bar => run_stream_i3bar(&render_config, &mut reader, first_frame),
     };
     Ok(Some(result))
 }
