@@ -35,6 +35,10 @@ impl LayoutView {
             _ => None,
         }
     }
+
+    pub fn names() -> &'static [&'static str] {
+        &["pct", "hum", "free"]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,6 +57,48 @@ impl DisplayMode {
             _ => None,
         }
     }
+
+    pub fn names() -> &'static [&'static str] {
+        &["full", "value", "bare"]
+    }
+}
+
+pub fn completion_source_specs() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("cpu", "CPU usage"),
+        ("xpu", "CPU and GPU pair"),
+        ("rnd", "Synthetic random metric"),
+        ("sys", "CPU and RAM split"),
+        ("gpu", "GPU utilization"),
+        ("vram", "VRAM usage"),
+        ("vrm", "VRAM usage"),
+        ("gfx", "GPU and VRAM split"),
+        ("memory", "RAM usage"),
+        ("mem", "RAM and VRAM pair"),
+        ("ram", "RAM usage"),
+        ("storage", "Storage usage"),
+        ("disk", "Storage usage"),
+        ("space", "Storage usage"),
+        ("spc", "Storage usage"),
+        ("io", "Disk I/O split"),
+        ("net", "Network traffic split"),
+        ("in", "Disk input / reads"),
+        ("out", "Disk output / writes"),
+        ("rx", "Network receive"),
+        ("tx", "Network transmit"),
+        ("all", "Canonical multi-row layout"),
+        (
+            "avail",
+            "Canonical multi-row layout filtered to available metrics",
+        ),
+    ]
+}
+
+pub fn completion_source_names() -> Vec<&'static str> {
+    completion_source_specs()
+        .iter()
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 impl MetricKind {

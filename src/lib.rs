@@ -126,54 +126,95 @@ fn print_color_completion() {
     }
 }
 
-fn zsh_completion_script() -> &'static str {
-    r#"#compdef monlin
+fn zsh_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
 
-_monlin_layout() {
+fn zsh_words(values: &[&str]) -> String {
+    values.join(" ")
+}
+
+fn zsh_case_patterns(values: &[&str]) -> String {
+    values.join("|")
+}
+
+fn zsh_multiline_words(values: &[&str], indent: &str) -> String {
+    values
+        .iter()
+        .map(|value| format!("{indent}{value}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn zsh_describe_specs(specs: &[(&str, &str)], indent: &str) -> String {
+    specs
+        .iter()
+        .enumerate()
+        .map(|(index, (name, desc))| {
+            let line = format!(r#"{indent}{} \"#, zsh_quote(&format!("{name}:{desc}")));
+            if index + 1 == specs.len() {
+                line.trim_end_matches(" \\").to_owned()
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn zsh_completion_script() -> String {
+    let metric_sources = crate::layout::completion_source_names();
+    let metric_source_words = zsh_multiline_words(&metric_sources, "    ");
+    let metric_source_patterns = zsh_case_patterns(&metric_sources);
+    let mut suffixes = crate::layout::LayoutView::names().to_vec();
+    suffixes.extend(crate::layout::DisplayMode::names());
+    let suffix_words = zsh_words(&suffixes);
+    let color_names = crate::color::palette_names()
+        .iter()
+        .chain(crate::color::colormap_names().iter())
+        .copied()
+        .collect::<Vec<_>>();
+    let color_words = zsh_words(&color_names);
+    let source_specs = crate::layout::completion_source_specs()
+        .iter()
+        .map(|(name, desc)| (*name, *desc))
+        .chain([
+            ("@1", "First stdin stream column"),
+            ("@2", "Second stdin stream column"),
+            ("f:/path/to/file", "Poll a file for numeric rows"),
+            ("p:command", "Poll a shell command for numeric rows"),
+            ("(", "Start a grouped layout expression"),
+            ("label=source", "Label a source or group"),
+        ])
+        .collect::<Vec<_>>();
+    let described_sources = zsh_describe_specs(&source_specs, "    ");
+
+    format!(
+        r#"#compdef monlin
+
+_monlin_layout() {{
   local cur token prefix label_prefix base
   local -a metric_sources sources suffixes stream_refs sizes
   metric_sources=(
-    cpu
-    xpu
-    rnd
-    sys
-    gpu
-    vram
-    vrm
-    gfx
-    memory
-    mem
-    ram
-    storage
-    disk
-    space
-    spc
-    io
-    net
-    in
-    out
-    rx
-    tx
-    all
-    avail
+{metric_source_words}
   )
   stream_refs=(@1 @2 @3 @4 @5 @6 @7 @8)
   sources=($metric_sources $stream_refs 'f:' 'p:' '(')
-  suffixes=(pct hum free full value bare)
+  suffixes=({suffix_words})
   sizes=(1 2 3 4 6 8 10 12 16 24)
 
-  cur="${words[CURRENT]}"
-  token="${cur##*[\(,]}"
-  prefix="${cur%$token}"
+  cur="${{words[CURRENT]}}"
+  token="${{cur##*[\(,]}}"
+  prefix="${{cur%$token}}"
   label_prefix=""
 
   if [[ "$token" == *"="* ]]; then
-    label_prefix="${token%%=*}="
-    token="${token#*=}"
+    label_prefix="${{token%%=*}}="
+    token="${{token#*=}}"
   fi
 
   if [[ "$token" == f:* ]]; then
-    _files -P "${prefix}${label_prefix}f:"
+    _files -P "${{prefix}}${{label_prefix}}f:"
     return
   fi
 
@@ -182,73 +223,45 @@ _monlin_layout() {
   fi
 
   if [[ "$token" == *"+"* ]]; then
-    base="${token%+*}+"
-    compadd -Q -P "${prefix}${label_prefix}${base}" -- $metric_sources
+    base="${{token%+*}}+"
+    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $metric_sources
     return
   fi
 
   if [[ "$token" == *":"* ]]; then
-    base="${token%%:*}:"
-    compadd -Q -P "${prefix}${label_prefix}${base}" -- $sizes
+    base="${{token%%:*}}:"
+    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $sizes
     return
   fi
 
   if [[ "$token" == @* ]]; then
-    compadd -Q -P "${prefix}${label_prefix}" -- $stream_refs
+    compadd -Q -P "${{prefix}}${{label_prefix}}" -- $stream_refs
     return
   fi
 
   if [[ "$token" == *.* ]]; then
-    base="${token%%.*}"
+    base="${{token%%.*}}"
     case "$base" in
-      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|in|out|rx|tx|all|avail|@*)
-        compadd -Q -P "${prefix}${label_prefix}${base}." -- $suffixes
+      {metric_source_patterns}|@*)
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}." -- $suffixes
         return
         ;;
     esac
   fi
 
   if [[ -n "$prefix" || -n "$label_prefix" ]]; then
-    compadd -Q -P "${prefix}${label_prefix}" -- $sources
+    compadd -Q -P "${{prefix}}${{label_prefix}}" -- $sources
     return
   fi
 
   _describe -t sources 'layout item or source' \
-    'cpu:CPU usage' \
-    'xpu:CPU and GPU pair' \
-    'rnd:Synthetic random metric' \
-    'sys:CPU and RAM split' \
-    'gpu:GPU utilization' \
-    'vram:VRAM usage' \
-    'vrm:VRAM usage' \
-    'gfx:GPU and VRAM split' \
-    'memory:RAM usage' \
-    'mem:RAM and VRAM pair' \
-    'ram:RAM usage' \
-    'storage:Storage usage' \
-    'disk:Storage usage' \
-    'space:Storage usage' \
-    'spc:Storage usage' \
-    'io:Disk I/O split' \
-    'net:Network traffic split' \
-    'in:Disk input / reads' \
-    'out:Disk output / writes' \
-    'rx:Network receive' \
-    'tx:Network transmit' \
-    'all:Canonical multi-row layout' \
-    'avail:Canonical multi-row layout filtered to available metrics' \
-    '@1:First stdin stream column' \
-    '@2:Second stdin stream column' \
-    'f:/path/to/file:Poll a file for numeric rows' \
-    'p:command:Poll a shell command for numeric rows' \
-    '(:Start a grouped layout expression' \
-    'label=source:Label a source or group'
-}
+{described_sources}
+}}
 
-_monlin() {
+_monlin() {{
   local cur prev
-  cur="${words[CURRENT]}"
-  prev="${words[CURRENT-1]}"
+  cur="${{words[CURRENT]}}"
+  prev="${{words[CURRENT-1]}}"
 
   local -a opts commands debug_commands shells
   opts=(
@@ -297,7 +310,7 @@ _monlin() {
       return
       ;;
     -c|--colors)
-      compadd default canonical rainbow warm cool pastel neon solarized solarized-light gruvbox gruvbox-light nord catppuccin catppuccin-latte catppuccin-frappe catppuccin-macchiato catppuccin-mocha tokyonight tokyonight-storm tokyonight-light dracula turbo viridis plasma magma inferno
+      compadd {color_words}
       return
       ;;
     --renderer)
@@ -322,14 +335,14 @@ _monlin() {
       ;;
   esac
 
-  if [[ "${words[2]}" == "completion" ]]; then
+  if [[ "${{words[2]}}" == "completion" ]]; then
     if (( CURRENT == 3 )); then
       compadd $shells
     fi
     return
   fi
 
-  if [[ "${words[2]}" == "debug" ]]; then
+  if [[ "${{words[2]}}" == "debug" ]]; then
     if (( CURRENT == 3 )); then
       compadd $debug_commands
       return
@@ -351,10 +364,11 @@ _monlin() {
       'debug:Debug rendering helpers'
   fi
   _monlin_layout
-}
+}}
 
 _monlin "$@"
 "#
+    )
 }
 
 fn print_debug_colors(
