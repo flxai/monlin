@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+if command -v cargo >/dev/null 2>&1; then
+  cargo fmt --all
+elif command -v nix >/dev/null 2>&1; then
+  nix develop -c cargo fmt --all
+else
+  echo "pre-commit: neither cargo nor nix is available" >&2
+  exit 1
+fi
+
+git add -- '*.rs' '*.nix' '*.toml' '.github/workflows/*.yml'

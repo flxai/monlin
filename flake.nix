@@ -112,8 +112,14 @@
           packages = with pkgs; [
             cargo-llvm-cov
             llvmPackages_21.llvm
+            rustfmt
             rust-analyzer
           ];
+          shellHook = ''
+            if [ -d .git ]; then
+              git config core.hooksPath .githooks
+            fi
+          '';
         };
       };
     };

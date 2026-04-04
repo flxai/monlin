@@ -8,7 +8,9 @@ use crate::color::{
     split_gradients_for_with_hues, visible_hues, BaseHues, ColorSpec,
 };
 use crate::config::{Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout};
-use crate::layout::{DisplayMode, Document, Item, Layout, LayoutItem, LayoutView, MetricKind, Source};
+use crate::layout::{
+    DisplayMode, Document, Item, Layout, LayoutItem, LayoutView, MetricKind, Source,
+};
 use crate::metrics::{CanonicalSample, CanonicalValue, HeadlineValue, MetricValue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -167,7 +169,11 @@ pub fn render_document_lines(
     document: &Document,
     sample: &CanonicalSample,
 ) -> Vec<String> {
-    let total_items = document.rows().iter().map(|row| row.items().len()).sum::<usize>();
+    let total_items = document
+        .rows()
+        .iter()
+        .map(|row| row.items().len())
+        .sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let outer_prefix = config
         .label
@@ -440,37 +446,43 @@ fn grid_column_specs(
     let stable_layout = matches!(config.space, Space::Stable);
     let mut label_widths = vec![0; column_count];
     let mut value_widths = vec![0; column_count];
-    let mut column_items =
-        vec![
-            LayoutItem::with_constraints(
-                MetricKind::Cpu,
-                LayoutView::Default,
-                DisplayMode::Full,
-                None,
-                1,
-                None,
-                None
-            );
-            column_count
-        ];
+    let mut column_items = vec![
+        LayoutItem::with_constraints(
+            MetricKind::Cpu,
+            LayoutView::Default,
+            DisplayMode::Full,
+            None,
+            1,
+            None,
+            None
+        );
+        column_count
+    ];
     let mut column_item_seen = vec![false; column_count];
 
     for items in layout.rows() {
         for (index, item) in items.iter().enumerate() {
             let metric = item.metric();
-            label_widths[index] = label_widths[index].max(display_label_width(metric, item.display()));
-            value_widths[index] = value_widths[index].max(if let Some(value) = values.get(&metric).copied() {
-                display_value_width(
-                    metric,
-                    item.view(),
-                    item.display(),
-                    value,
-                    headline_values.get(&metric).copied(),
-                    stable_layout,
-                )
-            } else {
-                unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
-            });
+            label_widths[index] =
+                label_widths[index].max(display_label_width(metric, item.display()));
+            value_widths[index] =
+                value_widths[index].max(if let Some(value) = values.get(&metric).copied() {
+                    display_value_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        value,
+                        headline_values.get(&metric).copied(),
+                        stable_layout,
+                    )
+                } else {
+                    unavailable_display_value_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        stable_layout,
+                    )
+                });
             let merged_basis = match (
                 column_item_seen[index],
                 column_items[index].basis(),
@@ -584,18 +596,26 @@ fn shared_column_text_widths(
             text_widths[index].0 = text_widths[index]
                 .0
                 .max(display_label_width(metric, item.display()));
-            text_widths[index].1 = text_widths[index].1.max(if let Some(value) = values.get(&metric).copied() {
-                display_value_width(
-                    metric,
-                    item.view(),
-                    item.display(),
-                    value,
-                    headline_values.get(&metric).copied(),
-                    stable_layout,
-                )
-            } else {
-                unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
-            });
+            text_widths[index].1 =
+                text_widths[index]
+                    .1
+                    .max(if let Some(value) = values.get(&metric).copied() {
+                        display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            value,
+                            headline_values.get(&metric).copied(),
+                            stable_layout,
+                        )
+                    } else {
+                        unavailable_display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            stable_layout,
+                        )
+                    });
         }
     }
 
@@ -680,7 +700,12 @@ fn flex_row_specs(
                             stable_layout,
                         )
                     } else {
-                        unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+                        unavailable_display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            stable_layout,
+                        )
                     }
                 })
         })
@@ -761,7 +786,12 @@ fn pack_row_specs(
                             stable_layout,
                         )
                     } else {
-                        unavailable_display_value_width(metric, item.view(), item.display(), stable_layout)
+                        unavailable_display_value_width(
+                            metric,
+                            item.view(),
+                            item.display(),
+                            stable_layout,
+                        )
                     }
                 })
         })
@@ -865,7 +895,7 @@ fn stable_layout_column_widths(
     for items in layout.rows() {
         for (index, item) in items.iter().enumerate() {
             let metric = item.metric();
-                fixed_widths[index] =
+            fixed_widths[index] =
                 fixed_widths[index].max(if let Some(value) = values.get(&metric).copied() {
                     segment_fixed_width(
                         metric,
@@ -877,7 +907,13 @@ fn stable_layout_column_widths(
                         true,
                     )
                 } else {
-                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, true)
+                    unavailable_segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        label_width,
+                        true,
+                    )
                 });
         }
     }
@@ -1255,101 +1291,107 @@ fn render_document_row(
         .into_iter()
         .zip(segment_widths.into_iter().zip(graph_widths))
         .enumerate()
-        .map(|(index, ((item, label, separator, usage_text, fixed), (segment_width, graph_width)))| {
-            let render_metric = document_render_metric(item.source());
-            let metric_history = histories
-                .get(item.source())
-                .map(|history| {
-                    history
-                        .iter()
-                        .copied()
-                        .filter_map(CanonicalValue::normalized_metric_value)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            let item_hues =
-                metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
-            let graph = match config.renderer {
-                Renderer::Braille => render_braille_graph(
-                    &metric_history,
-                    graph_width,
-                    render_metric,
-                    Some(&item_hues),
-                    color_enabled,
-                ),
-                Renderer::Block => render_block_graph(
-                    &metric_history,
-                    graph_width,
-                    render_metric,
-                    Some(&item_hues),
-                    color_enabled,
-                ),
-            };
-            let text_only = format!("{label}{separator}{usage_text}");
-            let value = sample.values.get(item.source()).copied();
+        .map(
+            |(
+                index,
+                ((item, label, separator, usage_text, fixed), (segment_width, graph_width)),
+            )| {
+                let render_metric = document_render_metric(item.source());
+                let metric_history = histories
+                    .get(item.source())
+                    .map(|history| {
+                        history
+                            .iter()
+                            .copied()
+                            .filter_map(CanonicalValue::normalized_metric_value)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let item_hues =
+                    metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
+                let graph = match config.renderer {
+                    Renderer::Braille => render_braille_graph(
+                        &metric_history,
+                        graph_width,
+                        render_metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                    Renderer::Block => render_block_graph(
+                        &metric_history,
+                        graph_width,
+                        render_metric,
+                        Some(&item_hues),
+                        color_enabled,
+                    ),
+                };
+                let text_only = format!("{label}{separator}{usage_text}");
+                let value = sample.values.get(item.source()).copied();
 
-            let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
-                let label = paint_unavailable_text(&label, color_enabled);
-                let usage_text = paint_unavailable_text(&usage_text, color_enabled);
-                let graph = render_unavailable_graph(graph_width, config.renderer, color_enabled);
-                if graph_width == 0 {
-                    format!("{label}{separator}{usage_text}")
-                } else {
-                    match config.align {
-                        Align::Left => {
-                            if text_only.is_empty() {
-                                graph
-                            } else {
-                                format!("{label}{separator}{usage_text} {graph}")
-                            }
-                        }
-                        Align::Right => {
-                            if label.is_empty() {
-                                if usage_text.is_empty() {
+                let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                    let label = paint_unavailable_text(&label, color_enabled);
+                    let usage_text = paint_unavailable_text(&usage_text, color_enabled);
+                    let graph =
+                        render_unavailable_graph(graph_width, config.renderer, color_enabled);
+                    if graph_width == 0 {
+                        format!("{label}{separator}{usage_text}")
+                    } else {
+                        match config.align {
+                            Align::Left => {
+                                if text_only.is_empty() {
                                     graph
                                 } else {
-                                    format!("{graph} {usage_text}")
+                                    format!("{label}{separator}{usage_text} {graph}")
                                 }
-                            } else {
-                                format!("{label} {graph} {usage_text}")
+                            }
+                            Align::Right => {
+                                if label.is_empty() {
+                                    if usage_text.is_empty() {
+                                        graph
+                                    } else {
+                                        format!("{graph} {usage_text}")
+                                    }
+                                } else {
+                                    format!("{label} {graph} {usage_text}")
+                                }
                             }
                         }
                     }
-                }
-            } else if graph_width == 0 {
-                pad_or_trim_visible(&text_only, segment_width.max(fixed))
-            } else {
-                pad_or_trim_visible(
-                    &match config.align {
-                        Align::Left => {
-                            if text_only.is_empty() {
-                                graph.clone()
-                            } else {
-                                format!("{label}{separator}{usage_text} {graph}")
-                            }
-                        }
-                        Align::Right => {
-                            if label.is_empty() {
-                                if usage_text.is_empty() {
+                } else if graph_width == 0 {
+                    pad_or_trim_visible(&text_only, segment_width.max(fixed))
+                } else {
+                    pad_or_trim_visible(
+                        &match config.align {
+                            Align::Left => {
+                                if text_only.is_empty() {
                                     graph.clone()
                                 } else {
-                                    format!("{graph} {usage_text}")
+                                    format!("{label}{separator}{usage_text} {graph}")
                                 }
-                            } else {
-                                format!("{label} {graph} {usage_text}")
                             }
-                        }
-                    },
-                    segment_width.max(fixed),
-                )
-            };
+                            Align::Right => {
+                                if label.is_empty() {
+                                    if usage_text.is_empty() {
+                                        graph.clone()
+                                    } else {
+                                        format!("{graph} {usage_text}")
+                                    }
+                                } else {
+                                    format!("{label} {graph} {usage_text}")
+                                }
+                            }
+                        },
+                        segment_width.max(fixed),
+                    )
+                };
 
-            if matches!(value, Some(CanonicalValue::Unavailable) | None) {
-                pad_or_trim_visible(&text, segment_width.max(fixed))
-            } else {
-                text
-            }
-        })
+                if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                    pad_or_trim_visible(&text, segment_width.max(fixed))
+                } else {
+                    text
+                }
+            },
+        )
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
@@ -1357,14 +1399,15 @@ fn render_document_row(
 
 fn document_item_label(item: &Item) -> String {
     match item.display() {
-        DisplayMode::Full => item
-            .label()
-            .map(str::to_owned)
-            .unwrap_or_else(|| match item.source() {
-                Source::Metric(metric) => metric.short_label().to_owned(),
-                Source::SplitMetric(_, _) => String::new(),
-                Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
-            }),
+        DisplayMode::Full => {
+            item.label()
+                .map(str::to_owned)
+                .unwrap_or_else(|| match item.source() {
+                    Source::Metric(metric) => metric.short_label().to_owned(),
+                    Source::SplitMetric(_, _) => String::new(),
+                    Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
+                })
+        }
         DisplayMode::Value | DisplayMode::Bare => String::new(),
     }
 }
@@ -1385,7 +1428,8 @@ fn document_item_usage_text(
                 metric.format_value(
                     item.view(),
                     value.headline_value(),
-                    &headline_value.unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
+                    &headline_value
+                        .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
                 )
             })
             .unwrap_or_else(|| "N/A".to_owned()),
@@ -1701,7 +1745,13 @@ fn render_row(
                         stable_layout,
                     )
                 } else {
-                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, stable_layout)
+                    unavailable_segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        label_width,
+                        stable_layout,
+                    )
                 };
                 widths[index].saturating_sub(fixed + 1)
             })
@@ -1723,7 +1773,13 @@ fn render_row(
                         stable_layout,
                     )
                 } else {
-                    unavailable_segment_fixed_width(metric, item.view(), item.display(), label_width, stable_layout)
+                    unavailable_segment_fixed_width(
+                        metric,
+                        item.view(),
+                        item.display(),
+                        label_width,
+                        stable_layout,
+                    )
                 }
             })
             .collect::<Vec<_>>();
@@ -2079,8 +2135,13 @@ fn render_unavailable_segment(
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) =
-        unavailable_segment_text_parts(metric, item.view(), item.display(), label_width, stable_layout);
+    let (label, label_usage_separator, usage_text, fixed) = unavailable_segment_text_parts(
+        metric,
+        item.view(),
+        item.display(),
+        label_width,
+        stable_layout,
+    );
     let label = paint_unavailable_text(&label, color_enabled);
     let usage_text = paint_unavailable_text(&usage_text, color_enabled);
     let graph = render_unavailable_graph(graph_width, renderer, color_enabled);
@@ -2223,7 +2284,9 @@ fn unavailable_segment_text_parts(
         DisplayMode::Value | DisplayMode::Bare => String::new(),
     };
     let usage_text = match display {
-        DisplayMode::Full | DisplayMode::Value => unavailable_usage_text(metric, view, stable_layout),
+        DisplayMode::Full | DisplayMode::Value => {
+            unavailable_usage_text(metric, view, stable_layout)
+        }
         DisplayMode::Bare => String::new(),
     };
     let label_usage_separator = match (display, metric) {
@@ -2815,7 +2878,7 @@ mod tests {
         let layout = crate::layout::parse_layout_spec("cpu gpu").unwrap();
         let lines = render_lines(
             &Config {
-            document: None,
+                document: None,
                 layout: layout.clone(),
                 ..config
             },
@@ -3343,8 +3406,14 @@ mod tests {
                     lower: 0.4,
                 }]),
             ),
-            (MetricKind::Ingress, VecDeque::from(vec![MetricValue::Single(0.25)])),
-            (MetricKind::Egress, VecDeque::from(vec![MetricValue::Single(0.2)])),
+            (
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.25)]),
+            ),
+            (
+                MetricKind::Egress,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
         ]);
         let values = HashMap::from([
             (MetricKind::Cpu, MetricValue::Single(0.07)),

@@ -307,12 +307,8 @@ impl Sampler {
                     storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
                 }
                 MetricKind::Io => io_value.map(|sample| sample.value),
-                MetricKind::In => {
-                    io_value.map(|sample| MetricValue::Single(sample.value.lower()))
-                }
-                MetricKind::Out => {
-                    io_value.map(|sample| MetricValue::Single(sample.value.upper()))
-                }
+                MetricKind::In => io_value.map(|sample| MetricValue::Single(sample.value.lower())),
+                MetricKind::Out => io_value.map(|sample| MetricValue::Single(sample.value.upper())),
                 MetricKind::Net => net_value.map(|sample| sample.value),
                 MetricKind::Ingress => {
                     net_value.map(|sample| MetricValue::Single(sample.value.upper()))
@@ -326,8 +322,12 @@ impl Sampler {
                 let headline = match metric {
                     MetricKind::Io => io_value
                         .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
-                    MetricKind::In => io_value.map(|sample| HeadlineValue::Scalar(sample.lower_raw)),
-                    MetricKind::Out => io_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw)),
+                    MetricKind::In => {
+                        io_value.map(|sample| HeadlineValue::Scalar(sample.lower_raw))
+                    }
+                    MetricKind::Out => {
+                        io_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw))
+                    }
                     MetricKind::Net => net_value
                         .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
                     MetricKind::Ingress => {
@@ -373,7 +373,10 @@ impl Sampler {
                     .get(metric)
                     .copied()
                     .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value()));
-                values.insert(source.clone(), canonicalize_metric_value(*metric, value, headline));
+                values.insert(
+                    source.clone(),
+                    canonicalize_metric_value(*metric, value, headline),
+                );
                 headlines.insert(source, headline);
             }
         }

@@ -552,9 +552,9 @@ impl Document {
 
     pub fn uses_external_sources(&self) -> bool {
         self.rows.iter().any(|row| {
-            row.items.iter().any(|item| {
-                matches!(item.source, Source::File(_) | Source::Process(_))
-            })
+            row.items
+                .iter()
+                .any(|item| matches!(item.source, Source::File(_) | Source::Process(_)))
         })
     }
 
@@ -910,12 +910,8 @@ fn parse_document_rows(
                 }
             }
             _ => {
-                let rows_for_entry = parse_document_entry(
-                    parser,
-                    explicit_rows,
-                    hinted_rows,
-                    filter_available,
-                )?;
+                let rows_for_entry =
+                    parse_document_entry(parser, explicit_rows, hinted_rows, filter_available)?;
                 if rows_for_entry.len() == 1 && rows_for_entry[0].label.is_none() {
                     for item in &rows_for_entry[0].items {
                         push_unique_document_metrics(flat, &item.source);
@@ -925,7 +921,9 @@ fn parse_document_rows(
                 } else {
                     *force_explicit_rows = true;
                     if !current.is_empty() {
-                        return Err("grouped macros cannot appear inline with other items".to_owned());
+                        return Err(
+                            "grouped macros cannot appear inline with other items".to_owned()
+                        );
                     }
                     for row in rows_for_entry {
                         for item in &row.items {
@@ -1114,7 +1112,16 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
             items: all_metrics()
                 .iter()
                 .copied()
-                .map(|metric| Item::metric(metric, LayoutView::Default, DisplayMode::Full, 1, None, None))
+                .map(|metric| {
+                    Item::metric(
+                        metric,
+                        LayoutView::Default,
+                        DisplayMode::Full,
+                        1,
+                        None,
+                        None,
+                    )
+                })
                 .collect(),
         }));
     }
@@ -1131,44 +1138,45 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
         }));
     }
 
-    let (count, filter_available, view, metrics) = if let Some(view_token) = token.strip_prefix("all.") {
-        if view_token.contains(':')
-            || view_token.contains('/')
-            || view_token.contains('+')
-            || view_token.contains('-')
-        {
-            return Err("all does not support size or width constraints".to_owned());
-        }
-        (
-            2,
-            false,
-            LayoutView::parse(view_token)
-                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-            all_metrics().to_vec(),
-        )
-    } else if let Some(view_token) = token.strip_prefix("avail.") {
-        if view_token.contains(':')
-            || view_token.contains('/')
-            || view_token.contains('+')
-            || view_token.contains('-')
-        {
-            return Err("avail does not support size or width constraints".to_owned());
-        }
-        return Ok(Some(ParsedEntry::Items {
-            count: 1,
-            filter_available: true,
-            items: default_avail_document_rows(
+    let (count, filter_available, view, metrics) =
+        if let Some(view_token) = token.strip_prefix("all.") {
+            if view_token.contains(':')
+                || view_token.contains('/')
+                || view_token.contains('+')
+                || view_token.contains('-')
+            {
+                return Err("all does not support size or width constraints".to_owned());
+            }
+            (
+                2,
+                false,
                 LayoutView::parse(view_token)
                     .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+                all_metrics().to_vec(),
             )
-            .into_iter()
-            .next()
-            .map(|row| row.items)
-            .unwrap_or_default(),
-        }));
-    } else {
-        return Ok(None);
-    };
+        } else if let Some(view_token) = token.strip_prefix("avail.") {
+            if view_token.contains(':')
+                || view_token.contains('/')
+                || view_token.contains('+')
+                || view_token.contains('-')
+            {
+                return Err("avail does not support size or width constraints".to_owned());
+            }
+            return Ok(Some(ParsedEntry::Items {
+                count: 1,
+                filter_available: true,
+                items: default_avail_document_rows(
+                    LayoutView::parse(view_token)
+                        .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
+                )
+                .into_iter()
+                .next()
+                .map(|row| row.items)
+                .unwrap_or_default(),
+            }));
+        } else {
+            return Ok(None);
+        };
 
     Ok(Some(ParsedEntry::Items {
         count,
@@ -1185,7 +1193,10 @@ fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
     let (metrics, view) = if token == "xpu" {
         (vec![MetricKind::Cpu, MetricKind::Gpu], LayoutView::Default)
     } else if token == "mem" {
-        (vec![MetricKind::Memory, MetricKind::Vram], LayoutView::Default)
+        (
+            vec![MetricKind::Memory, MetricKind::Vram],
+            LayoutView::Default,
+        )
     } else if let Some(view_token) = token.strip_prefix("xpu.") {
         if view_token.contains(':')
             || view_token.contains('/')
@@ -1339,13 +1350,7 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
         let upper = MetricKind::parse(upper).ok_or_else(|| format!("unknown metric: {upper}"))?;
         let lower = MetricKind::parse(lower).ok_or_else(|| format!("unknown metric: {lower}"))?;
         return Ok(Item::split_metric(
-            label,
-            upper,
-            lower,
-            display,
-            size,
-            max_width,
-            min_width,
+            label, upper, lower, display, size, max_width, min_width,
         ));
     }
 
@@ -1530,7 +1535,10 @@ mod tests {
             parse_layout_document("cpu=@1 \"load avg\"=p:'cut -f 1 -d\\  /proc/loadavg'").unwrap();
         assert_eq!(document.rows().len(), 1);
         assert_eq!(document.rows()[0].items()[0].label(), Some("cpu"));
-        assert_eq!(document.rows()[0].items()[0].source(), &Source::StreamColumn(0));
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &Source::StreamColumn(0)
+        );
         assert_eq!(document.rows()[0].items()[1].label(), Some("load avg"));
         assert_eq!(
             document.rows()[0].items()[1].source(),

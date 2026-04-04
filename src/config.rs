@@ -2,7 +2,9 @@ use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 
 use crate::color::{named_palette, ColorSpec, Rgb};
-use crate::layout::{parse_layout_document, parse_layout_spec, DisplayMode, Document, Item, Layout, Row};
+use crate::layout::{
+    parse_layout_document, parse_layout_spec, DisplayMode, Document, Item, Layout, Row,
+};
 use crate::render::Renderer;
 
 const DEFAULT_INTERVAL_MS: u64 = 1000;
@@ -299,12 +301,9 @@ where
     let layout = if external_input.is_some()
         || stream_groups.is_some()
         || cli.layout_parts.is_empty()
-        || document
-            .as_ref()
-            .is_some_and(|document| {
-                !document.is_native_only() || document.uses_split_metrics() || document.has_row_labels()
-            })
-    {
+        || document.as_ref().is_some_and(|document| {
+            !document.is_native_only() || document.uses_split_metrics() || document.has_row_labels()
+        }) {
         Layout::default()
     } else {
         parse_layout_spec(&joined_layout)?
