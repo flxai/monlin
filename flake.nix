@@ -11,6 +11,7 @@
     eachSystem = nixpkgs.lib.genAttrs systems;
     forSystem = system: let
       pkgs = nixpkgs.legacyPackages.${system};
+      staticPkgs = pkgs.pkgsStatic;
       commonArgs = {
         version = "0.2.0";
         src = self;
@@ -27,6 +28,15 @@
       monlin = pkgs.rustPlatform.buildRustPackage (commonArgs // {
         pname = "monlin";
         doCheck = true;
+        postInstall = ''
+          installShellCompletion --cmd monlin \
+            --zsh <("$out/bin/monlin" completion zsh)
+        '';
+      });
+      monlin-static = staticPkgs.rustPlatform.buildRustPackage (commonArgs // {
+        pname = "monlin-static";
+        doCheck = false;
+        nativeBuildInputs = [pkgs.installShellFiles];
         postInstall = ''
           installShellCompletion --cmd monlin \
             --zsh <("$out/bin/monlin" completion zsh)
@@ -85,6 +95,7 @@
       packages = {
         default = monlin;
         monlin = monlin;
+        monlin-static = monlin-static;
       };
       checks = {
         default = monlin;

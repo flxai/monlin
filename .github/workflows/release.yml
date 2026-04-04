@@ -1,0 +1,29 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Run flake checks
+        run: nix flake check --keep-going
+      - name: Build static package
+        run: nix build .#monlin-static -L --out-link result-static
+      - name: Package release artifacts
+        run: |
+          chmod +x scripts/package-release.sh
+          scripts/package-release.sh "${GITHUB_REF_NAME#v}" x86_64-unknown-linux-musl result-static/bin/monlin
+      - name: Upload GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
