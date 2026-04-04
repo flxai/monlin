@@ -268,6 +268,8 @@ _monlin() {{
     '--history:Number of history samples to retain'
     '--interval-ms:Sampling interval in milliseconds'
     '--align:Place the value before or after the graph'
+    '-w:How to display retained history'
+    '--window:How to display retained history'
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'
     '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
     '--solid-colors:Disable palette or theme shading for full-intensity colors'
@@ -295,6 +297,10 @@ _monlin() {{
   case "$prev" in
     --align)
       compadd left right
+      return
+      ;;
+    -w|--window)
+      compadd agg tail
       return
       ;;
     --stream-layout)

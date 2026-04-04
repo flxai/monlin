@@ -66,6 +66,12 @@ pub enum Space {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum Window {
+    Agg,
+    Tail,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum LayoutEngine {
     Auto,
     Flow,
@@ -141,6 +147,7 @@ pub struct Config {
     pub align: Align,
     pub packed: bool,
     pub solid_colors: bool,
+    pub window: Window,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
     pub stream_groups: Option<Vec<StreamGroup>>,
@@ -208,6 +215,15 @@ struct Cli {
         help = "Disable palette/theme shading so non-colormap colors render at full intensity"
     )]
     solid_colors: bool,
+
+    #[arg(
+        short = 'w',
+        long = "window",
+        value_enum,
+        default_value_t = Window::Agg,
+        help = "How to display retained history: aggregate the full history or show only the recent tail"
+    )]
+    window: Window,
 
     #[arg(long, help = "Prefix every rendered line with a label")]
     label: Option<String>,
@@ -294,6 +310,7 @@ struct TomlConfig {
     packed: Option<bool>,
     #[serde(alias = "solid-colors")]
     solid_colors: Option<bool>,
+    window: Option<String>,
     label: Option<String>,
     #[serde(alias = "labels")]
     stream_labels: Option<StringList>,
@@ -435,6 +452,7 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         align: cli.align,
         packed: cli.packed,
         solid_colors: cli.solid_colors,
+        window: cli.window,
         label: cli.label,
         stream_labels: if !cli.stream_labels.is_empty() {
             Some(cli.stream_labels)
@@ -600,6 +618,7 @@ fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
     if config.solid_colors.unwrap_or(false) {
         args.push("--solid-colors".to_owned());
     }
+    push_flag_value(&mut args, "--window", config.window);
     push_flag_value(&mut args, "--label", config.label);
     if let Some(labels) = config.stream_labels.and_then(StringList::into_csv) {
         args.push("--labels".to_owned());
@@ -1124,6 +1143,12 @@ mod tests {
     fn parses_solid_colors_flag() {
         let config = parse(&["monlin", "--solid-colors"]);
         assert!(config.solid_colors);
+    }
+
+    #[test]
+    fn parses_window_flag() {
+        let config = parse(&["monlin", "-w", "tail"]);
+        assert_eq!(config.window, Window::Tail);
     }
 
     #[test]

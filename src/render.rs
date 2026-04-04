@@ -6,7 +6,9 @@ use clap::ValueEnum;
 use crate::color::{
     color_for_intensity, metric_hues_for_visible_hue, paint, visible_hues, BaseHues, ColorSpec,
 };
-use crate::config::{Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout};
+use crate::config::{
+    Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout, Window,
+};
 use crate::layout::{
     DisplayMode, Document, Item, Layout, LayoutItem, LayoutView, MetricKind, Source,
 };
@@ -282,6 +284,7 @@ fn render_packed_metric_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &samples,
@@ -290,6 +293,7 @@ fn render_packed_metric_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 }
             } else {
@@ -391,6 +395,7 @@ fn render_packed_document_row(
                     Some(&item_hues),
                     color_enabled,
                     config.solid_colors,
+                    config.window,
                 ),
                 Renderer::Block => render_block_graph_with_options(
                     &metric_history,
@@ -399,6 +404,7 @@ fn render_packed_document_row(
                     Some(&item_hues),
                     color_enabled,
                     config.solid_colors,
+                    config.window,
                 ),
             }
         })
@@ -465,6 +471,7 @@ fn render_pack_lines_with_headlines(
                             Some(&item_hues),
                             color_enabled,
                             config.solid_colors,
+                            config.window,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -541,6 +548,7 @@ fn render_flex_lines_with_headlines(
                             Some(&item_hues),
                             color_enabled,
                             config.solid_colors,
+                            config.window,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -603,6 +611,7 @@ fn render_grid_lines_with_headlines(
                             Some(&item_hues),
                             color_enabled,
                             config.solid_colors,
+                            config.window,
                             matches!(config.space, Space::Stable),
                         )
                     } else {
@@ -1362,6 +1371,7 @@ fn render_stream_group_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &metric_history,
@@ -1370,6 +1380,7 @@ fn render_stream_group_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 };
                 let text_only = format!("{label}{separator}{display_usage_text}");
@@ -1520,6 +1531,7 @@ fn render_document_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &metric_history,
@@ -1528,6 +1540,7 @@ fn render_document_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 };
                 let text_only = format!("{label}{separator}{usage_text}");
@@ -1685,6 +1698,7 @@ fn render_stream_rows(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &metric_history,
@@ -1693,6 +1707,7 @@ fn render_stream_rows(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 }
             })
@@ -1747,6 +1762,7 @@ fn render_stream_rows(
                     Some(&item_hues),
                     color_enabled,
                     config.solid_colors,
+                    config.window,
                 ),
                 Renderer::Block => render_block_graph_with_options(
                     &metric_history,
@@ -1755,6 +1771,7 @@ fn render_stream_rows(
                     Some(&item_hues),
                     color_enabled,
                     config.solid_colors,
+                    config.window,
                 ),
             };
 
@@ -1804,6 +1821,7 @@ fn render_stream_columns_line(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &metric_history,
@@ -1812,6 +1830,7 @@ fn render_stream_columns_line(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 }
             })
@@ -1882,6 +1901,7 @@ fn render_stream_columns_line(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                     Renderer::Block => render_block_graph_with_options(
                         &metric_history,
@@ -1890,6 +1910,7 @@ fn render_stream_columns_line(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                     ),
                 };
                 let text_only = format!("{label}{separator}{display_usage_text}");
@@ -2122,6 +2143,7 @@ fn render_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                         stable_layout,
                     )
                 } else {
@@ -2137,6 +2159,7 @@ fn render_row(
                         Some(&item_hues),
                         color_enabled,
                         config.solid_colors,
+                        config.window,
                         stable_layout,
                     )
                 }
@@ -2194,6 +2217,7 @@ fn render_segment(
         None,
         color_enabled,
         false,
+        Window::Agg,
         false,
     )
 }
@@ -2342,6 +2366,7 @@ fn render_segment_with_headline(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
@@ -2372,6 +2397,7 @@ fn render_segment_with_headline(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
         Renderer::Block => render_block_graph_with_options(
             &samples,
@@ -2380,6 +2406,7 @@ fn render_segment_with_headline(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
     };
 
@@ -2404,6 +2431,7 @@ fn render_segment_with_graph_width(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
@@ -2425,6 +2453,7 @@ fn render_segment_with_graph_width(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
         Renderer::Block => render_block_graph_with_options(
             &samples,
@@ -2433,6 +2462,7 @@ fn render_segment_with_graph_width(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
     };
     let width = fixed + 1 + graph_width;
@@ -2490,6 +2520,7 @@ fn render_grid_segment(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
     stable_layout: bool,
 ) -> String {
     let metric = item.metric();
@@ -2503,6 +2534,7 @@ fn render_grid_segment(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
         Renderer::Block => render_block_graph_with_options(
             &samples,
@@ -2511,6 +2543,7 @@ fn render_grid_segment(
             hues,
             color_enabled,
             solid_colors,
+            window,
         ),
     };
 
@@ -2856,7 +2889,15 @@ fn render_block_graph(
     hues: Option<&BaseHues>,
     color_enabled: bool,
 ) -> String {
-    render_block_graph_with_options(samples, width, metric, hues, color_enabled, false)
+    render_block_graph_with_options(
+        samples,
+        width,
+        metric,
+        hues,
+        color_enabled,
+        false,
+        Window::Agg,
+    )
 }
 
 fn render_block_graph_with_options(
@@ -2866,8 +2907,9 @@ fn render_block_graph_with_options(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
 ) -> String {
-    let samples = resample_channel(samples, width, MetricValue::headline_value);
+    let samples = resample_channel(samples, width, MetricValue::headline_value, window);
     samples
         .into_iter()
         .map(|sample| {
@@ -2886,7 +2928,15 @@ pub(crate) fn render_braille_graph(
     hues: Option<&BaseHues>,
     color_enabled: bool,
 ) -> String {
-    render_braille_graph_with_options(samples, width, metric, hues, color_enabled, false)
+    render_braille_graph_with_options(
+        samples,
+        width,
+        metric,
+        hues,
+        color_enabled,
+        false,
+        Window::Agg,
+    )
 }
 
 fn render_braille_graph_with_options(
@@ -2896,6 +2946,7 @@ fn render_braille_graph_with_options(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
 ) -> String {
     if metric.is_split() {
         return render_split_braille_graph_with_options(
@@ -2905,6 +2956,7 @@ fn render_braille_graph_with_options(
             hues,
             color_enabled,
             solid_colors,
+            window,
         );
     }
 
@@ -2912,6 +2964,7 @@ fn render_braille_graph_with_options(
         samples,
         width.saturating_mul(2),
         MetricValue::headline_value,
+        window,
     );
     let mut out = String::new();
 
@@ -2934,9 +2987,10 @@ fn render_split_braille_graph_with_options(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    window: Window,
 ) -> String {
-    let mut uppers = resample_channel(samples, width, MetricValue::upper);
-    let mut lowers = resample_channel(samples, width, MetricValue::lower);
+    let mut uppers = resample_channel(samples, width, MetricValue::upper, window);
+    let mut lowers = resample_channel(samples, width, MetricValue::lower, window);
     normalize_split_channels(&mut uppers, &mut lowers);
     let mut out = String::new();
 
@@ -2981,6 +3035,7 @@ fn resample_channel(
     samples: &[MetricValue],
     target: usize,
     channel: fn(MetricValue) -> f64,
+    window: Window,
 ) -> Vec<f64> {
     if target == 0 {
         return Vec::new();
@@ -2988,9 +3043,14 @@ fn resample_channel(
     if samples.is_empty() {
         return vec![0.0; target];
     }
-    if samples.len() <= target {
-        let mut out = vec![0.0; target - samples.len()];
-        out.extend(samples.iter().copied().map(channel));
+    if samples.len() <= target || window == Window::Tail {
+        let tail = if samples.len() > target {
+            &samples[samples.len() - target..]
+        } else {
+            samples
+        };
+        let mut out = vec![0.0; target - tail.len()];
+        out.extend(tail.iter().copied().map(channel));
         return out;
     }
 
@@ -3198,6 +3258,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3268,6 +3329,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3336,6 +3398,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: Some("host".to_owned()),
             stream_labels: None,
             stream_groups: None,
@@ -3395,6 +3458,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3528,6 +3592,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3569,6 +3634,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -3612,6 +3678,7 @@ mod tests {
             align: Align::Left,
             packed: true,
             solid_colors: false,
+            window: Window::Agg,
             label: Some("host".to_owned()),
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -3676,6 +3743,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: Some(vec![
                 "a".to_owned(),
@@ -3750,6 +3818,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
             stream_groups: None,
@@ -3797,6 +3866,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3944,6 +4014,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4084,6 +4155,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4227,6 +4299,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4337,6 +4410,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4449,6 +4523,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4526,6 +4601,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4614,6 +4690,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4702,6 +4779,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4751,6 +4829,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -4968,6 +5047,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -5045,6 +5125,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -5147,6 +5228,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            window: Window::Agg,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -5209,6 +5291,7 @@ mod tests {
             None,
             false,
             false,
+            Window::Agg,
             false,
         );
 
@@ -5229,6 +5312,7 @@ mod tests {
             None,
             false,
             false,
+            Window::Agg,
             false,
         );
 
@@ -5252,6 +5336,7 @@ mod tests {
             None,
             false,
             false,
+            Window::Agg,
             false,
         );
         let io_large = render_segment_with_headline(
@@ -5269,6 +5354,7 @@ mod tests {
             None,
             false,
             false,
+            Window::Agg,
             false,
         );
 
@@ -5293,6 +5379,7 @@ mod tests {
             None,
             false,
             false,
+            Window::Agg,
             false,
         );
 
@@ -5344,6 +5431,7 @@ mod tests {
                 None,
                 false,
                 false,
+                Window::Agg,
                 false,
             );
 
@@ -5389,6 +5477,7 @@ mod tests {
             Some(&hues),
             true,
             false,
+            Window::Agg,
         );
         let solid = render_braille_graph_with_options(
             &[MetricValue::Single(0.01)],
@@ -5397,12 +5486,45 @@ mod tests {
             Some(&hues),
             true,
             true,
+            Window::Agg,
         );
         let low = crate::color::gradient_for_with_hues(MetricKind::Cpu, Some(&hues)).low;
         let high = crate::color::gradient_for_with_hues(MetricKind::Cpu, Some(&hues)).high;
 
         assert!(shaded.contains(&format!("\x1b[38;2;{};{};{}m", low.r, low.g, low.b)));
         assert!(solid.contains(&format!("\x1b[38;2;{};{};{}m", high.r, high.g, high.b)));
+    }
+
+    #[test]
+    fn tail_window_uses_recent_samples_directly() {
+        let samples = [
+            MetricValue::Single(0.0),
+            MetricValue::Single(0.0),
+            MetricValue::Single(1.0),
+            MetricValue::Single(1.0),
+        ];
+
+        let agg = render_block_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Cpu,
+            None,
+            false,
+            false,
+            Window::Agg,
+        );
+        let tail = render_block_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Cpu,
+            None,
+            false,
+            false,
+            Window::Tail,
+        );
+
+        assert_eq!(agg, " █");
+        assert_eq!(tail, "██");
     }
 
     #[test]
