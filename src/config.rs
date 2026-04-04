@@ -1,4 +1,6 @@
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
+use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use crate::color::{named_colormap, named_palette, ColorSpec, Rgb};
@@ -19,6 +21,7 @@ Metrics:
 Notes:
   Layout is the canonical interface.
   Without a layout, monlin defaults to avail.
+  Default args can be read from $XDG_CONFIG_HOME/monlin/config or ~/.config/monlin/config.
   Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.hum:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
@@ -160,6 +163,7 @@ pub struct Config {
     name = "monlin",
     disable_help_flag = true,
     disable_version_flag = true,
+    args_override_self = true,
     about = "Compact terminal monitor for narrow panes, bars, and shell-driven status views.",
     after_help = AFTER_HELP
 )]
@@ -262,6 +266,11 @@ where
     I: IntoIterator<Item = String>,
 {
     let args = args.into_iter().collect::<Vec<_>>();
+    let args = resolve_args_with_config(args)?;
+    parse_args_from_vec(args)
+}
+
+fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
     let mut filtered_args = Vec::with_capacity(args.len());
     let mut force_stream_input = false;
 
@@ -368,6 +377,81 @@ where
         },
         show_help: cli.show_help,
     })
+}
+
+fn resolve_args_with_config(args: Vec<String>) -> Result<Vec<String>, String> {
+    if args.len() <= 1 || cli_requests_subcommand(&args) {
+        return Ok(args);
+    }
+
+    let config_args = load_default_config_args()?;
+    if config_args.is_empty() {
+        return Ok(args);
+    }
+
+    let mut merged = Vec::with_capacity(args.len() + config_args.len());
+    merged.push(args[0].clone());
+    merged.extend(config_args);
+    merged.extend(args.into_iter().skip(1));
+    Ok(merged)
+}
+
+fn cli_requests_subcommand(args: &[String]) -> bool {
+    args.get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "completion" | "debug"))
+}
+
+fn load_default_config_args() -> Result<Vec<String>, String> {
+    let Some(path) = default_config_path() else {
+        return Ok(Vec::new());
+    };
+    load_config_args_from_path(&path)
+}
+
+fn load_config_args_from_path(path: &std::path::Path) -> Result<Vec<String>, String> {
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("failed to read config file {}: {error}", path.display()))?;
+    parse_config_contents(&raw)
+        .map_err(|error| format!("invalid config file {}: {error}", path.display()))
+}
+
+fn default_config_path() -> Option<PathBuf> {
+    if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
+        if !xdg_config_home.trim().is_empty() {
+            return Some(PathBuf::from(xdg_config_home).join("monlin").join("config"));
+        }
+    }
+
+    env::var("HOME")
+        .ok()
+        .filter(|home| !home.trim().is_empty())
+        .map(|home| {
+            PathBuf::from(home)
+                .join(".config")
+                .join("monlin")
+                .join("config")
+        })
+}
+
+fn parse_config_contents(raw: &str) -> Result<Vec<String>, String> {
+    let mut args = Vec::new();
+
+    for (index, line) in raw.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        let parsed =
+            shell_words::split(trimmed).map_err(|error| format!("line {}: {error}", index + 1))?;
+        args.extend(parsed);
+    }
+
+    Ok(args)
 }
 
 fn parse_external_input(
@@ -567,10 +651,20 @@ pub fn clap_command() -> clap::Command {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn parse(items: &[&str]) -> Config {
         parse_args(items.iter().map(|item| item.to_string())).unwrap()
+    }
+
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("monlin-{name}-{nonce}"))
     }
 
     #[test]
@@ -597,6 +691,54 @@ mod tests {
     fn parses_layout_from_positionals() {
         let config = parse(&["monlin", "cpu", "net"]);
         assert_eq!(config.layout.metrics(), &[MetricKind::Cpu, MetricKind::Net]);
+    }
+
+    #[test]
+    fn parses_shell_split_config_contents() {
+        let args = parse_config_contents(
+            r#"
+            # comment
+            --align right
+            --label "my host"
+            -p
+            "#,
+        )
+        .unwrap();
+        assert_eq!(args, vec!["--align", "right", "--label", "my host", "-p"]);
+    }
+
+    #[test]
+    fn loads_default_args_from_xdg_config_file() {
+        let root = unique_temp_dir("xdg");
+        let config_dir = root.join("monlin");
+        let path = config_dir.join("config");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(&path, "--align right\n-p\n").unwrap();
+
+        let args = load_config_args_from_path(&path).unwrap();
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(args, vec!["--align", "right", "-p"]);
+    }
+
+    #[test]
+    fn command_line_flags_override_config_file_defaults() {
+        let mut args = vec!["monlin".to_owned()];
+        args.extend(parse_config_contents("--align right\n").unwrap());
+        args.extend(vec!["--align".to_owned(), "left".to_owned()]);
+        let config = parse_args_from_vec(args).unwrap();
+        assert_eq!(config.align, Align::Left);
+    }
+
+    #[test]
+    fn skips_config_file_for_subcommands() {
+        let args = resolve_args_with_config(vec![
+            "monlin".to_owned(),
+            "completion".to_owned(),
+            "zsh".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(args, vec!["monlin", "completion", "zsh"]);
     }
 
     #[test]
