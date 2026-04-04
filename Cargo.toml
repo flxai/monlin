@@ -2,10 +2,13 @@
 name = "monlin"
 version = "0.2.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 clap_complete = "4.5"
 palette = "0.7"
+rand = { version = "0.8", features = ["small_rng"] }
+rand_distr = "0.4"
 serde_json = "1"
 splines = "5"

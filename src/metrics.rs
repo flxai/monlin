@@ -6,6 +6,9 @@ use std::os::raw::{c_char, c_int, c_ulong};
 use std::time::{Duration, Instant};
 
 use crate::layout::MetricKind;
+use rand::rngs::SmallRng;
+use rand::SeedableRng;
+use rand_distr::{Beta, Distribution, Normal};
 
 #[derive(Clone, Copy, Debug)]
 struct CpuCounters {
@@ -60,7 +63,10 @@ pub enum HeadlineValue {
         available_bytes: u64,
         total_bytes: u64,
     },
-    Storage { used_bytes: u64, total_bytes: u64 },
+    Storage {
+        used_bytes: u64,
+        total_bytes: u64,
+    },
 }
 
 impl HeadlineValue {
@@ -124,6 +130,8 @@ pub struct Sampler {
     net_prev: Option<(NetCounters, Instant)>,
     net_ema: Option<(f64, f64)>,
     rate_windows: HashMap<ScaleKey, VecDeque<RatePoint>>,
+    rnd_rng: SmallRng,
+    rnd_state: Option<f64>,
 }
 
 impl Default for Sampler {
@@ -134,6 +142,8 @@ impl Default for Sampler {
             net_prev: None,
             net_ema: None,
             rate_windows: HashMap::new(),
+            rnd_rng: SmallRng::from_entropy(),
+            rnd_state: None,
         }
     }
 }
@@ -162,6 +172,12 @@ impl Sampler {
         let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys)
         {
             Some(self.sample_cpu()?)
+        } else {
+            None
+        };
+
+        let rnd_value = if metrics.contains(&MetricKind::Rnd) {
+            Some(self.sample_rnd())
         } else {
             None
         };
@@ -220,6 +236,7 @@ impl Sampler {
         for metric in metrics {
             let value = match metric {
                 MetricKind::Cpu => cpu_value.map(MetricValue::Single),
+                MetricKind::Rnd => rnd_value.map(|sample| MetricValue::Single(sample.normalized)),
                 MetricKind::Sys => Some(MetricValue::Split {
                     upper: cpu_value.unwrap_or(0.0),
                     lower: memory_value.map(|sample| sample.usage_ratio).unwrap_or(0.0),
@@ -232,7 +249,9 @@ impl Sampler {
                     (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
                     (None, None) => None,
                 },
-                MetricKind::Memory => memory_value.map(|sample| MetricValue::Single(sample.usage_ratio)),
+                MetricKind::Memory => {
+                    memory_value.map(|sample| MetricValue::Single(sample.usage_ratio))
+                }
                 MetricKind::Storage => {
                     storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
                 }
@@ -267,6 +286,9 @@ impl Sampler {
                         available_bytes: sample.available_bytes,
                         total_bytes: sample.total_bytes,
                     }),
+                    MetricKind::Rnd => {
+                        rnd_value.map(|sample| HeadlineValue::Scalar(sample.absolute))
+                    }
                     _ => Some(HeadlineValue::Scalar(value.headline_value())),
                 }
                 .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value()));
@@ -348,6 +370,31 @@ impl Sampler {
         Ok(usage)
     }
 
+    fn sample_rnd(&mut self) -> RandomSample {
+        // A beta-distributed target keeps samples mostly in the mid/low range,
+        // while an AR step keeps the graph feeling like a plausible timeseries.
+        let beta = Beta::new(2.2, 3.8).expect("valid beta parameters");
+        let noise = Normal::new(0.0, 0.08).expect("valid normal parameters");
+
+        let target = beta.sample(&mut self.rnd_rng);
+        let current = self.rnd_state.unwrap_or(target);
+        let next =
+            (0.82 * current + 0.18 * target + noise.sample(&mut self.rnd_rng)).clamp(0.0, 1.0);
+        self.rnd_state = Some(next);
+
+        // Map into a wide byte-like domain so rnd.hum/free produce compact SI values.
+        let absolute = if next <= f64::EPSILON {
+            0.0
+        } else {
+            1024_f64.powf(next * 4.0)
+        };
+
+        RandomSample {
+            normalized: next,
+            absolute,
+        }
+    }
+
     fn smooth_net_rates(&mut self, ingress_rate: f64, egress_rate: f64) -> (f64, f64) {
         const NET_EMA_ALPHA: f64 = 0.35;
 
@@ -380,6 +427,12 @@ impl Sampler {
             .fold(1.0_f64, f64::max);
         (rate / scale).clamp(0.0, 1.0)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RandomSample {
+    normalized: f64,
+    absolute: f64,
 }
 
 fn trim_rate_window(window: &mut VecDeque<RatePoint>, now: Instant, max_age: Duration) {
@@ -1072,6 +1125,27 @@ mod tests {
         assert!(sample.values.contains_key(&MetricKind::Storage));
         assert!(sample.values.contains_key(&MetricKind::Io));
         assert!(sample.values.contains_key(&MetricKind::Net));
+    }
+
+    #[test]
+    fn rnd_metric_produces_bounded_values_and_scalar_headlines() {
+        let mut sampler = Sampler::default();
+        let sample = sampler.sample(&[MetricKind::Rnd]).unwrap();
+
+        let value = sample.values.get(&MetricKind::Rnd).copied().unwrap();
+        let headline = sample.headlines.get(&MetricKind::Rnd).copied().unwrap();
+
+        match value {
+            MetricValue::Single(value) => assert!((0.0..=1.0).contains(&value)),
+            MetricValue::Split { .. } => panic!("rnd should be a single-value metric"),
+        }
+
+        match headline {
+            HeadlineValue::Scalar(value) => assert!(value >= 0.0),
+            HeadlineValue::Memory { .. } | HeadlineValue::Storage { .. } => {
+                panic!("rnd should expose a scalar headline")
+            }
+        }
     }
 
     #[test]

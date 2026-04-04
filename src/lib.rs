@@ -98,6 +98,7 @@ _monlin_layout() {
   local -a metrics
   metrics=(
     cpu
+    rnd
     sys
     gpu
     vram
@@ -127,7 +128,7 @@ _monlin_layout() {
   if [[ "$token" == *.* ]]; then
     base="${token%%.*}"
     case "$base" in
-      cpu|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out)
+      cpu|rnd|sys|gpu|vram|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out)
         compadd -Q -P "${prefix}${base}." -- pct hum free
         return
         ;;
@@ -141,6 +142,7 @@ _monlin_layout() {
 
   _describe -t metrics 'layout item' \
     'cpu:CPU usage' \
+    'rnd:Synthetic random metric' \
     'sys:CPU and RAM split' \
     'gpu:GPU utilization' \
     'vram:VRAM usage' \
@@ -178,8 +180,8 @@ _monlin() {
     '--stream-layout:Render streamed stdin as columns or lines'
     '--space:How streamed columns allocate width'
     '--renderer:Graph renderer to use'
-    '-c:Comma-separated visible-order colors: angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
-    '--colors:Comma-separated visible-order colors: angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
+    '-c:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
+    '--colors:Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020'
     '--color:When to emit ANSI colors'
     '--output:Output protocol to render'
     '--width:Override the render width'
@@ -203,6 +205,10 @@ _monlin() {
       ;;
     --space)
       compadd stable graph segment
+      return
+      ;;
+    -c|--colors)
+      compadd default canonical rainbow warm cool pastel neon
       return
       ;;
     --renderer)
@@ -1236,7 +1242,9 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_space_option() {
         let script = zsh_completion_script();
+        assert!(script.contains("rnd:Synthetic random metric"));
         assert!(script.contains("pct hum free"));
+        assert!(script.contains("default canonical rainbow warm cool pastel neon"));
         assert!(script.contains("--space:How streamed columns allocate width"));
     }
 

@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MetricKind {
     Cpu,
+    Rnd,
     Sys,
     Gpu,
     Vram,
@@ -36,6 +37,7 @@ impl MetricKind {
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "cpu" => Some(Self::Cpu),
+            "rnd" | "random" => Some(Self::Rnd),
             "sys" => Some(Self::Sys),
             "gpu" => Some(Self::Gpu),
             "vram" => Some(Self::Vram),
@@ -53,6 +55,7 @@ impl MetricKind {
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
+            Self::Rnd => "rnd",
             Self::Sys => "sys",
             Self::Gpu => "gpu",
             Self::Vram => "vram",
@@ -75,6 +78,7 @@ impl MetricKind {
             Self::Io | Self::Net | Self::Ingress | Self::Egress => LayoutView::Hum,
             Self::Memory | Self::Storage => LayoutView::Free,
             Self::Cpu
+            | Self::Rnd
             | Self::Sys
             | Self::Gpu
             | Self::Vram
@@ -96,6 +100,7 @@ impl MetricKind {
         match resolved {
             LayoutView::Pct => format_percent(self, normalized),
             LayoutView::Hum => match self {
+                Self::Rnd => humanize_bytes(headline.scalar().unwrap_or(0.0)),
                 Self::Io | Self::Net | Self::Ingress | Self::Egress => {
                     humanize_rate(headline.scalar().unwrap_or(0.0))
                 }
@@ -125,6 +130,7 @@ impl MetricKind {
                 _ => format_percent(self, normalized),
             },
             LayoutView::Free => match self {
+                Self::Rnd => humanize_bytes(headline.scalar().unwrap_or(0.0)),
                 Self::Memory => match headline {
                     crate::metrics::HeadlineValue::Memory {
                         available_bytes, ..
@@ -149,6 +155,7 @@ fn format_percent(metric: MetricKind, value: f64) -> String {
     match metric {
         MetricKind::Vram => format!("{:.0}%", value.clamp(0.0, 1.0) * 100.0),
         MetricKind::Cpu
+        | MetricKind::Rnd
         | MetricKind::Sys
         | MetricKind::Gpu
         | MetricKind::Gfx
@@ -703,10 +710,43 @@ mod tests {
     #[test]
     fn default_views_match_metric_families() {
         assert_eq!(MetricKind::Cpu.default_view(), LayoutView::Pct);
+        assert_eq!(MetricKind::Rnd.default_view(), LayoutView::Pct);
         assert_eq!(MetricKind::Memory.default_view(), LayoutView::Free);
         assert_eq!(MetricKind::Storage.default_view(), LayoutView::Free);
         assert_eq!(MetricKind::Net.default_view(), LayoutView::Hum);
         assert_eq!(MetricKind::Ingress.default_view(), LayoutView::Hum);
+    }
+
+    #[test]
+    fn rnd_metric_parses_and_formats_as_both_percent_and_bytes() {
+        let layout = parse_layout_spec("rnd rnd.hum rnd.free").unwrap();
+        assert_eq!(layout.metrics(), &[MetricKind::Rnd]);
+
+        assert_eq!(MetricKind::Rnd.short_label(), "rnd");
+        assert_eq!(
+            MetricKind::Rnd.format_value(
+                LayoutView::Pct,
+                0.5,
+                &crate::metrics::HeadlineValue::Scalar(2048.0),
+            ),
+            "50%"
+        );
+        assert_eq!(
+            MetricKind::Rnd.format_value(
+                LayoutView::Hum,
+                0.5,
+                &crate::metrics::HeadlineValue::Scalar(2048.0),
+            ),
+            "2.0K"
+        );
+        assert_eq!(
+            MetricKind::Rnd.format_value(
+                LayoutView::Free,
+                0.5,
+                &crate::metrics::HeadlineValue::Scalar(2048.0),
+            ),
+            "2.0K"
+        );
     }
 
     #[test]

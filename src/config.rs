@@ -1,7 +1,7 @@
 use clap::{ArgAction, CommandFactory, Parser, ValueEnum};
 use std::path::PathBuf;
 
-use crate::color::{ColorSpec, Rgb};
+use crate::color::{named_palette, ColorSpec, Rgb};
 use crate::layout::{parse_layout_spec, Layout};
 use crate::render::Renderer;
 
@@ -10,7 +10,7 @@ const DEFAULT_HISTORY: usize = 512;
 
 const AFTER_HELP: &str = "\
 Metrics:
-  cpu sys gpu vram gfx memory spc io net ingress egress
+  cpu rnd sys gpu vram gfx memory spc io net ingress egress
   all
 
 Notes:
@@ -179,10 +179,9 @@ struct Cli {
         short = 'c',
         long = "colors",
         value_delimiter = ',',
-        value_parser = parse_color_spec,
-        help = "Comma-separated visible-order colors: angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020"
+        help = "Comma-separated visible-order colors: named palettes like default/pastel/neon, angle 20 or A20, RGB Rff8800/Lff8800, or packed LCh L086078020/R086078020"
     )]
-    colors: Vec<ColorSpec>,
+    colors: Vec<String>,
 
     #[arg(long = "color", value_enum, default_value_t = ColorMode::Auto, help = "When to emit ANSI colors")]
     color_mode: ColorMode,
@@ -240,7 +239,9 @@ where
     } else {
         parse_layout_spec(&joined_layout)?
     };
-    let colors = (!cli.colors.is_empty()).then_some(cli.colors);
+    let colors = (!cli.colors.is_empty())
+        .then(|| expand_color_specs(&cli.colors))
+        .transpose()?;
 
     Ok(Config {
         history,
@@ -309,6 +310,20 @@ fn parse_color_spec(raw: &str) -> Result<ColorSpec, String> {
     }
 
     parse_angle(trimmed)
+}
+
+fn expand_color_specs(tokens: &[String]) -> Result<Vec<ColorSpec>, String> {
+    let mut specs = Vec::new();
+
+    for token in tokens {
+        if let Some(palette) = named_palette(token.trim()) {
+            specs.extend(palette);
+        } else {
+            specs.push(parse_color_spec(token)?);
+        }
+    }
+
+    Ok(specs)
 }
 
 fn parse_prefixed_color(body: &str, raw: &str) -> Result<ColorSpec, String> {
@@ -402,7 +417,6 @@ pub fn clap_command() -> clap::Command {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
-    use std::path::PathBuf;
 
     fn parse(items: &[&str]) -> Config {
         parse_args(items.iter().map(|item| item.to_string())).unwrap()
@@ -541,6 +555,29 @@ mod tests {
     }
 
     #[test]
+    fn parses_named_palette_colors() {
+        let config = parse(&["monlin", "--colors", "default"]);
+        assert_eq!(
+            config.colors,
+            Some(vec![
+                ColorSpec::Angle(20.0),
+                ColorSpec::Angle(80.0),
+                ColorSpec::Angle(140.0),
+                ColorSpec::Angle(200.0),
+                ColorSpec::Angle(260.0),
+                ColorSpec::Angle(320.0),
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_named_palette_mixed_with_explicit_colors() {
+        let config = parse(&["monlin", "--colors", "warm,320"]);
+        assert_eq!(config.colors.as_ref().unwrap().len(), 7);
+        assert_eq!(config.colors.as_ref().unwrap()[6], ColorSpec::Angle(320.0));
+    }
+
+    #[test]
     fn rejects_invalid_prefixed_color_payload() {
         let error = parse_args(
             ["monlin", "--colors", "Lwat"]
@@ -657,5 +694,7 @@ mod tests {
         let help = help_text();
         assert!(help.contains("metric[.view][:basis][/grow][+max][-min]"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
+        assert!(help.contains("cpu rnd sys"));
+        assert!(help.contains("named palettes like default/pastel/neon"));
     }
 }

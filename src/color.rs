@@ -29,6 +29,115 @@ pub enum ColorSpec {
     Rgb(Rgb),
 }
 
+pub fn palette_names() -> &'static [&'static str] {
+    &[
+        "default",
+        "canonical",
+        "rainbow",
+        "warm",
+        "cool",
+        "pastel",
+        "neon",
+    ]
+}
+
+pub fn named_palette(name: &str) -> Option<Vec<ColorSpec>> {
+    let palette = match name.to_ascii_lowercase().as_str() {
+        "default" | "canonical" => default_base_hues().to_vec(),
+        "rainbow" => vec![
+            ColorSpec::Angle(0.0),
+            ColorSpec::Angle(60.0),
+            ColorSpec::Angle(120.0),
+            ColorSpec::Angle(180.0),
+            ColorSpec::Angle(240.0),
+            ColorSpec::Angle(300.0),
+        ],
+        "warm" => vec![
+            ColorSpec::Angle(15.0),
+            ColorSpec::Angle(40.0),
+            ColorSpec::Angle(65.0),
+            ColorSpec::Angle(90.0),
+            ColorSpec::Angle(115.0),
+            ColorSpec::Angle(140.0),
+        ],
+        "cool" => vec![
+            ColorSpec::Angle(170.0),
+            ColorSpec::Angle(195.0),
+            ColorSpec::Angle(220.0),
+            ColorSpec::Angle(245.0),
+            ColorSpec::Angle(280.0),
+            ColorSpec::Angle(315.0),
+        ],
+        "pastel" => vec![
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 20.0,
+            },
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 80.0,
+            },
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 140.0,
+            },
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 200.0,
+            },
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 260.0,
+            },
+            ColorSpec::Lch {
+                lightness: 92.0,
+                chroma: 42.0,
+                hue: 320.0,
+            },
+        ],
+        "neon" => vec![
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 20.0,
+            },
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 80.0,
+            },
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 140.0,
+            },
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 200.0,
+            },
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 260.0,
+            },
+            ColorSpec::Lch {
+                lightness: 88.0,
+                chroma: 95.0,
+                hue: 320.0,
+            },
+        ],
+        _ => return None,
+    };
+
+    Some(palette)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Gradient {
     pub low: Rgb,
@@ -42,6 +151,7 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
 pub fn gradient_for_with_hues(metric: MetricKind, hues: Option<&BaseHues>) -> Gradient {
     match metric {
         MetricKind::Cpu => wheel_gradient(0, hues),
+        MetricKind::Rnd => wheel_gradient(0, hues),
         MetricKind::Sys => blend_gradients(
             gradient_for_with_hues(MetricKind::Cpu, hues),
             gradient_for_with_hues(MetricKind::Memory, hues),
@@ -92,6 +202,7 @@ pub fn metric_hues_for_visible_hue(metric: MetricKind, hue: ColorSpec) -> BaseHu
     let mut hues = default_base_hues();
     match metric {
         MetricKind::Cpu => hues[0] = hue,
+        MetricKind::Rnd => hues[0] = hue,
         MetricKind::Sys => {
             hues[0] = hue;
             hues[1] = hue;
@@ -255,6 +366,7 @@ fn default_base_hues() -> BaseHues {
 fn base_slots_for_metric(metric: MetricKind) -> &'static [usize] {
     match metric {
         MetricKind::Cpu => &[0],
+        MetricKind::Rnd => &[0],
         MetricKind::Sys => &[0, 1],
         MetricKind::Memory => &[1],
         MetricKind::Gpu => &[2],
@@ -550,5 +662,29 @@ mod tests {
             )),
         );
         assert_eq!(gradient.high, gradient_from_hue(20.0).high);
+    }
+
+    #[test]
+    fn named_default_palette_matches_canonical_hues() {
+        assert_eq!(
+            named_palette("default").unwrap(),
+            default_base_hues().to_vec()
+        );
+        assert_eq!(
+            named_palette("canonical").unwrap(),
+            default_base_hues().to_vec()
+        );
+    }
+
+    #[test]
+    fn named_palettes_are_case_insensitive() {
+        assert_eq!(named_palette("WARM"), named_palette("warm"));
+    }
+
+    #[test]
+    fn named_palette_reports_known_names() {
+        assert!(palette_names().contains(&"default"));
+        assert!(palette_names().contains(&"pastel"));
+        assert!(palette_names().contains(&"neon"));
     }
 }
