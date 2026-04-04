@@ -22,9 +22,18 @@
 ## Layout DSL
 
 - Keep the current grammar small unless a real need appears:
-  - `metric[.view][:basis][/grow][+max][-min]`
-  - `,`
-  - `all`
+  - `source[.value_mode][.display_mode][:size][+max][-min]`
+  - labels via `label=source`
+  - groups via `label=(...)`
+  - row separators via `,`
+  - source kinds:
+    - native metrics like `cpu`
+    - stdin columns like `@1`
+    - polled files like `f:/path`
+    - polled commands like `p:...`
+  - group macros:
+    - `all`
+    - `avail`
 
 ## Output Modes
 
