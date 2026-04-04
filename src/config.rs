@@ -220,7 +220,7 @@ struct Cli {
         short = 'w',
         long = "window",
         value_enum,
-        default_value_t = Window::Agg,
+        default_value_t = Window::Tail,
         help = "How to display retained history: aggregate the full history or show only the recent tail"
     )]
     window: Window,
@@ -1148,6 +1148,12 @@ mod tests {
     #[test]
     fn parses_window_flag() {
         let config = parse(&["monlin", "-w", "tail"]);
+        assert_eq!(config.window, Window::Tail);
+    }
+
+    #[test]
+    fn defaults_to_tail_window() {
+        let config = parse(&["monlin"]);
         assert_eq!(config.window, Window::Tail);
     }
 
