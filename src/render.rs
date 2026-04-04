@@ -3284,7 +3284,7 @@ mod tests {
             visible_width(&line[..byte_index])
         }
 
-        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys rx tx").unwrap();
         let config = Config {
             document: None,
             history: 8,
@@ -3343,14 +3343,8 @@ mod tests {
                     lower: 0.4,
                 }]),
             ),
-            (
-                MetricKind::Ingress,
-                VecDeque::from(vec![MetricValue::Single(0.25)]),
-            ),
-            (
-                MetricKind::Egress,
-                VecDeque::from(vec![MetricValue::Single(0.2)]),
-            ),
+            (MetricKind::Ingress, VecDeque::from(vec![MetricValue::Single(0.25)])),
+            (MetricKind::Egress, VecDeque::from(vec![MetricValue::Single(0.2)])),
         ]);
         let values = HashMap::from([
             (MetricKind::Cpu, MetricValue::Single(0.07)),
@@ -3412,11 +3406,11 @@ mod tests {
         );
         assert_eq!(
             visible_offset(&lines[0], " spc "),
-            visible_offset(&lines[1], " in ")
+            visible_offset(&lines[1], " rx ")
         );
         assert_eq!(
             visible_offset(&lines[0], " io "),
-            visible_offset(&lines[1], " out ")
+            visible_offset(&lines[1], " tx ")
         );
     }
 
@@ -3429,7 +3423,7 @@ mod tests {
             visible_width(&line[..byte_index]) + visible_width(token)
         }
 
-        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys in out").unwrap();
+        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys rx tx").unwrap();
         let config = Config {
             document: None,
             history: 8,
@@ -3557,11 +3551,11 @@ mod tests {
         );
         assert_eq!(
             graph_start(&lines[0], "spc 1.0K "),
-            graph_start(&lines[1], "in  526B ")
+            graph_start(&lines[1], "rx  526B ")
         );
         assert_eq!(
-            graph_start(&lines[0], "io   32K "),
-            graph_start(&lines[1], "out  12K ")
+            graph_start(&lines[0], "io  32K "),
+            graph_start(&lines[1], "tx  12K ")
         );
     }
 

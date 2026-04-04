@@ -12,6 +12,8 @@ pub enum MetricKind {
     Storage,
     Io,
     Net,
+    In,
+    Out,
     Ingress,
     Egress,
 }
@@ -66,8 +68,10 @@ impl MetricKind {
             "storage" | "disk" | "space" | "spc" => Some(Self::Storage),
             "io" => Some(Self::Io),
             "net" => Some(Self::Net),
-            "ingress" | "in" => Some(Self::Ingress),
-            "egress" | "out" => Some(Self::Egress),
+            "in" => Some(Self::In),
+            "out" => Some(Self::Out),
+            "rx" | "ingress" => Some(Self::Ingress),
+            "tx" | "egress" => Some(Self::Egress),
             _ => None,
         }
     }
@@ -84,8 +88,10 @@ impl MetricKind {
             Self::Storage => "spc",
             Self::Io => "io",
             Self::Net => "net",
-            Self::Ingress => "in",
-            Self::Egress => "out",
+            Self::In => "in",
+            Self::Out => "out",
+            Self::Ingress => "rx",
+            Self::Egress => "tx",
         }
     }
 
@@ -95,7 +101,9 @@ impl MetricKind {
 
     pub fn default_view(self) -> LayoutView {
         match self {
-            Self::Io | Self::Net | Self::Ingress | Self::Egress => LayoutView::Hum,
+            Self::Io | Self::Net | Self::In | Self::Out | Self::Ingress | Self::Egress => {
+                LayoutView::Hum
+            }
             Self::Memory | Self::Storage => LayoutView::Free,
             Self::Cpu | Self::Rnd | Self::Sys | Self::Gpu | Self::Vram | Self::Gfx => {
                 LayoutView::Pct
@@ -118,7 +126,7 @@ impl MetricKind {
             LayoutView::Pct => format_percent(self, normalized),
             LayoutView::Hum => match self {
                 Self::Rnd => humanize_bytes(headline.scalar().unwrap_or(0.0)),
-                Self::Io | Self::Net | Self::Ingress | Self::Egress => {
+                Self::Io | Self::Net | Self::In | Self::Out | Self::Ingress | Self::Egress => {
                     humanize_rate(headline.scalar().unwrap_or(0.0))
                 }
                 Self::Memory => match headline {
@@ -181,6 +189,8 @@ fn format_percent(metric: MetricKind, value: f64) -> String {
         | MetricKind::Storage
         | MetricKind::Io
         | MetricKind::Net
+        | MetricKind::In
+        | MetricKind::Out
         | MetricKind::Ingress
         | MetricKind::Egress => percent,
     }
@@ -677,6 +687,8 @@ pub fn all_metrics() -> &'static [MetricKind] {
         MetricKind::Storage,
         MetricKind::Io,
         MetricKind::Net,
+        MetricKind::In,
+        MetricKind::Out,
         MetricKind::Ingress,
         MetricKind::Egress,
         MetricKind::Gpu,
@@ -1637,8 +1649,8 @@ mod tests {
         let layout = parse_layout_spec("all").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 5);
-        assert_eq!(layout.rows()[1].len(), 4);
+        assert_eq!(layout.rows()[0].len(), 6);
+        assert_eq!(layout.rows()[1].len(), 5);
     }
 
     #[test]
@@ -1646,8 +1658,8 @@ mod tests {
         let layout = parse_layout_spec("avail").unwrap();
         assert_eq!(layout.metrics(), all_metrics());
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 5);
-        assert_eq!(layout.rows()[1].len(), 4);
+        assert_eq!(layout.rows()[0].len(), 6);
+        assert_eq!(layout.rows()[1].len(), 5);
         assert!(layout.filter_available());
     }
 
@@ -1727,12 +1739,14 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::In,
+                    MetricKind::Out,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![5, 4],
+                vec![6, 5],
             ),
             (
                 "cpu all ram",
@@ -1742,12 +1756,14 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::In,
+                    MetricKind::Out,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![6, 5],
+                vec![7, 6],
             ),
             (
                 "all cpu ram net cpu",
@@ -1757,12 +1773,14 @@ mod tests {
                     MetricKind::Storage,
                     MetricKind::Io,
                     MetricKind::Net,
+                    MetricKind::In,
+                    MetricKind::Out,
                     MetricKind::Ingress,
                     MetricKind::Egress,
                     MetricKind::Gpu,
                     MetricKind::Vram,
                 ],
-                vec![7, 6],
+                vec![8, 7],
             ),
         ];
 
@@ -1786,6 +1804,8 @@ mod tests {
                 MetricKind::Storage,
                 MetricKind::Io,
                 MetricKind::Net,
+                MetricKind::In,
+                MetricKind::Out,
                 MetricKind::Ingress,
                 MetricKind::Egress,
                 MetricKind::Gpu,
@@ -1793,8 +1813,8 @@ mod tests {
             ]
         );
         assert_eq!(layout.rows().len(), 2);
-        assert_eq!(layout.rows()[0].len(), 7);
-        assert_eq!(layout.rows()[1].len(), 6);
+        assert_eq!(layout.rows()[0].len(), 8);
+        assert_eq!(layout.rows()[1].len(), 7);
     }
 
     #[test]

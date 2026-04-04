@@ -10,7 +10,7 @@ const DEFAULT_HISTORY: usize = 512;
 
 const AFTER_HELP: &str = "\
 Metrics:
-  cpu xpu rnd sys gpu vram gfx memory mem spc io net ingress egress
+  cpu xpu rnd sys gpu vram gfx memory mem spc io net in out rx tx
   all
   avail
 
@@ -805,11 +805,13 @@ mod tests {
             config.colors,
             Some(vec![
                 ColorSpec::Angle(20.0),
-                ColorSpec::Angle(80.0),
-                ColorSpec::Angle(140.0),
+                ColorSpec::Angle(65.0),
+                ColorSpec::Angle(110.0),
+                ColorSpec::Angle(155.0),
                 ColorSpec::Angle(200.0),
-                ColorSpec::Angle(260.0),
-                ColorSpec::Angle(320.0),
+                ColorSpec::Angle(245.0),
+                ColorSpec::Angle(290.0),
+                ColorSpec::Angle(335.0),
             ])
         );
     }

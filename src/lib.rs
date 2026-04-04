@@ -122,10 +122,10 @@ fn zsh_completion_script() -> &'static str {
 _monlin_layout() {
   local cur token prefix base
   local -a metrics
-  metrics=(
-    cpu
-    xpu
-    rnd
+    metrics=(
+        cpu
+        xpu
+        rnd
     sys
     gpu
     vram
@@ -137,15 +137,15 @@ _monlin_layout() {
     storage
     disk
     space
-    spc
-    io
-    net
-    ingress
-    in
-    egress
-    out
-    all
-    avail
+        spc
+        io
+        net
+        in
+        out
+        rx
+        tx
+        all
+        avail
     'f:/path/to/file'
     'p:command'
     'label1,label2=f:/path/to/file'
@@ -159,7 +159,7 @@ _monlin_layout() {
   if [[ "$token" == *.* ]]; then
     base="${token%%.*}"
     case "$base" in
-      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|ingress|in|egress|out|all|avail)
+      cpu|xpu|rnd|sys|gpu|vram|vrm|gfx|memory|mem|ram|storage|disk|space|spc|io|net|in|out|rx|tx|all|avail)
         compadd -Q -P "${prefix}${base}." -- pct hum free
         return
         ;;
@@ -189,10 +189,10 @@ _monlin_layout() {
     'spc:Storage usage' \
     'io:Disk I/O split' \
     'net:Network traffic split' \
-    'ingress:Network ingress' \
-    'in:Network ingress' \
-    'egress:Network egress' \
-    'out:Network egress' \
+    'in:Disk input / reads' \
+    'out:Disk output / writes' \
+    'rx:Network receive' \
+    'tx:Network transmit' \
     'all:Canonical multi-row layout' \
     'avail:Canonical multi-row layout filtered to available metrics' \
     'f:/path/to/file:Poll a file for numeric rows' \
@@ -323,9 +323,11 @@ fn print_debug_colors(
         (MetricKind::Gfx, "gfx"),
         (MetricKind::Storage, "spc"),
         (MetricKind::Io, "io"),
-        (MetricKind::Ingress, "in"),
-        (MetricKind::Egress, "out"),
+        (MetricKind::In, "in"),
+        (MetricKind::Out, "out"),
         (MetricKind::Net, "net"),
+        (MetricKind::Ingress, "rx"),
+        (MetricKind::Egress, "tx"),
     ];
 
     let width = steps.max(1);

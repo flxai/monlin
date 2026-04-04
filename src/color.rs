@@ -3,7 +3,7 @@ use palette::{Clamp, FromColor, Lab, LabHue, Lch, Mix, Srgb};
 use splines::{Interpolation, Key, Spline};
 use std::sync::OnceLock;
 
-pub type BaseColors = [ColorSpec; 6];
+pub type BaseColors = [ColorSpec; 8];
 pub type BaseHues = BaseColors;
 
 const DEFAULT_LOW_LIGHTNESS: f32 = 24.0;
@@ -165,15 +165,17 @@ pub fn gradient_for_with_hues(metric: MetricKind, hues: Option<&BaseHues>) -> Gr
         MetricKind::Memory => wheel_gradient(1, hues),
         MetricKind::Storage => wheel_gradient(3, hues),
         MetricKind::Io => blend_gradients(
-            gradient_for_with_hues(MetricKind::Storage, hues),
-            gradient_for_with_hues(MetricKind::Ingress, hues),
+            gradient_for_with_hues(MetricKind::In, hues),
+            gradient_for_with_hues(MetricKind::Out, hues),
         ),
+        MetricKind::In => wheel_gradient(4, hues),
+        MetricKind::Out => wheel_gradient(5, hues),
         MetricKind::Net => blend_gradients(
             gradient_for_with_hues(MetricKind::Ingress, hues),
             gradient_for_with_hues(MetricKind::Egress, hues),
         ),
-        MetricKind::Ingress => wheel_gradient(4, hues),
-        MetricKind::Egress => wheel_gradient(5, hues),
+        MetricKind::Ingress => wheel_gradient(6, hues),
+        MetricKind::Egress => wheel_gradient(7, hues),
     }
 }
 
@@ -215,15 +217,17 @@ pub fn metric_hues_for_visible_hue(metric: MetricKind, hue: ColorSpec) -> BaseHu
         }
         MetricKind::Storage => hues[3] = hue,
         MetricKind::Io => {
-            hues[3] = hue;
-            hues[4] = hue;
-        }
-        MetricKind::Ingress => hues[4] = hue,
-        MetricKind::Net => {
             hues[4] = hue;
             hues[5] = hue;
         }
-        MetricKind::Egress => hues[5] = hue,
+        MetricKind::In => hues[4] = hue,
+        MetricKind::Out => hues[5] = hue,
+        MetricKind::Net => {
+            hues[6] = hue;
+            hues[7] = hue;
+        }
+        MetricKind::Ingress => hues[6] = hue,
+        MetricKind::Egress => hues[7] = hue,
     }
     hues
 }
@@ -231,7 +235,7 @@ pub fn metric_hues_for_visible_hue(metric: MetricKind, hue: ColorSpec) -> BaseHu
 pub fn automatic_hues_for_metrics(metrics: &[MetricKind]) -> BaseHues {
     let mut hues = default_base_hues();
     let canonical = default_base_hues();
-    let mut needed = [false; 6];
+    let mut needed = [false; 8];
 
     for metric in metrics {
         for index in base_slots_for_metric(*metric) {
@@ -259,7 +263,7 @@ pub fn automatic_hues_for_metrics(metrics: &[MetricKind]) -> BaseHues {
 pub fn automatic_hues_for_stream(count: usize) -> BaseHues {
     let mut hues = default_base_hues();
     let canonical = default_base_hues();
-    let active = count.clamp(1, 6);
+    let active = count.clamp(1, 8);
     for index in 0..active {
         hues[index] = canonical[index];
     }
@@ -284,8 +288,8 @@ pub fn split_gradients_for_with_hues(
             gradient_for_with_hues(MetricKind::Egress, hues),
         )),
         MetricKind::Io => Some((
-            gradient_for_with_hues(MetricKind::Storage, hues),
-            gradient_for_with_hues(MetricKind::Ingress, hues),
+            gradient_for_with_hues(MetricKind::In, hues),
+            gradient_for_with_hues(MetricKind::Out, hues),
         )),
         _ => None,
     }
@@ -355,11 +359,13 @@ fn base_color(index: usize, hues: Option<&BaseHues>) -> ColorSpec {
 fn default_base_hues() -> BaseHues {
     [
         ColorSpec::Angle(20.0),
-        ColorSpec::Angle(80.0),
-        ColorSpec::Angle(140.0),
+        ColorSpec::Angle(65.0),
+        ColorSpec::Angle(110.0),
+        ColorSpec::Angle(155.0),
         ColorSpec::Angle(200.0),
-        ColorSpec::Angle(260.0),
-        ColorSpec::Angle(320.0),
+        ColorSpec::Angle(245.0),
+        ColorSpec::Angle(290.0),
+        ColorSpec::Angle(335.0),
     ]
 }
 
@@ -373,10 +379,12 @@ fn base_slots_for_metric(metric: MetricKind) -> &'static [usize] {
         MetricKind::Vram => &[2, 3],
         MetricKind::Gfx => &[2, 3],
         MetricKind::Storage => &[3],
-        MetricKind::Io => &[3, 4],
-        MetricKind::Ingress => &[4],
-        MetricKind::Net => &[4, 5],
-        MetricKind::Egress => &[5],
+        MetricKind::Io => &[4, 5],
+        MetricKind::In => &[4],
+        MetricKind::Out => &[5],
+        MetricKind::Net => &[6, 7],
+        MetricKind::Ingress => &[6],
+        MetricKind::Egress => &[7],
     }
 }
 
@@ -572,24 +580,24 @@ mod tests {
         assert_eq!(sys[1], ColorSpec::Angle(42.0));
 
         let io = metric_hues_for_visible_hue(MetricKind::Io, ColorSpec::Angle(210.0));
-        assert_eq!(io[3], ColorSpec::Angle(210.0));
         assert_eq!(io[4], ColorSpec::Angle(210.0));
+        assert_eq!(io[5], ColorSpec::Angle(210.0));
 
         let net = metric_hues_for_visible_hue(MetricKind::Net, ColorSpec::Angle(275.0));
-        assert_eq!(net[4], ColorSpec::Angle(275.0));
-        assert_eq!(net[5], ColorSpec::Angle(275.0));
+        assert_eq!(net[6], ColorSpec::Angle(275.0));
+        assert_eq!(net[7], ColorSpec::Angle(275.0));
     }
 
     #[test]
     fn automatic_hues_for_metrics_assigns_only_needed_slots() {
         let hues = automatic_hues_for_metrics(&[MetricKind::Cpu, MetricKind::Net]);
         assert_eq!(hues[0], ColorSpec::Angle(20.0));
-        assert_eq!(hues[4], ColorSpec::Angle(80.0));
-        assert_eq!(hues[5], ColorSpec::Angle(140.0));
+        assert_eq!(hues[6], ColorSpec::Angle(65.0));
+        assert_eq!(hues[7], ColorSpec::Angle(110.0));
     }
 
     #[test]
-    fn automatic_hues_for_stream_clamps_to_six_channels() {
+    fn automatic_hues_for_stream_clamps_to_eight_channels() {
         assert_eq!(automatic_hues_for_stream(8), default_base_hues());
     }
 
@@ -612,11 +620,13 @@ mod tests {
     fn vram_gradient_uses_midpoint_between_gpu_and_storage_hues() {
         let hues = [
             ColorSpec::Angle(20.0),
-            ColorSpec::Angle(80.0),
+            ColorSpec::Angle(65.0),
             ColorSpec::Angle(140.0),
             ColorSpec::Angle(220.0),
             ColorSpec::Angle(260.0),
             ColorSpec::Angle(320.0),
+            ColorSpec::Angle(20.0),
+            ColorSpec::Angle(20.0),
         ];
         let midpoint_gradient = gradient_from_hue(180.0);
         assert_eq!(

@@ -198,7 +198,10 @@ impl Sampler {
         if metrics.contains(&MetricKind::Cpu) {
             self.cpu_prev = Some(read_cpu_counters()?);
         }
-        if metrics.contains(&MetricKind::Io) {
+        if metrics.contains(&MetricKind::Io)
+            || metrics.contains(&MetricKind::In)
+            || metrics.contains(&MetricKind::Out)
+        {
             self.disk_prev = Some((read_disk_counters()?, Instant::now()));
         }
         if metrics.contains(&MetricKind::Ingress)
@@ -263,7 +266,10 @@ impl Sampler {
             None
         };
 
-        let io_value = if metrics.contains(&MetricKind::Io) {
+        let io_value = if metrics.contains(&MetricKind::Io)
+            || metrics.contains(&MetricKind::In)
+            || metrics.contains(&MetricKind::Out)
+        {
             Some(self.sample_io()?)
         } else {
             None
@@ -301,6 +307,12 @@ impl Sampler {
                     storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
                 }
                 MetricKind::Io => io_value.map(|sample| sample.value),
+                MetricKind::In => {
+                    io_value.map(|sample| MetricValue::Single(sample.value.lower()))
+                }
+                MetricKind::Out => {
+                    io_value.map(|sample| MetricValue::Single(sample.value.upper()))
+                }
                 MetricKind::Net => net_value.map(|sample| sample.value),
                 MetricKind::Ingress => {
                     net_value.map(|sample| MetricValue::Single(sample.value.upper()))
@@ -314,6 +326,8 @@ impl Sampler {
                 let headline = match metric {
                     MetricKind::Io => io_value
                         .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
+                    MetricKind::In => io_value.map(|sample| HeadlineValue::Scalar(sample.lower_raw)),
+                    MetricKind::Out => io_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw)),
                     MetricKind::Net => net_value
                         .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
                     MetricKind::Ingress => {
@@ -507,6 +521,8 @@ fn canonicalize_metric_value(
         | (MetricKind::Vram, MetricValue::Single(normalized))
         | (MetricKind::Memory, MetricValue::Single(normalized))
         | (MetricKind::Storage, MetricValue::Single(normalized))
+        | (MetricKind::In, MetricValue::Single(normalized))
+        | (MetricKind::Out, MetricValue::Single(normalized))
         | (MetricKind::Ingress, MetricValue::Single(normalized))
         | (MetricKind::Egress, MetricValue::Single(normalized)) => CanonicalValue::Scalar {
             normalized,
