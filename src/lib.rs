@@ -105,6 +105,7 @@ fn print_completion(shell: config::CompletionShell) {
     let mut command = config::clap_command();
     match shell {
         config::CompletionShell::Bash => generate_to_stdout(Shell::Bash, &mut command),
+        config::CompletionShell::Colors => print_color_completion(),
         config::CompletionShell::Elvish => generate_to_stdout(Shell::Elvish, &mut command),
         config::CompletionShell::Fish => generate_to_stdout(Shell::Fish, &mut command),
         config::CompletionShell::PowerShell => generate_to_stdout(Shell::PowerShell, &mut command),
@@ -114,6 +115,15 @@ fn print_completion(shell: config::CompletionShell) {
 
 fn generate_to_stdout<G: Generator>(generator: G, command: &mut clap::Command) {
     generate(generator, command, "monlin", &mut io::stdout());
+}
+
+fn print_color_completion() {
+    for name in crate::color::palette_names() {
+        println!("{name}");
+    }
+    for name in crate::color::colormap_names() {
+        println!("{name}");
+    }
 }
 
 fn zsh_completion_script() -> &'static str {
@@ -230,7 +240,7 @@ _monlin() {
   )
   commands=(completion debug)
   debug_commands=(colors)
-  shells=(bash elvish fish powershell zsh)
+  shells=(bash colors elvish fish powershell zsh)
 
   case "$prev" in
     --align)

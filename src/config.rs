@@ -72,6 +72,7 @@ pub enum LayoutEngine {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum CompletionShell {
     Bash,
+    Colors,
     Elvish,
     Fish,
     PowerShell,
@@ -615,6 +616,12 @@ mod tests {
     fn parses_completion_shell() {
         let config = parse(&["monlin", "completion", "zsh"]);
         assert_eq!(config.print_completion, Some(CompletionShell::Zsh));
+    }
+
+    #[test]
+    fn parses_color_completion_target() {
+        let config = parse(&["monlin", "completion", "colors"]);
+        assert_eq!(config.print_completion, Some(CompletionShell::Colors));
     }
 
     #[test]

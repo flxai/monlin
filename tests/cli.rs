@@ -45,6 +45,21 @@ fn other_shell_completions_can_be_printed() {
 }
 
 #[test]
+fn color_completion_lists_supported_color_names() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args(["completion", "colors"])
+        .output()
+        .expect("failed to run monlin completion colors");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines = stdout.lines().collect::<Vec<_>>();
+    assert!(lines.contains(&"gruvbox"));
+    assert!(lines.contains(&"turbo"));
+    assert!(lines.contains(&"viridis"));
+}
+
+#[test]
 fn debug_colors_command_prints_metric_rows() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args(["--color", "never", "debug", "colors", "--steps", "4"])
