@@ -470,7 +470,7 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
 }
 
 fn resolve_args_with_config(args: Vec<String>) -> Result<Vec<String>, String> {
-    if args.len() <= 1 || cli_requests_subcommand(&args) {
+    if args.is_empty() || cli_requests_subcommand(&args) {
         return Ok(args);
     }
 
@@ -1030,6 +1030,32 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args, vec!["monlin", "completion", "zsh"]);
+    }
+
+    #[test]
+    fn bare_monlin_still_loads_default_config_file() {
+        let root = unique_temp_dir("bare-config");
+        let config_dir = root.join("monlin");
+        let path = config_dir.join("config.toml");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::write(
+            &path,
+            r#"
+            colors = "gruvbox"
+            "#,
+        )
+        .unwrap();
+
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &root) };
+        let args = resolve_args_with_config(vec!["monlin".to_owned()]).unwrap();
+        match old_xdg {
+            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(args, vec!["monlin", "--colors", "gruvbox"]);
     }
 
     #[test]
