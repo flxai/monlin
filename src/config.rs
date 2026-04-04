@@ -140,6 +140,7 @@ pub struct Config {
     pub interval_ms: u64,
     pub align: Align,
     pub packed: bool,
+    pub solid_colors: bool,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
     pub stream_groups: Option<Vec<StreamGroup>>,
@@ -200,6 +201,13 @@ struct Cli {
         help = "Render packed graph-only output without labels, values, or inter-item spacing"
     )]
     packed: bool,
+
+    #[arg(
+        long = "solid-colors",
+        action = ArgAction::SetTrue,
+        help = "Disable palette/theme shading so non-colormap colors render at full intensity"
+    )]
+    solid_colors: bool,
 
     #[arg(long, help = "Prefix every rendered line with a label")]
     label: Option<String>,
@@ -284,6 +292,8 @@ struct TomlConfig {
     interval_ms: Option<u64>,
     align: Option<String>,
     packed: Option<bool>,
+    #[serde(alias = "solid-colors")]
+    solid_colors: Option<bool>,
     label: Option<String>,
     #[serde(alias = "labels")]
     stream_labels: Option<StringList>,
@@ -424,6 +434,7 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         interval_ms: cli.interval_ms,
         align: cli.align,
         packed: cli.packed,
+        solid_colors: cli.solid_colors,
         label: cli.label,
         stream_labels: if !cli.stream_labels.is_empty() {
             Some(cli.stream_labels)
@@ -585,6 +596,9 @@ fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
     push_flag_value(&mut args, "--align", config.align);
     if config.packed.unwrap_or(false) {
         args.push("--packed".to_owned());
+    }
+    if config.solid_colors.unwrap_or(false) {
+        args.push("--solid-colors".to_owned());
     }
     push_flag_value(&mut args, "--label", config.label);
     if let Some(labels) = config.stream_labels.and_then(StringList::into_csv) {
@@ -905,6 +919,7 @@ mod tests {
             align = "right"
             label = "my host"
             packed = true
+            solid_colors = true
             colors = ["gruvbox", "320"]
             renderer = "block"
             "#,
@@ -916,6 +931,7 @@ mod tests {
                 "--align",
                 "right",
                 "--packed",
+                "--solid-colors",
                 "--label",
                 "my host",
                 "--renderer",
@@ -1076,6 +1092,12 @@ mod tests {
     fn parses_packed_flag() {
         let config = parse(&["monlin", "-p"]);
         assert!(config.packed);
+    }
+
+    #[test]
+    fn parses_solid_colors_flag() {
+        let config = parse(&["monlin", "--solid-colors"]);
+        assert!(config.solid_colors);
     }
 
     #[test]

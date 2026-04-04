@@ -55,6 +55,33 @@ This is equivalent to:
 monlin "all"
 ```
 
+## Config File
+
+`monlin` now prefers a TOML config file:
+
+- `$XDG_CONFIG_HOME/monlin/config.toml`
+- `~/.config/monlin/config.toml`
+
+Legacy shell-word configs at `.../config` are still supported for compatibility.
+CLI flags still override config-file values.
+
+Example:
+
+```toml
+colors = "gruvbox"
+renderer = "block"
+history = 512
+interval_ms = 1000
+align = "left"
+```
+
+List-like fields can also be written as arrays:
+
+```toml
+colors = ["gruvbox", "320"]
+labels = ["cpu", "ram", "net"]
+```
+
 ## Metrics
 
 Single metrics:

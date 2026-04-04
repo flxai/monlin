@@ -371,10 +371,22 @@ pub fn interpolate(gradient: Gradient, t: f64) -> Rgb {
     lab_to_rgb(low.mix(high, eased))
 }
 
-pub fn color_for_intensity(metric: MetricKind, hues: Option<&BaseHues>, t: f64) -> Rgb {
+pub fn color_for_intensity(
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
+    t: f64,
+    solid_colors: bool,
+) -> Rgb {
     match hues.and_then(|values| values.first()).copied() {
         Some(ColorSpec::Map(map)) => colormap_rgb(map, t),
-        _ => interpolate(gradient_for_with_hues(metric, hues), t),
+        _ => {
+            let gradient = gradient_for_with_hues(metric, hues);
+            if solid_colors {
+                gradient.high
+            } else {
+                interpolate(gradient, t)
+            }
+        }
     }
 }
 
@@ -583,6 +595,28 @@ mod tests {
     fn colors_get_brighter_towards_saturation() {
         let gradient = gradient_for(MetricKind::Memory);
         assert!(brightness(interpolate(gradient, 0.0)) < brightness(interpolate(gradient, 1.0)));
+    }
+
+    #[test]
+    fn solid_colors_use_full_palette_intensity() {
+        let gradient = gradient_for(MetricKind::Cpu);
+        assert_eq!(
+            color_for_intensity(MetricKind::Cpu, None, 0.1, true),
+            gradient.high
+        );
+        assert_eq!(
+            color_for_intensity(MetricKind::Cpu, None, 0.9, true),
+            gradient.high
+        );
+    }
+
+    #[test]
+    fn solid_colors_do_not_flatten_colormaps() {
+        let hues = [ColorSpec::Map(ColorMapKind::Turbo); 8];
+        assert_ne!(
+            color_for_intensity(MetricKind::Cpu, Some(&hues), 0.1, true),
+            color_for_intensity(MetricKind::Cpu, Some(&hues), 0.9, true)
+        );
     }
 
     #[test]

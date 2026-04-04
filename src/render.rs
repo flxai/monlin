@@ -2796,13 +2796,24 @@ fn render_block_graph(
     hues: Option<&BaseHues>,
     color_enabled: bool,
 ) -> String {
+    render_block_graph_with_options(samples, width, metric, hues, color_enabled, false)
+}
+
+fn render_block_graph_with_options(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
+    color_enabled: bool,
+    solid_colors: bool,
+) -> String {
     let samples = resample_channel(samples, width, MetricValue::headline_value);
     samples
         .into_iter()
         .map(|sample| {
             let idx = (sample.clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f64).round() as usize;
             let ch = BLOCKS[idx.min(BLOCKS.len() - 1)].to_string();
-            let color = color_for_intensity(metric, hues, sample);
+            let color = color_for_intensity(metric, hues, sample, solid_colors);
             paint(&ch, color, color_enabled)
         })
         .collect()
@@ -2815,8 +2826,26 @@ pub(crate) fn render_braille_graph(
     hues: Option<&BaseHues>,
     color_enabled: bool,
 ) -> String {
+    render_braille_graph_with_options(samples, width, metric, hues, color_enabled, false)
+}
+
+fn render_braille_graph_with_options(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
+    color_enabled: bool,
+    solid_colors: bool,
+) -> String {
     if metric.is_split() {
-        return render_split_braille_graph(samples, width, metric, hues, color_enabled);
+        return render_split_braille_graph_with_options(
+            samples,
+            width,
+            metric,
+            hues,
+            color_enabled,
+            solid_colors,
+        );
     }
 
     let samples = resample_channel(
@@ -2831,7 +2860,7 @@ pub(crate) fn render_braille_graph(
         let right = quantize_level(chunk.get(1).copied().unwrap_or(0.0));
         let cell = braille_cell(left, right);
         let intensity = chunk.iter().copied().reduce(f64::max).unwrap_or(0.0);
-        let color = color_for_intensity(metric, hues, intensity);
+        let color = color_for_intensity(metric, hues, intensity, solid_colors);
         out.push_str(&paint(&cell.to_string(), color, color_enabled));
     }
 
@@ -2844,6 +2873,17 @@ fn render_split_braille_graph(
     metric: MetricKind,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+) -> String {
+    render_split_braille_graph_with_options(samples, width, metric, hues, color_enabled, false)
+}
+
+fn render_split_braille_graph_with_options(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    hues: Option<&BaseHues>,
+    color_enabled: bool,
+    solid_colors: bool,
 ) -> String {
     let mut uppers = resample_channel(samples, width, MetricValue::upper);
     let mut lowers = resample_channel(samples, width, MetricValue::lower);
@@ -2864,6 +2904,7 @@ fn render_split_braille_graph(
             metric,
             hues,
             color_enabled,
+            solid_colors,
         ));
     }
 
@@ -2966,18 +3007,19 @@ fn render_split_cell(
     metric: MetricKind,
     hues: Option<&BaseHues>,
     color_enabled: bool,
+    solid_colors: bool,
 ) -> String {
     if upper_level == 0 && lower_level == 0 {
         let ch = braille_half_cell(1, 1).to_string();
-        let upper_color = color_for_intensity(metric, hues, 0.0);
-        let lower_color = color_for_intensity(metric, hues, 0.0);
+        let upper_color = color_for_intensity(metric, hues, 0.0, solid_colors);
+        let lower_color = color_for_intensity(metric, hues, 0.0, solid_colors);
         let color = blend_split_color(1, 1, upper_color, lower_color);
         return paint(&ch, color, color_enabled);
     }
 
     let ch = braille_half_cell(upper_level, lower_level).to_string();
-    let upper_color = color_for_intensity(metric, hues, upper_intensity);
-    let lower_color = color_for_intensity(metric, hues, lower_intensity);
+    let upper_color = color_for_intensity(metric, hues, upper_intensity, solid_colors);
+    let lower_color = color_for_intensity(metric, hues, lower_intensity, solid_colors);
     let color = blend_split_color(upper_level, lower_level, upper_color, lower_color);
     paint(&ch, color, color_enabled)
 }
@@ -3105,6 +3147,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3174,6 +3217,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3241,6 +3285,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: Some("host".to_owned()),
             stream_labels: None,
             stream_groups: None,
@@ -3299,6 +3344,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3431,6 +3477,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3471,6 +3518,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -3513,6 +3561,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: true,
+            solid_colors: false,
             label: Some("host".to_owned()),
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -3576,6 +3625,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: Some(vec![
                 "a".to_owned(),
@@ -3649,6 +3699,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
             stream_groups: None,
@@ -3695,6 +3746,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3841,6 +3893,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -3980,6 +4033,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4122,6 +4176,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4231,6 +4286,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4342,6 +4398,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4418,6 +4475,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4505,6 +4563,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4592,6 +4651,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4640,6 +4700,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
@@ -4856,6 +4917,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -4932,6 +4994,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
@@ -5033,6 +5096,7 @@ mod tests {
             interval_ms: 1000,
             align: Align::Left,
             packed: false,
+            solid_colors: false,
             label: None,
             stream_labels: None,
             stream_groups: None,
