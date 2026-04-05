@@ -415,16 +415,7 @@ fn render_packed_document_row(
                 return render_unavailable_graph(graph_width, config.renderer, color_enabled);
             }
 
-            let metric_history = histories
-                .get(item.source())
-                .map(|history| {
-                    history
-                        .iter()
-                        .copied()
-                        .filter_map(CanonicalValue::normalized_metric_value)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let metric_history = document_metric_history(histories, item.source());
             render_metric_graph_with_options(
                 &metric_history,
                 graph_width,
@@ -1377,16 +1368,7 @@ fn render_stream_group_row(
         .map(
             |((item, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
                 let metric = stream_metric_for(item.column_index);
-                let metric_history = histories
-                    .get(item.column_index)
-                    .map(|history| {
-                        history
-                            .iter()
-                            .copied()
-                            .map(MetricValue::Single)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let metric_history = stream_metric_history(histories, item.column_index);
                 let item_hues = metric_hues_for_visible_hue(
                     metric,
                     stream_hues[item.column_index % stream_hues.len()],
@@ -1534,16 +1516,7 @@ fn render_document_row(
                 ((item, label, separator, usage_text, fixed), (segment_width, graph_width)),
             )| {
                 let render_metric = document_render_metric(item.source());
-                let metric_history = histories
-                    .get(item.source())
-                    .map(|history| {
-                        history
-                            .iter()
-                            .copied()
-                            .filter_map(CanonicalValue::normalized_metric_value)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let metric_history = document_metric_history(histories, item.source());
                 let item_hues =
                     metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
                 let graph = render_metric_graph_with_options(
@@ -1661,16 +1634,7 @@ fn render_stream_rows(
             .enumerate()
             .map(|(index, _value)| {
                 let metric = stream_metric_for(index);
-                let metric_history = histories
-                    .get(index)
-                    .map(|history| {
-                        history
-                            .iter()
-                            .copied()
-                            .map(MetricValue::Single)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let metric_history = stream_metric_history(histories, index);
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 render_metric_graph_with_options(
@@ -1715,16 +1679,7 @@ fn render_stream_rows(
 
             let graph_width = width.saturating_sub(fixed + 1);
             let metric = stream_metric_for(index);
-            let metric_history = histories
-                .get(index)
-                .map(|history| {
-                    history
-                        .iter()
-                        .copied()
-                        .map(MetricValue::Single)
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            let metric_history = stream_metric_history(histories, index);
             let item_hues =
                 metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
             let graph = render_metric_graph_with_options(
@@ -1768,16 +1723,7 @@ fn render_stream_columns_line(
             .enumerate()
             .map(|(index, graph_width)| {
                 let metric = stream_metric_for(index);
-                let metric_history = histories
-                    .get(index)
-                    .map(|history| {
-                        history
-                            .iter()
-                            .copied()
-                            .map(MetricValue::Single)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let metric_history = stream_metric_history(histories, index);
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 render_metric_graph_with_options(
@@ -1829,16 +1775,7 @@ fn render_stream_columns_line(
         .map(
             |((index, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
                 let metric = stream_metric_for(index);
-                let metric_history = histories
-                    .get(index)
-                    .map(|history| {
-                        history
-                            .iter()
-                            .copied()
-                            .map(MetricValue::Single)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
+                let metric_history = stream_metric_history(histories, index);
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 let display_usage_text = match config.space {
@@ -2298,6 +2235,35 @@ fn split_stream_widths(total: usize, count: usize) -> Vec<usize> {
     (0..count)
         .map(|index| base + usize::from(index < remainder))
         .collect()
+}
+
+fn document_metric_history(
+    histories: &HashMap<Source, VecDeque<CanonicalValue>>,
+    source: &Source,
+) -> Vec<MetricValue> {
+    histories
+        .get(source)
+        .map(|history| {
+            history
+                .iter()
+                .copied()
+                .filter_map(CanonicalValue::normalized_metric_value)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn stream_metric_history(histories: &[VecDeque<f64>], index: usize) -> Vec<MetricValue> {
+    histories
+        .get(index)
+        .map(|history| {
+            history
+                .iter()
+                .copied()
+                .map(MetricValue::Single)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
 }
 
 fn render_inline_segment(
