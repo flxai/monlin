@@ -117,7 +117,10 @@
           ];
           shellHook = ''
             if [ -d .git ]; then
-              git config core.hooksPath .githooks
+              hook_config_index=''${GIT_CONFIG_COUNT:-0}
+              export GIT_CONFIG_COUNT=$((hook_config_index + 1))
+              export GIT_CONFIG_KEY_$hook_config_index=core.hooksPath
+              export GIT_CONFIG_VALUE_$hook_config_index=.githooks
             fi
           '';
         };
