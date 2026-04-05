@@ -300,33 +300,6 @@ struct Cli {
     )]
     window: Window,
 
-    #[arg(long, help = "Prefix every rendered line with a label")]
-    label: Option<String>,
-
-    #[arg(
-        long = "labels",
-        value_delimiter = ',',
-        value_parser = parse_stream_label,
-        help = "Comma-separated labels for stdin stream columns"
-    )]
-    stream_labels: Vec<String>,
-
-    #[arg(
-        long = "stream-layout",
-        value_enum,
-        default_value_t = StreamLayout::Columns,
-        help = "Render streamed stdin as columns on one line or as separate lines"
-    )]
-    stream_layout: StreamLayout,
-
-    #[arg(
-        long = "space",
-        value_enum,
-        default_value_t = Space::Stable,
-        help = "How streamed columns allocate width: stable prefixes, compact equal graph space, or equal total segment space"
-    )]
-    space: Space,
-
     #[arg(
         short = 'e',
         long = "engine",
@@ -386,12 +359,6 @@ struct TomlConfig {
     #[serde(alias = "solid-colors")]
     solid_colors: Option<bool>,
     window: Option<String>,
-    label: Option<String>,
-    #[serde(alias = "labels")]
-    stream_labels: Option<StringList>,
-    #[serde(alias = "stream-layout")]
-    stream_layout: Option<String>,
-    space: Option<String>,
     #[serde(alias = "engine")]
     layout_engine: Option<String>,
     renderer: Option<String>,
@@ -483,17 +450,6 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         return Err("'-' cannot be combined with f:... or p:... input sources".to_owned());
     }
     let stream_groups = None;
-    if inline_stream_labels.is_some() && !cli.stream_labels.is_empty() {
-        return Err("inline stream labels cannot be combined with --labels".to_owned());
-    }
-    if document
-        .as_ref()
-        .is_some_and(|document| document.uses_stream_columns())
-        && !cli.stream_labels.is_empty()
-    {
-        return Err("stream column layouts cannot be combined with --labels".to_owned());
-    }
-
     let layout = if external_input.is_some()
         || stream_groups.is_some()
         || cli.layout_parts.is_empty()
@@ -528,15 +484,11 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         packed: cli.packed,
         solid_colors: cli.solid_colors,
         window: cli.window,
-        label: cli.label,
-        stream_labels: if !cli.stream_labels.is_empty() {
-            Some(cli.stream_labels)
-        } else {
-            inline_stream_labels
-        },
+        label: None,
+        stream_labels: inline_stream_labels,
         stream_groups,
-        stream_layout: cli.stream_layout,
-        space: cli.space,
+        stream_layout: StreamLayout::Columns,
+        space: Space::Stable,
         layout_engine: cli.layout_engine,
         layout,
         renderer: cli.renderer,
@@ -755,13 +707,6 @@ fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
         args.push("--solid-colors".to_owned());
     }
     push_flag_value(&mut args, "--window", config.window);
-    push_flag_value(&mut args, "--label", config.label);
-    if let Some(labels) = config.stream_labels.and_then(StringList::into_csv) {
-        args.push("--labels".to_owned());
-        args.push(labels);
-    }
-    push_flag_value(&mut args, "--stream-layout", config.stream_layout);
-    push_flag_value(&mut args, "--space", config.space);
     push_flag_value(&mut args, "--engine", config.layout_engine);
     push_flag_value(&mut args, "--renderer", config.renderer);
     if let Some(colors) = config.colors.and_then(StringList::into_csv) {
@@ -1067,12 +1012,11 @@ mod tests {
             r#"
             # comment
             --align right
-            --label "my host"
             -p
             "#,
         )
         .unwrap();
-        assert_eq!(args, vec!["--align", "right", "--label", "my host", "-p"]);
+        assert_eq!(args, vec!["--align", "right", "-p"]);
     }
 
     #[test]
@@ -1080,7 +1024,6 @@ mod tests {
         let args = parse_toml_config_contents(
             r#"
             align = "right"
-            label = "my host"
             packed = true
             solid_colors = true
             colors = ["gruvbox", "320"]
@@ -1095,8 +1038,6 @@ mod tests {
                 "right",
                 "--packed",
                 "--solid-colors",
-                "--label",
-                "my host",
                 "--renderer",
                 "block",
                 "--colors",
@@ -1351,21 +1292,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_stream_labels() {
-        let config = parse(&["monlin", "--labels", "wifi,eth,vpn"]);
-        assert_eq!(
-            config.stream_labels,
-            Some(vec!["wifi".to_owned(), "eth".to_owned(), "vpn".to_owned()])
-        );
-    }
-
-    #[test]
-    fn parses_stream_layout() {
-        let config = parse(&["monlin", "--stream-layout", "lines"]);
-        assert_eq!(config.stream_layout, StreamLayout::Lines);
-    }
-
-    #[test]
     fn parses_packed_flag() {
         let config = parse(&["monlin", "-p"]);
         assert!(config.packed);
@@ -1445,12 +1371,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_space_mode() {
-        let config = parse(&["monlin", "--space", "segment"]);
-        assert_eq!(config.space, Space::Segment);
-    }
-
-    #[test]
     fn parses_layout_engine() {
         let config = parse(&["monlin", "--engine", "grid"]);
         assert_eq!(config.layout_engine, LayoutEngine::Grid);
@@ -1513,17 +1433,6 @@ mod tests {
             Some(ExternalInputSource::Process("printf '10\\n'".to_owned()))
         );
         assert_eq!(config.stream_labels, Some(vec!["cpu".to_owned()]));
-    }
-
-    #[test]
-    fn rejects_combining_inline_external_labels_with_flag_labels() {
-        let error = parse_args(
-            ["monlin", "--labels", "a,b", "cpu,ram=p:printf '10 20\\n'"]
-                .into_iter()
-                .map(str::to_owned),
-        )
-        .unwrap_err();
-        assert!(error.contains("cannot be combined with --labels"));
     }
 
     #[test]
@@ -1688,17 +1597,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_stream_labels() {
-        let error = parse_args(
-            ["monlin", "--labels", "wifi,,vpn"]
-                .into_iter()
-                .map(|item| item.to_string()),
-        )
-        .unwrap_err();
-        assert!(error.contains("labels"));
-    }
-
-    #[test]
     fn zero_history_is_clamped_to_one() {
         let config = parse(&["monlin", "--history", "0"]);
         assert_eq!(config.history, 1);
@@ -1769,12 +1667,12 @@ mod tests {
     #[test]
     fn rejects_missing_flag_value() {
         let error = parse_args(
-            ["monlin", "--label"]
+            ["monlin", "--align"]
                 .into_iter()
                 .map(|item| item.to_string()),
         )
         .unwrap_err();
-        assert!(error.contains("--label"));
+        assert!(error.contains("--align"));
     }
 
     #[test]

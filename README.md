@@ -86,7 +86,6 @@ List-like fields can also be written as arrays:
 
 ```toml
 colors = ["gruvbox", "320"]
-stream_labels = ["cpu", "ram", "net"]
 ```
 
 ## Sources And Aliases

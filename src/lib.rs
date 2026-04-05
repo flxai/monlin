@@ -284,10 +284,6 @@ _monlin() {{
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'
     '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
     '--solid-colors:Disable palette or theme shading for full-intensity colors'
-    '--label:Prefix every rendered line with a label'
-    '--labels:Comma-separated labels for stdin stream columns'
-    '--stream-layout:Render streamed stdin as columns or lines'
-    '--space:How streamed columns allocate width'
     '-e:How native layouts arrange rows'
     '--engine:How native layouts arrange rows'
     '--renderer:Graph renderer to use'
@@ -333,14 +329,6 @@ _monlin() {{
       ;;
     -w|--window)
       compadd agg tail
-      return
-      ;;
-    --stream-layout)
-      compadd columns lines
-      return
-      ;;
-    --space)
-      compadd stable graph segment
       return
       ;;
     -e|--engine)
@@ -1007,15 +995,6 @@ fn maybe_run_stream(config: &config::Config) -> Result<Option<Result<(), String>
 }
 
 fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result<(), String> {
-    if let Some(labels) = &config.stream_labels {
-        if labels.len() != series_count {
-            return Err(format!(
-                "--labels expected {series_count} entries for the input stream, got {}",
-                labels.len()
-            ));
-        }
-    }
-
     let derived_groups = config
         .document
         .as_ref()
@@ -2560,13 +2539,12 @@ mod tests {
     }
 
     #[test]
-    fn zsh_completion_script_mentions_layout_views_and_space_option() {
+    fn zsh_completion_script_mentions_layout_views_and_debug_commands() {
         let script = zsh_completion_script();
         assert!(script.contains("pct abs full value bare"));
         assert!(script.contains("--solid-colors"));
         assert!(script.contains("-i:Sampling interval in milliseconds"));
         assert!(script.contains("@1"));
-        assert!(script.contains("--space:How streamed columns allocate width"));
         assert!(script.contains("debug_commands=(colors window braille)"));
         assert!(
             script.contains("--split-upper:Comma- or space-separated upper split-channel samples")
@@ -2574,15 +2552,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_stream_shape_accepts_absent_labels_and_rejects_mismatches() {
+    fn validate_stream_shape_accepts_absent_labels() {
         let config = config::parse_args(["monlin"].into_iter().map(str::to_owned)).unwrap();
         assert!(validate_stream_shape(&config, 2).is_ok());
-
-        let labeled =
-            config::parse_args(["monlin", "--labels", "a,b"].into_iter().map(str::to_owned))
-                .unwrap();
-        let error = validate_stream_shape(&labeled, 3).unwrap_err();
-        assert!(error.contains("--labels expected 3 entries"));
     }
 
     #[test]
