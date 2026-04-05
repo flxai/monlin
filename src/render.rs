@@ -2853,8 +2853,20 @@ fn render_split_braille_graph_with_options(
     solid_colors: bool,
     window: Window,
 ) -> String {
-    let mut uppers = resample_split_channel(samples, width, MetricValue::upper, window, align);
-    let mut lowers = resample_split_channel(samples, width, MetricValue::lower, window, align);
+    let mut uppers = collapse_split_pairs(resample_split_channel(
+        samples,
+        width.saturating_mul(2),
+        MetricValue::upper,
+        window,
+        align,
+    ));
+    let mut lowers = collapse_split_pairs(resample_split_channel(
+        samples,
+        width.saturating_mul(2),
+        MetricValue::lower,
+        window,
+        align,
+    ));
     normalize_split_channels(&mut uppers, &mut lowers);
     let mut out = String::new();
 
@@ -2877,6 +2889,13 @@ fn render_split_braille_graph_with_options(
     }
 
     out
+}
+
+fn collapse_split_pairs(samples: Vec<f64>) -> Vec<f64> {
+    samples
+        .chunks(2)
+        .map(|chunk| chunk.iter().copied().sum::<f64>() / chunk.len() as f64)
+        .collect()
 }
 
 fn resample_split_channel(
@@ -5385,8 +5404,16 @@ mod tests {
     }
 
     #[test]
-    fn split_tail_window_uses_recent_visible_samples_directly() {
+    fn split_tail_window_uses_recent_2w_samples_directly() {
         let samples = [
+            MetricValue::Split {
+                upper: 1.0,
+                lower: 1.0,
+            },
+            MetricValue::Split {
+                upper: 0.0,
+                lower: 0.0,
+            },
             MetricValue::Split {
                 upper: 1.0,
                 lower: 1.0,
@@ -5401,16 +5428,6 @@ mod tests {
             },
         ];
 
-        let agg = render_split_braille_graph_with_options(
-            &samples,
-            2,
-            MetricKind::Net,
-            None,
-            Align::Right,
-            false,
-            false,
-            Window::Agg,
-        );
         let tail = render_split_braille_graph_with_options(
             &samples,
             2,
@@ -5422,8 +5439,18 @@ mod tests {
             Window::Tail,
         );
 
-        assert_eq!(tail, "⠰⣿");
-        assert_ne!(agg, tail);
+        let recent = render_split_braille_graph_with_options(
+            &samples[samples.len() - 4..],
+            2,
+            MetricKind::Net,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Agg,
+        );
+
+        assert_eq!(tail, recent);
     }
 
     #[test]
