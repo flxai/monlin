@@ -78,6 +78,64 @@ fn debug_colors_command_prints_metric_rows() {
 }
 
 #[test]
+fn debug_window_command_prints_visible_window_data() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "debug",
+            "window",
+            "--samples",
+            "0,1,0,1",
+            "--renderer",
+            "braille",
+            "--width",
+            "2",
+        ])
+        .output()
+        .expect("failed to run monlin debug window");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("mode: scalar"));
+    assert!(stdout.contains("visible:"));
+    assert!(stdout.contains("groups:"));
+}
+
+#[test]
+fn debug_braille_command_prints_scalar_cells() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args(["debug", "braille", "--samples", "0,1,0,1", "--width", "2"])
+        .output()
+        .expect("failed to run monlin debug braille");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("mode: scalar"));
+    assert!(stdout.contains("cell  1:"));
+    assert!(stdout.contains("bits=["));
+}
+
+#[test]
+fn debug_braille_command_prints_split_frames() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "debug",
+            "braille",
+            "--split-upper",
+            "0,1",
+            "--split-lower",
+            "1,0",
+            "--frames",
+        ])
+        .output()
+        .expect("failed to run monlin debug braille split frames");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("frame  1:"));
+    assert!(stdout.contains("glyphs="));
+}
+
+#[test]
 fn once_mode_exits_successfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([

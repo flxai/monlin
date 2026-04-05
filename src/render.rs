@@ -69,6 +69,40 @@ struct RenderContext {
     graph: GraphRenderOptions,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DebugWindowPreview {
+    pub visible_samples: Vec<f64>,
+    pub cell_groups: Vec<Vec<f64>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DebugScalarBraillePreview {
+    pub visible_samples: Vec<f64>,
+    pub cells: Vec<DebugScalarBrailleCell>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DebugScalarBrailleCell {
+    pub glyph: char,
+    pub bits: [bool; 8],
+    pub samples: Vec<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DebugSplitBraillePreview {
+    pub upper_visible_samples: Vec<f64>,
+    pub lower_visible_samples: Vec<f64>,
+    pub cells: Vec<DebugSplitBrailleCell>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DebugSplitBrailleCell {
+    pub glyph: char,
+    pub bits: [bool; 8],
+    pub upper_samples: Vec<f64>,
+    pub lower_samples: Vec<f64>,
+}
+
 fn graph_render_options(
     hues: Option<BaseHues>,
     align: Align,
@@ -157,6 +191,127 @@ pub fn render_lines(
         values,
         &headline_values,
     )
+}
+
+pub(crate) fn debug_window_preview(
+    samples: &[f64],
+    width: usize,
+    renderer: Renderer,
+    window: Window,
+    align: Align,
+) -> DebugWindowPreview {
+    let target = match renderer {
+        Renderer::Braille => width.saturating_mul(2),
+        Renderer::Block => width,
+    };
+    let metric_samples = samples
+        .iter()
+        .copied()
+        .map(MetricValue::Single)
+        .collect::<Vec<_>>();
+    let visible_samples = resample_channel(
+        &metric_samples,
+        target,
+        MetricValue::headline_value,
+        window,
+        align,
+    );
+    let group_size = match renderer {
+        Renderer::Braille => 2,
+        Renderer::Block => 1,
+    };
+    let cell_groups = visible_samples
+        .chunks(group_size)
+        .map(|chunk| chunk.to_vec())
+        .collect::<Vec<_>>();
+    DebugWindowPreview {
+        visible_samples,
+        cell_groups,
+    }
+}
+
+pub(crate) fn debug_scalar_braille_preview(
+    samples: &[f64],
+    width: usize,
+    window: Window,
+    align: Align,
+) -> DebugScalarBraillePreview {
+    let preview = debug_window_preview(samples, width, Renderer::Braille, window, align);
+    let cells = preview
+        .visible_samples
+        .chunks(2)
+        .map(|chunk| {
+            let left = chunk.first().copied().unwrap_or(0.0);
+            let right = chunk.get(1).copied().unwrap_or(0.0);
+            let glyph = braille_cell(quantize_level(left), quantize_level(right));
+            DebugScalarBrailleCell {
+                glyph,
+                bits: braille_bits(glyph),
+                samples: chunk.to_vec(),
+            }
+        })
+        .collect::<Vec<_>>();
+    DebugScalarBraillePreview {
+        visible_samples: preview.visible_samples,
+        cells,
+    }
+}
+
+pub(crate) fn debug_split_braille_preview(
+    upper: &[f64],
+    lower: &[f64],
+    width: usize,
+    window: Window,
+    align: Align,
+) -> DebugSplitBraillePreview {
+    let samples = upper
+        .iter()
+        .copied()
+        .zip(lower.iter().copied())
+        .map(|(upper, lower)| MetricValue::Split { upper, lower })
+        .collect::<Vec<_>>();
+    let mut upper_visible = resample_split_channel(
+        &samples,
+        width.saturating_mul(2),
+        MetricValue::upper,
+        window,
+        align,
+    );
+    let mut lower_visible = resample_split_channel(
+        &samples,
+        width.saturating_mul(2),
+        MetricValue::lower,
+        window,
+        align,
+    );
+    normalize_split_channels(&mut upper_visible, &mut lower_visible);
+
+    let cells = (0..width)
+        .map(|index| {
+            let left_upper = upper_visible.get(index * 2).copied().unwrap_or(0.0);
+            let right_upper = upper_visible.get(index * 2 + 1).copied().unwrap_or(0.0);
+            let left_lower = lower_visible.get(index * 2).copied().unwrap_or(0.0);
+            let right_lower = lower_visible.get(index * 2 + 1).copied().unwrap_or(0.0);
+            let glyph = split_pair_cell(
+                quantize_visible_split_column_level(left_upper),
+                quantize_visible_split_column_level(right_upper),
+                quantize_visible_split_column_level(left_lower),
+                quantize_visible_split_column_level(right_lower),
+            );
+            DebugSplitBrailleCell {
+                glyph,
+                bits: braille_bits(glyph),
+                upper_samples: vec![left_upper, right_upper],
+                lower_samples: vec![left_lower, right_lower],
+            }
+        })
+        .collect::<Vec<_>>();
+
+    DebugSplitBraillePreview {
+        upper_visible_samples: upper_visible,
+        lower_visible_samples: lower_visible,
+        cells,
+    }
 }
 
 pub fn render_lines_with_headlines(
@@ -3039,6 +3194,11 @@ fn split_pair_cell(
     char::from_u32(0x2800 + bits).unwrap_or(' ')
 }
 
+pub(crate) fn braille_bits(ch: char) -> [bool; 8] {
+    let bits = (ch as u32).saturating_sub(0x2800);
+    std::array::from_fn(|index| bits & (1 << index) != 0)
+}
+
 fn render_split_pair_cell(
     left_upper_level: usize,
     right_upper_level: usize,
@@ -3160,11 +3320,6 @@ mod tests {
         chars[0]
     }
 
-    fn braille_bits(ch: char) -> [bool; 8] {
-        let bits = (ch as u32).saturating_sub(0x2800);
-        std::array::from_fn(|index| bits & (1 << index) != 0)
-    }
-
     #[test]
     fn full_braille_cell_is_filled() {
         assert_eq!(braille_cell(4, 4), '⣿');
@@ -3246,6 +3401,33 @@ mod tests {
     }
 
     #[test]
+    fn debug_window_preview_groups_braille_samples_into_pairs() {
+        let preview = debug_window_preview(
+            &[0.0, 1.0, 0.0, 1.0],
+            2,
+            Renderer::Braille,
+            Window::Tail,
+            Align::Right,
+        );
+
+        assert_eq!(preview.visible_samples, vec![0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(preview.cell_groups, vec![vec![0.0, 1.0], vec![0.0, 1.0]]);
+    }
+
+    #[test]
+    fn debug_split_braille_preview_reports_cell_bits_and_visible_samples() {
+        let preview =
+            debug_split_braille_preview(&[1.0, 0.0], &[0.0, 1.0], 1, Window::Tail, Align::Right);
+
+        assert_eq!(preview.upper_visible_samples, vec![1.0, 0.0]);
+        assert_eq!(preview.lower_visible_samples, vec![0.0, 1.0]);
+        assert_eq!(preview.cells.len(), 1);
+        assert_eq!(preview.cells[0].glyph, '⢣');
+        assert_eq!(preview.cells[0].upper_samples, vec![1.0, 0.0]);
+        assert_eq!(preview.cells[0].lower_samples, vec![0.0, 1.0]);
+    }
+
+    #[test]
     fn braille_graph_renders_requested_width() {
         let graph = render_braille_graph(
             &[
@@ -3306,6 +3488,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let mut histories = HashMap::new();
@@ -3377,6 +3561,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([(
@@ -3446,6 +3632,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -3506,6 +3694,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -3640,6 +3830,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -3682,6 +3874,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -3726,6 +3920,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -3794,6 +3990,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -3870,6 +4068,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -3918,6 +4118,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -4066,6 +4268,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -4207,6 +4411,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let auto_config = Config {
@@ -4351,6 +4557,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let auto_config = Config {
@@ -4462,6 +4670,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let flex_config = Config {
@@ -4575,6 +4785,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let values = HashMap::from([
@@ -4653,6 +4865,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let values = HashMap::from([
@@ -4742,6 +4956,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -4831,6 +5047,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([(
@@ -4881,6 +5099,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = vec![
@@ -5099,6 +5319,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([
@@ -5177,6 +5399,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::new();
@@ -5280,6 +5504,8 @@ mod tests {
             external_input: None,
             print_completion: None,
             debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
             show_help: false,
         };
         let histories = HashMap::from([(

@@ -123,6 +123,57 @@ enum DebugCommand {
         )]
         steps: usize,
     },
+    #[command(about = "Inspect how scalar history is resampled into visible window columns")]
+    Window {
+        #[arg(long, help = "Comma- or space-separated scalar samples, e.g. 0,1,0,1")]
+        samples: String,
+        #[arg(long, value_enum, default_value_t = Renderer::Braille, help = "Renderer shape to inspect")]
+        renderer: Renderer,
+        #[arg(
+            short = 'w',
+            long = "window",
+            value_enum,
+            default_value_t = Window::Tail,
+            help = "How to display retained history"
+        )]
+        window: Window,
+        #[arg(long, value_enum, default_value_t = Align::Right, help = "Align recent history to the left or right edge")]
+        align: Align,
+        #[arg(long, default_value_t = 4, help = "Visible renderer width in cells")]
+        width: usize,
+    },
+    #[command(about = "Inspect braille glyph encoding for scalar or split samples")]
+    Braille {
+        #[arg(long, help = "Comma- or space-separated scalar samples, e.g. 0,1,0,1")]
+        samples: Option<String>,
+        #[arg(
+            long = "split-upper",
+            help = "Comma- or space-separated upper split-channel samples"
+        )]
+        split_upper: Option<String>,
+        #[arg(
+            long = "split-lower",
+            help = "Comma- or space-separated lower split-channel samples"
+        )]
+        split_lower: Option<String>,
+        #[arg(
+            short = 'w',
+            long = "window",
+            value_enum,
+            default_value_t = Window::Tail,
+            help = "How to display retained history"
+        )]
+        window: Window,
+        #[arg(long, value_enum, default_value_t = Align::Right, help = "Align recent history to the left or right edge")]
+        align: Align,
+        #[arg(
+            long,
+            help = "Visible braille width in cells; defaults to the needed width for the given samples"
+        )]
+        width: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue, help = "Print one preview frame for each growing input prefix")]
+        frames: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
@@ -165,7 +216,29 @@ pub struct Config {
     pub external_input: Option<ExternalInputSource>,
     pub print_completion: Option<CompletionShell>,
     pub debug_colors_steps: Option<usize>,
+    pub debug_window: Option<DebugWindowSpec>,
+    pub debug_braille: Option<DebugBrailleSpec>,
     pub show_help: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DebugWindowSpec {
+    pub samples: String,
+    pub renderer: Renderer,
+    pub window: Window,
+    pub align: Align,
+    pub width: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DebugBrailleSpec {
+    pub samples: Option<String>,
+    pub split_upper: Option<String>,
+    pub split_lower: Option<String>,
+    pub window: Window,
+    pub align: Align,
+    pub width: Option<usize>,
+    pub frames: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -472,16 +545,58 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         once: cli.once,
         force_stream_input,
         external_input,
-        print_completion: match cli.command {
-            Some(CliCommand::Completion { shell }) => Some(shell),
+        print_completion: match &cli.command {
+            Some(CliCommand::Completion { shell }) => Some(*shell),
             _ => None,
         },
-        debug_colors_steps: match cli.command {
+        debug_colors_steps: match &cli.command {
             Some(CliCommand::Debug {
                 command: DebugCommand::Colors { steps },
-            }) => Some(steps.max(1)),
-            Some(CliCommand::Completion { .. }) => None,
+            }) => Some((*steps).max(1)),
+            Some(CliCommand::Completion { .. }) | Some(CliCommand::Debug { .. }) => None,
             None => None,
+        },
+        debug_window: match &cli.command {
+            Some(CliCommand::Debug {
+                command:
+                    DebugCommand::Window {
+                        samples,
+                        renderer,
+                        window,
+                        align,
+                        width,
+                    },
+            }) => Some(DebugWindowSpec {
+                samples: samples.clone(),
+                renderer: *renderer,
+                window: *window,
+                align: *align,
+                width: (*width).max(1),
+            }),
+            _ => None,
+        },
+        debug_braille: match &cli.command {
+            Some(CliCommand::Debug {
+                command:
+                    DebugCommand::Braille {
+                        samples,
+                        split_upper,
+                        split_lower,
+                        window,
+                        align,
+                        width,
+                        frames,
+                    },
+            }) => Some(DebugBrailleSpec {
+                samples: samples.clone(),
+                split_upper: split_upper.clone(),
+                split_lower: split_lower.clone(),
+                window: *window,
+                align: *align,
+                width: *width,
+                frames: *frames,
+            }),
+            _ => None,
         },
         show_help: cli.show_help,
     })
@@ -1143,6 +1258,61 @@ mod tests {
     fn parses_solid_colors_flag() {
         let config = parse(&["monlin", "--solid-colors"]);
         assert!(config.solid_colors);
+    }
+
+    #[test]
+    fn parses_debug_window_command() {
+        let config = parse(&[
+            "monlin",
+            "debug",
+            "window",
+            "--samples",
+            "0,1,0,1",
+            "--renderer",
+            "block",
+            "--window",
+            "agg",
+            "--align",
+            "left",
+            "--width",
+            "6",
+        ]);
+        assert_eq!(
+            config.debug_window,
+            Some(DebugWindowSpec {
+                samples: "0,1,0,1".to_owned(),
+                renderer: Renderer::Block,
+                window: Window::Agg,
+                align: Align::Left,
+                width: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_debug_braille_command() {
+        let config = parse(&[
+            "monlin",
+            "debug",
+            "braille",
+            "--split-upper",
+            "0,1",
+            "--split-lower",
+            "1,0",
+            "--frames",
+        ]);
+        assert_eq!(
+            config.debug_braille,
+            Some(DebugBrailleSpec {
+                samples: None,
+                split_upper: Some("0,1".to_owned()),
+                split_lower: Some("1,0".to_owned()),
+                window: Window::Tail,
+                align: Align::Right,
+                width: None,
+                frames: true,
+            })
+        );
     }
 
     #[test]

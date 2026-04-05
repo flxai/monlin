@@ -63,6 +63,14 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         );
         return Ok(());
     }
+    if let Some(spec) = &config.debug_window {
+        print_debug_window(spec)?;
+        return Ok(());
+    }
+    if let Some(spec) = &config.debug_braille {
+        print_debug_braille(spec)?;
+        return Ok(());
+    }
 
     if config.stream_groups.is_some()
         && config.external_input.is_none()
@@ -414,6 +422,202 @@ fn print_debug_colors(
         let graph =
             render::render_braille_graph(&samples, width, *metric, Some(&item_hues), color_enabled);
         println!("{label:<4} {graph}");
+    }
+}
+
+fn parse_debug_samples(raw: &str) -> Result<Vec<f64>, String> {
+    let samples = raw
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .filter(|token| !token.trim().is_empty())
+        .map(|token| {
+            token
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| format!("invalid sample '{token}': {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if samples.is_empty() {
+        return Err("at least one sample is required".to_owned());
+    }
+    Ok(samples)
+}
+
+fn format_float_list(values: &[f64]) -> String {
+    let body = values
+        .iter()
+        .map(|value| format!("{value:.3}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{body}]")
+}
+
+fn format_cell_groups(groups: &[Vec<f64>]) -> String {
+    let rendered = groups
+        .iter()
+        .map(|group| format_float_list(group))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("[{rendered}]")
+}
+
+fn print_debug_window(spec: &config::DebugWindowSpec) -> Result<(), String> {
+    let samples = parse_debug_samples(&spec.samples)?;
+    let preview =
+        render::debug_window_preview(&samples, spec.width, spec.renderer, spec.window, spec.align);
+
+    println!("mode: scalar");
+    println!(
+        "renderer: {:?} window: {:?} align: {:?} width: {}",
+        spec.renderer, spec.window, spec.align, spec.width
+    );
+    println!("input:   {}", format_float_list(&samples));
+    println!("visible: {}", format_float_list(&preview.visible_samples));
+    println!("groups:  {}", format_cell_groups(&preview.cell_groups));
+    Ok(())
+}
+
+fn format_braille_bits(bits: [bool; 8]) -> String {
+    let body = bits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bit)| bit.then_some(index.to_string()))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{body}]")
+}
+
+fn print_scalar_braille_frames(
+    samples: &[f64],
+    width: usize,
+    window: config::Window,
+    align: config::Align,
+) {
+    for prefix_len in 1..=samples.len() {
+        let frame =
+            render::debug_scalar_braille_preview(&samples[..prefix_len], width, window, align);
+        let glyphs = frame
+            .cells
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<String>();
+        println!(
+            "frame {:>2}: input={} visible={} glyphs={}",
+            prefix_len,
+            format_float_list(&samples[..prefix_len]),
+            format_float_list(&frame.visible_samples),
+            glyphs
+        );
+    }
+}
+
+fn print_split_braille_frames(
+    upper: &[f64],
+    lower: &[f64],
+    width: usize,
+    window: config::Window,
+    align: config::Align,
+) {
+    for prefix_len in 1..=upper.len() {
+        let frame = render::debug_split_braille_preview(
+            &upper[..prefix_len],
+            &lower[..prefix_len],
+            width,
+            window,
+            align,
+        );
+        let glyphs = frame
+            .cells
+            .iter()
+            .map(|cell| cell.glyph)
+            .collect::<String>();
+        println!(
+            "frame {:>2}: upper={} lower={} glyphs={}",
+            prefix_len,
+            format_float_list(&upper[..prefix_len]),
+            format_float_list(&lower[..prefix_len]),
+            glyphs
+        );
+    }
+}
+
+fn print_debug_braille(spec: &config::DebugBrailleSpec) -> Result<(), String> {
+    match (&spec.samples, &spec.split_upper, &spec.split_lower) {
+        (Some(samples), None, None) => {
+            let samples = parse_debug_samples(samples)?;
+            let width = spec
+                .width
+                .unwrap_or_else(|| samples.len().div_ceil(2).max(1));
+            if spec.frames {
+                print_scalar_braille_frames(&samples, width, spec.window, spec.align);
+                return Ok(());
+            }
+            let preview =
+                render::debug_scalar_braille_preview(&samples, width, spec.window, spec.align);
+            println!("mode: scalar");
+            println!(
+                "window: {:?} align: {:?} width: {}",
+                spec.window, spec.align, width
+            );
+            println!("input:   {}", format_float_list(&samples));
+            println!("visible: {}", format_float_list(&preview.visible_samples));
+            for (index, cell) in preview.cells.iter().enumerate() {
+                println!(
+                    "cell {:>2}: {} bits={} samples={}",
+                    index + 1,
+                    cell.glyph,
+                    format_braille_bits(cell.bits),
+                    format_float_list(&cell.samples)
+                );
+            }
+            Ok(())
+        }
+        (None, Some(split_upper), Some(split_lower)) => {
+            let upper = parse_debug_samples(split_upper)?;
+            let lower = parse_debug_samples(split_lower)?;
+            if upper.len() != lower.len() {
+                return Err(
+                    "split braille debug requires upper and lower sample lists of equal length"
+                        .to_owned(),
+                );
+            }
+            let width = spec.width.unwrap_or_else(|| upper.len().div_ceil(2).max(1));
+            if spec.frames {
+                print_split_braille_frames(&upper, &lower, width, spec.window, spec.align);
+                return Ok(());
+            }
+            let preview =
+                render::debug_split_braille_preview(&upper, &lower, width, spec.window, spec.align);
+            println!("mode: split");
+            println!(
+                "window: {:?} align: {:?} width: {}",
+                spec.window, spec.align, width
+            );
+            println!("upper:   {}", format_float_list(&upper));
+            println!("lower:   {}", format_float_list(&lower));
+            println!(
+                "visible upper: {}",
+                format_float_list(&preview.upper_visible_samples)
+            );
+            println!(
+                "visible lower: {}",
+                format_float_list(&preview.lower_visible_samples)
+            );
+            for (index, cell) in preview.cells.iter().enumerate() {
+                println!(
+                    "cell {:>2}: {} bits={} upper={} lower={}",
+                    index + 1,
+                    cell.glyph,
+                    format_braille_bits(cell.bits),
+                    format_float_list(&cell.upper_samples),
+                    format_float_list(&cell.lower_samples)
+                );
+            }
+            Ok(())
+        }
+        _ => Err(
+            "debug braille requires either --samples or both --split-upper and --split-lower"
+                .to_owned(),
+        ),
     }
 }
 
