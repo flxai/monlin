@@ -3004,21 +3004,6 @@ fn braille_cell(left_level: usize, right_level: usize) -> char {
     char::from_u32(0x2800 + bits).unwrap_or(' ')
 }
 
-fn braille_half_cell(upper_level: usize, lower_level: usize) -> char {
-    const UPPER_BITS: [u8; 4] = [4, 1, 3, 0];
-    const LOWER_BITS: [u8; 4] = [5, 2, 7, 6];
-    let mut bits = 0_u32;
-
-    for bit in UPPER_BITS.iter().take(upper_level.min(4)) {
-        bits |= 1 << u32::from(*bit);
-    }
-    for bit in LOWER_BITS.iter().take(lower_level.min(4)) {
-        bits |= 1 << u32::from(*bit);
-    }
-
-    char::from_u32(0x2800 + bits).unwrap_or(' ')
-}
-
 fn split_pair_cell(
     left_upper_level: usize,
     right_upper_level: usize,
@@ -3061,18 +3046,6 @@ fn render_split_pair_cell(
     color_enabled: bool,
     solid_colors: bool,
 ) -> String {
-    if left_upper_level == 0
-        && right_upper_level == 0
-        && left_lower_level == 0
-        && right_lower_level == 0
-    {
-        let ch = braille_half_cell(1, 1).to_string();
-        let upper_color = color_for_intensity(metric, hues, 0.0, solid_colors);
-        let lower_color = color_for_intensity(metric, hues, 0.0, solid_colors);
-        let color = blend_split_color(1, 1, upper_color, lower_color);
-        return paint(&ch, color, color_enabled);
-    }
-
     let upper_level = left_upper_level.max(right_upper_level);
     let lower_level = left_lower_level.max(right_lower_level);
     let ch = split_pair_cell(
@@ -5698,7 +5671,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_split_values_render_with_darkest_split_color() {
+    fn zero_split_values_render_blank_cells() {
         let graph = render_braille_graph(
             &[MetricValue::Split {
                 upper: 0.0,
@@ -5707,21 +5680,10 @@ mod tests {
             1,
             MetricKind::Net,
             None,
-            true,
+            false,
         );
 
-        let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Net).unwrap();
-        let expected = blend_split_color(
-            1,
-            1,
-            interpolate(upper_gradient, 0.0),
-            interpolate(lower_gradient, 0.0),
-        );
-        assert_ne!(graph, "⠀");
-        assert!(graph.contains(&format!(
-            "\x1b[38;2;{};{};{}m",
-            expected.r, expected.g, expected.b
-        )));
+        assert_eq!(graph, "⠀");
     }
 
     #[test]
