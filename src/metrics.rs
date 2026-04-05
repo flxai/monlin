@@ -514,7 +514,7 @@ fn sample_rnd_value(rng: &mut SmallRng, state: &mut Option<f64>) -> RandomSample
     let next = (0.82 * current + 0.18 * target + noise.sample(rng)).clamp(0.0, 1.0);
     *state = Some(next);
 
-    // Map into a wide byte-like domain so rnd.hum/free produce compact SI values.
+    // Map into a wide byte-like domain so rnd.abs produces compact SI values.
     let absolute = if next <= f64::EPSILON {
         0.0
     } else {

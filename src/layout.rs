@@ -29,7 +29,7 @@ impl LayoutView {
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "pct" => Some(Self::Pct),
-            "abs" | "hum" | "free" => Some(Self::Abs),
+            "abs" => Some(Self::Abs),
             _ => None,
         }
     }
@@ -1724,8 +1724,8 @@ mod tests {
     fn parses_known_views_and_rejects_unknown_ones() {
         assert_eq!(LayoutView::parse("pct"), Some(LayoutView::Pct));
         assert_eq!(LayoutView::parse("abs"), Some(LayoutView::Abs));
-        assert_eq!(LayoutView::parse("hum"), Some(LayoutView::Abs));
-        assert_eq!(LayoutView::parse("free"), Some(LayoutView::Abs));
+        assert_eq!(LayoutView::parse("hum"), None);
+        assert_eq!(LayoutView::parse("free"), None);
         assert_eq!(LayoutView::parse("wat"), None);
     }
 
@@ -1750,9 +1750,9 @@ mod tests {
 
     #[test]
     fn rnd_metric_parses_and_formats_as_both_percent_and_absolute_bytes() {
-        let layout = parse_layout_spec("rnd rnd.abs rnd.free").unwrap();
+        let layout = parse_layout_spec("rnd rnd.abs").unwrap();
         assert_eq!(layout.metrics(), &[MetricKind::Rnd]);
-        assert_eq!(layout.rows()[0].len(), 3);
+        assert_eq!(layout.rows()[0].len(), 2);
         assert_eq!(
             MetricKind::Rnd.format_value(
                 LayoutView::Pct,
@@ -2216,15 +2216,13 @@ mod tests {
 
     #[test]
     fn same_metric_with_different_views_can_coexist() {
-        let layout = parse_layout_spec("spc.pct spc.abs spc.free").unwrap();
+        let layout = parse_layout_spec("spc.pct spc.abs").unwrap();
         assert_eq!(layout.rows().len(), 1);
-        assert_eq!(layout.rows()[0].len(), 3);
+        assert_eq!(layout.rows()[0].len(), 2);
         assert_eq!(layout.rows()[0][0].metric(), MetricKind::Storage);
         assert_eq!(layout.rows()[0][0].view(), LayoutView::Pct);
         assert_eq!(layout.rows()[0][1].metric(), MetricKind::Storage);
         assert_eq!(layout.rows()[0][1].view(), LayoutView::Abs);
-        assert_eq!(layout.rows()[0][2].metric(), MetricKind::Storage);
-        assert_eq!(layout.rows()[0][2].view(), LayoutView::Abs);
         assert_eq!(layout.metrics(), &[MetricKind::Storage]);
     }
 
