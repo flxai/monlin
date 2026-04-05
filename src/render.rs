@@ -2879,16 +2879,6 @@ fn resample_split_channel(
     if samples.is_empty() {
         return vec![0.0; target];
     }
-    if window == Window::Tail {
-        let recent_len = target.saturating_mul(2);
-        let recent = if samples.len() > recent_len {
-            &samples[samples.len() - recent_len..]
-        } else {
-            samples
-        };
-        return resample_channel(recent, target, channel, Window::Agg, align);
-    }
-
     resample_channel(samples, target, channel, window, align)
 }
 
@@ -5382,27 +5372,15 @@ mod tests {
     }
 
     #[test]
-    fn split_tail_window_uses_recent_two_width_samples() {
+    fn split_tail_window_uses_recent_visible_samples_directly() {
         let samples = [
             MetricValue::Split {
                 upper: 1.0,
                 lower: 1.0,
             },
             MetricValue::Split {
-                upper: 1.0,
-                lower: 1.0,
-            },
-            MetricValue::Split {
                 upper: 0.0,
                 lower: 0.0,
-            },
-            MetricValue::Split {
-                upper: 0.0,
-                lower: 0.0,
-            },
-            MetricValue::Split {
-                upper: 1.0,
-                lower: 1.0,
             },
             MetricValue::Split {
                 upper: 1.0,
@@ -5431,8 +5409,8 @@ mod tests {
             Window::Tail,
         );
 
-        assert_eq!(agg, "⣿⣿");
         assert_eq!(tail, "⠰⣿");
+        assert_ne!(agg, tail);
     }
 
     #[test]
