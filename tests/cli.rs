@@ -26,7 +26,7 @@ fn zsh_completion_can_be_printed() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("#compdef monlin"));
     assert!(stdout.contains("_monlin_layout"));
-    assert!(stdout.contains("pct hum free"));
+    assert!(stdout.contains("pct abs"));
     assert!(stdout.contains("--space:How streamed columns allocate width"));
 }
 

@@ -24,7 +24,7 @@ Notes:
   Without a layout, monlin defaults to avail.
   Defaults can be read from $XDG_CONFIG_HOME/monlin/config.toml or ~/.config/monlin/config.toml.
   Legacy shell-word configs in .../config are still supported.
-  Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.hum:12+20-8.
+  Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.abs:12+20-8.
   Rows can be separated with ',' or a literal newline.
   Flat layouts auto-wrap after 5 metrics per row.
   If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
@@ -183,7 +183,7 @@ struct Cli {
 
     #[arg(
         value_name = "LAYOUT",
-        help = "Layout DSL, e.g. 'sys gfx io net' or 'cpu:12 ram:10 net.hum'"
+        help = "Layout DSL, e.g. 'sys gfx io net' or 'cpu:12 ram:10 net.abs'"
     )]
     layout_parts: Vec<String>,
 
@@ -1264,7 +1264,7 @@ mod tests {
 
     #[test]
     fn parses_native_layout_document() {
-        let config = parse(&["monlin", "cpu", "ram.free"]);
+        let config = parse(&["monlin", "cpu", "ram.abs"]);
         let document = config.document.as_ref().unwrap();
         assert_eq!(document.rows().len(), 1);
         assert!(document.is_native_only());

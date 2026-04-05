@@ -2290,7 +2290,7 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_space_option() {
         let script = zsh_completion_script();
-        assert!(script.contains("pct hum free full value bare"));
+        assert!(script.contains("pct abs full value bare"));
         assert!(script.contains("--solid-colors"));
         assert!(script.contains("@1"));
         assert!(script.contains("--space:How streamed columns allocate width"));

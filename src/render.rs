@@ -2516,8 +2516,7 @@ fn segment_usage_text(
 fn unavailable_usage_text(metric: MetricKind, view: LayoutView, stable_layout: bool) -> String {
     let text = match effective_view(metric, view) {
         LayoutView::Pct => "N/A",
-        LayoutView::Hum => "N/A",
-        LayoutView::Free => "N/A",
+        LayoutView::Abs => "N/A",
         LayoutView::Default => unreachable!(),
     };
     if stable_layout {
@@ -2614,13 +2613,16 @@ fn stable_layout_usage_width(metric: MetricKind, view: LayoutView) -> usize {
 
     match effective_view {
         LayoutView::Pct => 4,
-        LayoutView::Hum => match metric {
-            MetricKind::Io | MetricKind::Net | MetricKind::Ingress | MetricKind::Egress => 4,
-            MetricKind::Memory | MetricKind::Storage => 9,
-            _ => 4,
-        },
-        LayoutView::Free => match metric {
-            MetricKind::Memory | MetricKind::Storage => 4,
+        LayoutView::Abs => match metric {
+            MetricKind::Io
+            | MetricKind::Net
+            | MetricKind::In
+            | MetricKind::Out
+            | MetricKind::Ingress
+            | MetricKind::Egress
+            | MetricKind::Memory
+            | MetricKind::Storage
+            | MetricKind::Rnd => 4,
             _ => 4,
         },
         LayoutView::Default => unreachable!(),
@@ -4922,15 +4924,15 @@ mod tests {
 
     #[test]
     fn slash_grow_syntax_is_rejected() {
-        let error = crate::layout::parse_layout_spec("cpu:12/2 ram:10 net.hum").unwrap_err();
+        let error = crate::layout::parse_layout_spec("cpu:12/2 ram:10 net.abs").unwrap_err();
         assert!(error.contains("invalid metric syntax"));
     }
 
     #[test]
     fn width_allocation_conformance_matrix() {
         let cases = [
-            ("cpu:12 ram:10 net.hum", 30, vec![16, 13, 1]),
-            ("cpu:12+14 ram:10 net.hum", 30, vec![14, 14, 2]),
+            ("cpu:12 ram:10 net.abs", 30, vec![16, 13, 1]),
+            ("cpu:12+14 ram:10 net.abs", 30, vec![14, 14, 2]),
             ("cpu-8 ram-4", 6, vec![4, 2]),
             ("cpu:12+20-8 ram+14-6", 24, vec![18, 6]),
         ];
@@ -5362,9 +5364,9 @@ mod tests {
     }
 
     #[test]
-    fn storage_human_segment_displays_used_over_total() {
+    fn storage_abs_segment_displays_free_bytes() {
         let segment = render_segment_with_headline(
-            LayoutItem::new(MetricKind::Storage, LayoutView::Hum, None, 1),
+            LayoutItem::new(MetricKind::Storage, LayoutView::Abs, None, 1),
             &VecDeque::new(),
             MetricValue::Single(0.5),
             Some(HeadlineValue::Storage {
@@ -5376,7 +5378,7 @@ mod tests {
             test_render_context(Align::Left, Renderer::Braille, false),
         );
 
-        assert!(segment.contains("spc 512M/2.0G"));
+        assert!(segment.contains("spc 1.5G"));
     }
 
     #[test]
@@ -5401,13 +5403,13 @@ mod tests {
                 " 50%",
             ),
             (
-                LayoutItem::new(MetricKind::Storage, LayoutView::Hum, None, 1),
+                LayoutItem::new(MetricKind::Storage, LayoutView::Abs, None, 1),
                 MetricValue::Single(0.5),
                 Some(HeadlineValue::Storage {
                     used_bytes: 512 * 1024 * 1024,
                     total_bytes: 2 * 1024 * 1024 * 1024,
                 }),
-                "512M/2.0G",
+                "1.5G",
             ),
         ];
 
