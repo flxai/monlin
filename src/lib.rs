@@ -268,12 +268,15 @@ _monlin_layout() {{
 
 _monlin() {{
   local cur prev
+  local debug_command
   cur="${{words[CURRENT]}}"
   prev="${{words[CURRENT-1]}}"
+  debug_command="${{words[3]}}"
 
-  local -a opts commands debug_commands shells
+  local -a opts commands debug_commands shells debug_color_opts debug_window_opts debug_braille_opts
   opts=(
     '--history:Number of history samples to retain'
+    '-i:Sampling interval in milliseconds'
     '--interval-ms:Sampling interval in milliseconds'
     '--align:Place the value at the left or right side of the graph'
     '-w:How to display retained history'
@@ -299,8 +302,29 @@ _monlin() {{
     '--steps:Number of glyph samples to print per metric'
   )
   commands=(completion debug)
-  debug_commands=(colors)
+  debug_commands=(colors window braille)
   shells=(bash colors elvish fish powershell zsh)
+  debug_color_opts=(
+    '--steps:Number of glyph samples to print per metric'
+  )
+  debug_window_opts=(
+    '--samples:Comma- or space-separated scalar samples'
+    '--renderer:Renderer shape to inspect'
+    '-w:How to display retained history'
+    '--window:How to display retained history'
+    '--align:Align recent history to the left or right edge'
+    '--width:Visible renderer width in cells'
+  )
+  debug_braille_opts=(
+    '--samples:Comma- or space-separated scalar samples'
+    '--split-upper:Comma- or space-separated upper split-channel samples'
+    '--split-lower:Comma- or space-separated lower split-channel samples'
+    '-w:How to display retained history'
+    '--window:How to display retained history'
+    '--align:Align recent history to the left or right edge'
+    '--width:Visible braille width in cells'
+    '--frames:Print one preview frame for each growing input prefix'
+  )
 
   case "$prev" in
     --align)
@@ -361,6 +385,50 @@ _monlin() {{
       compadd $debug_commands
       return
     fi
+    case "$debug_command" in
+      colors)
+        if [[ "$cur" == -* ]]; then
+          _describe -t options 'option' -- $debug_color_opts
+        fi
+        return
+        ;;
+      window)
+        case "$prev" in
+          --renderer)
+            compadd braille block
+            return
+            ;;
+          --align)
+            compadd left right
+            return
+            ;;
+          -w|--window)
+            compadd agg tail
+            return
+            ;;
+        esac
+        if [[ "$cur" == -* ]]; then
+          _describe -t options 'option' -- $debug_window_opts
+        fi
+        return
+        ;;
+      braille)
+        case "$prev" in
+          --align)
+            compadd left right
+            return
+            ;;
+          -w|--window)
+            compadd agg tail
+            return
+            ;;
+        esac
+        if [[ "$cur" == -* ]]; then
+          _describe -t options 'option' -- $debug_braille_opts
+        fi
+        return
+        ;;
+    esac
     if [[ "$cur" == -* ]]; then
       _describe -t options 'option' -- $opts
     fi
@@ -2496,8 +2564,13 @@ mod tests {
         let script = zsh_completion_script();
         assert!(script.contains("pct abs full value bare"));
         assert!(script.contains("--solid-colors"));
+        assert!(script.contains("-i:Sampling interval in milliseconds"));
         assert!(script.contains("@1"));
         assert!(script.contains("--space:How streamed columns allocate width"));
+        assert!(script.contains("debug_commands=(colors window braille)"));
+        assert!(
+            script.contains("--split-upper:Comma- or space-separated upper split-channel samples")
+        );
     }
 
     #[test]

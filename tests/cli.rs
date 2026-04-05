@@ -27,7 +27,9 @@ fn zsh_completion_can_be_printed() {
     assert!(stdout.contains("#compdef monlin"));
     assert!(stdout.contains("_monlin_layout"));
     assert!(stdout.contains("pct abs"));
+    assert!(stdout.contains("-i:Sampling interval in milliseconds"));
     assert!(stdout.contains("--space:How streamed columns allocate width"));
+    assert!(stdout.contains("debug_commands=(colors window braille)"));
 }
 
 #[test]

@@ -24,8 +24,10 @@ Notes:
   Without a layout, monlin defaults to avail.
   Defaults can be read from /etc/xdg/monlin/config.toml, $XDG_CONFIG_HOME/monlin/config.toml, or ~/.config/monlin/config.toml.
   Legacy shell-word configs in .../config are still supported.
-  Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.abs:12+20-8.
+  Item syntax is source[.view][.display][:size][+max][-min], e.g. xpu io net.abs:12+20-8.
+  View modes are pct and abs. Display modes are full, value, and bare.
   Rows can be separated with ',' or a literal newline.
+  Use label=source or label=(...) to label items and groups. Use a+b to compose split sources.
   Flat layouts auto-wrap after 5 metrics per row.
   If stdin provides whitespace-separated numeric rows, monlin switches to stream mode automatically.
   Use f:/path/to/file to poll a file for numeric rows, or p:command to poll a shell command.
@@ -256,7 +258,7 @@ struct Cli {
 
     #[arg(
         value_name = "LAYOUT",
-        help = "Layout DSL, e.g. 'sys gfx io net' or 'cpu:12 ram:10 net.abs'"
+        help = "Layout DSL, e.g. 'xpu mem spc io net' or 'spcram=(spc+ram)'"
     )]
     layout_parts: Vec<String>,
 
@@ -1789,7 +1791,9 @@ mod tests {
     #[test]
     fn help_text_documents_current_layout_syntax() {
         let help = help_text();
-        assert!(help.contains("metric[.view][:size][+max][-min]"));
+        assert!(help.contains("source[.view][.display][:size][+max][-min]"));
+        assert!(help.contains("View modes are pct and abs."));
+        assert!(help.contains("Use label=source or label=(...)"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
         assert!(help.contains("named palette like gruvbox or solarized"));
     }
