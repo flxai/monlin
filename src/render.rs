@@ -45,27 +45,27 @@ struct PackedSpan {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct GraphRenderOptions<'a> {
-    hues: Option<&'a BaseHues>,
+struct GraphRenderOptions {
+    hues: Option<BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct RenderContext<'a> {
+struct RenderContext {
     align: Align,
     renderer: Renderer,
     stable_layout: bool,
-    graph: GraphRenderOptions<'a>,
+    graph: GraphRenderOptions,
 }
 
-fn graph_render_options<'a>(
-    hues: Option<&'a BaseHues>,
+fn graph_render_options(
+    hues: Option<BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
-) -> GraphRenderOptions<'a> {
+) -> GraphRenderOptions {
     GraphRenderOptions {
         hues,
         color_enabled,
@@ -74,12 +74,12 @@ fn graph_render_options<'a>(
     }
 }
 
-fn render_context<'a>(
+fn render_context(
     config: &Config,
     color_enabled: bool,
     stable_layout: bool,
-    hues: Option<&'a BaseHues>,
-) -> RenderContext<'a> {
+    hues: Option<BaseHues>,
+) -> RenderContext {
     RenderContext {
         align: config.align,
         renderer: config.renderer,
@@ -104,7 +104,7 @@ fn render_metric_graph_for_visible_hue(
         width,
         metric,
         renderer,
-        graph_render_options(Some(&hues), color_enabled, solid_colors, window),
+        graph_render_options(Some(hues), color_enabled, solid_colors, window),
     )
 }
 
@@ -507,7 +507,7 @@ fn render_pack_lines_with_headlines(
                                 config,
                                 color_enabled,
                                 matches!(config.space, Space::Stable),
-                                Some(&item_hues),
+                                Some(item_hues),
                             ),
                         )
                     } else {
@@ -587,7 +587,7 @@ fn render_flex_lines_with_headlines(
                                 config,
                                 color_enabled,
                                 matches!(config.space, Space::Stable),
-                                Some(&item_hues),
+                                Some(item_hues),
                             ),
                         )
                     } else {
@@ -653,7 +653,7 @@ fn render_grid_lines_with_headlines(
                                 config,
                                 color_enabled,
                                 matches!(config.space, Space::Stable),
-                                Some(&item_hues),
+                                Some(item_hues),
                             ),
                         )
                     } else {
@@ -1952,7 +1952,7 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         label_width,
                         graph_width,
-                        render_context(config, color_enabled, stable_layout, Some(&item_hues)),
+                        render_context(config, color_enabled, stable_layout, Some(item_hues)),
                     )
                 } else {
                     render_segment_with_headline(
@@ -1962,7 +1962,7 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         width,
                         label_width,
-                        render_context(config, color_enabled, stable_layout, Some(&item_hues)),
+                        render_context(config, color_enabled, stable_layout, Some(item_hues)),
                     )
                 }
             } else {
@@ -2016,11 +2016,7 @@ fn render_segment(
 }
 
 #[cfg(test)]
-fn test_render_context(
-    align: Align,
-    renderer: Renderer,
-    color_enabled: bool,
-) -> RenderContext<'static> {
+fn test_render_context(align: Align, renderer: Renderer, color_enabled: bool) -> RenderContext {
     RenderContext {
         align,
         renderer,
@@ -2271,7 +2267,7 @@ fn render_segment_with_headline(
     headline_value: Option<HeadlineValue>,
     width: usize,
     label_width: usize,
-    ctx: RenderContext<'_>,
+    ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
@@ -2312,7 +2308,7 @@ fn render_segment_with_graph_width(
     headline_value: Option<HeadlineValue>,
     label_width: usize,
     graph_width: usize,
-    ctx: RenderContext<'_>,
+    ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
@@ -2343,7 +2339,7 @@ fn render_unavailable_segment(
     width: usize,
     label_width: usize,
     graph_width: usize,
-    ctx: RenderContext<'_>,
+    ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = unavailable_segment_text_parts(
@@ -2375,7 +2371,7 @@ fn render_grid_segment(
     value: MetricValue,
     headline_value: Option<HeadlineValue>,
     spec: GridColumnSpec,
-    ctx: RenderContext<'_>,
+    ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
     let usage_text = segment_usage_text(
@@ -2408,7 +2404,7 @@ fn render_grid_segment(
 fn render_unavailable_grid_segment(
     item: LayoutItem,
     spec: GridColumnSpec,
-    ctx: RenderContext<'_>,
+    ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
     let usage_text = unavailable_usage_text(metric, item.view(), ctx.stable_layout);
@@ -2660,14 +2656,14 @@ fn render_metric_graph_with_options(
     width: usize,
     metric: MetricKind,
     renderer: Renderer,
-    options: GraphRenderOptions<'_>,
+    options: GraphRenderOptions,
 ) -> String {
     match renderer {
         Renderer::Braille => render_braille_graph_with_options(
             samples,
             width,
             metric,
-            options.hues,
+            options.hues.as_ref(),
             options.color_enabled,
             options.solid_colors,
             options.window,
@@ -2676,7 +2672,7 @@ fn render_metric_graph_with_options(
             samples,
             width,
             metric,
-            options.hues,
+            options.hues.as_ref(),
             options.color_enabled,
             options.solid_colors,
             options.window,
