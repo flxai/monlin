@@ -455,17 +455,14 @@ fn render_pack_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    let stable_layout = matches!(config.space, Space::Stable);
     let prefix = config
         .label
         .as_ref()
         .map(|label| format!("{label} "))
         .unwrap_or_default();
-    let packed_text_widths = packed_span_text_widths(
-        layout,
-        values,
-        headline_values,
-        matches!(config.space, Space::Stable),
-    );
+    let packed_text_widths =
+        packed_span_text_widths(layout, values, headline_values, stable_layout);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let mut offset = 0;
@@ -499,23 +496,13 @@ fn render_pack_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                Some(item_hues),
-                            ),
+                            render_context(config, color_enabled, stable_layout, Some(item_hues)),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                None,
-                            ),
+                            render_context(config, color_enabled, stable_layout, None),
                         )
                     }
                 })
@@ -534,17 +521,14 @@ fn render_flex_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    let stable_layout = matches!(config.space, Space::Stable);
     let prefix = config
         .label
         .as_ref()
         .map(|label| format!("{label} "))
         .unwrap_or_default();
-    let column_text_widths = shared_column_text_widths(
-        layout,
-        values,
-        headline_values,
-        matches!(config.space, Space::Stable),
-    );
+    let column_text_widths =
+        shared_column_text_widths(layout, values, headline_values, stable_layout);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let mut offset = 0;
@@ -578,23 +562,13 @@ fn render_flex_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                Some(item_hues),
-                            ),
+                            render_context(config, color_enabled, stable_layout, Some(item_hues)),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                None,
-                            ),
+                            render_context(config, color_enabled, stable_layout, None),
                         )
                     }
                 })
@@ -613,6 +587,7 @@ fn render_grid_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    let stable_layout = matches!(config.space, Space::Stable);
     let prefix = config
         .label
         .as_ref()
@@ -643,23 +618,13 @@ fn render_grid_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             column_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                Some(item_hues),
-                            ),
+                            render_context(config, color_enabled, stable_layout, Some(item_hues)),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             column_specs[index],
-                            render_context(
-                                config,
-                                color_enabled,
-                                matches!(config.space, Space::Stable),
-                                None,
-                            ),
+                            render_context(config, color_enabled, stable_layout, None),
                         )
                     }
                 })
