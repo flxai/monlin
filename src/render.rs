@@ -2853,34 +2853,43 @@ fn render_split_braille_graph_with_options(
     solid_colors: bool,
     window: Window,
 ) -> String {
-    let mut uppers = collapse_split_pairs(resample_split_channel(
+    let mut uppers = resample_split_channel(
         samples,
         width.saturating_mul(2),
         MetricValue::upper,
         window,
         align,
-    ));
-    let mut lowers = collapse_split_pairs(resample_split_channel(
+    );
+    let mut lowers = resample_split_channel(
         samples,
         width.saturating_mul(2),
         MetricValue::lower,
         window,
         align,
-    ));
+    );
     normalize_split_channels(&mut uppers, &mut lowers);
     let mut out = String::new();
 
     for index in 0..width {
-        let upper_intensity = uppers.get(index).copied().unwrap_or(0.0);
-        let lower_intensity = lowers.get(index).copied().unwrap_or(0.0);
-        let upper = quantize_visible_half_level(upper_intensity);
-        let lower = quantize_visible_half_level(lower_intensity);
+        let left_upper_intensity = uppers.get(index * 2).copied().unwrap_or(0.0);
+        let right_upper_intensity = uppers.get(index * 2 + 1).copied().unwrap_or(0.0);
+        let left_lower_intensity = lowers.get(index * 2).copied().unwrap_or(0.0);
+        let right_lower_intensity = lowers.get(index * 2 + 1).copied().unwrap_or(0.0);
 
-        out.push_str(&render_split_cell(
-            upper,
-            lower,
-            upper_intensity,
-            lower_intensity,
+        let left_upper = quantize_visible_split_column_level(left_upper_intensity);
+        let right_upper = quantize_visible_split_column_level(right_upper_intensity);
+        let left_lower = quantize_visible_split_column_level(left_lower_intensity);
+        let right_lower = quantize_visible_split_column_level(right_lower_intensity);
+
+        out.push_str(&render_split_pair_cell(
+            left_upper,
+            right_upper,
+            left_lower,
+            right_lower,
+            left_upper_intensity,
+            right_upper_intensity,
+            left_lower_intensity,
+            right_lower_intensity,
             metric,
             hues,
             color_enabled,
@@ -2889,13 +2898,6 @@ fn render_split_braille_graph_with_options(
     }
 
     out
-}
-
-fn collapse_split_pairs(samples: Vec<f64>) -> Vec<f64> {
-    samples
-        .chunks(2)
-        .map(|chunk| chunk.iter().copied().sum::<f64>() / chunk.len() as f64)
-        .collect()
 }
 
 fn resample_split_channel(
@@ -2976,12 +2978,12 @@ fn quantize_level(sample: f64) -> usize {
     (sample.clamp(0.0, 1.0) * 4.0).round() as usize
 }
 
-fn quantize_half_level(sample: f64) -> usize {
-    (sample.clamp(0.0, 1.0) * 4.0).round() as usize
+fn quantize_split_column_level(sample: f64) -> usize {
+    (sample.clamp(0.0, 1.0) * 2.0).round() as usize
 }
 
-fn quantize_visible_half_level(sample: f64) -> usize {
-    let level = quantize_half_level(sample);
+fn quantize_visible_split_column_level(sample: f64) -> usize {
+    let level = quantize_split_column_level(sample);
     if sample > 0.0 && level == 0 {
         1
     } else {
@@ -3017,17 +3019,53 @@ fn braille_half_cell(upper_level: usize, lower_level: usize) -> char {
     char::from_u32(0x2800 + bits).unwrap_or(' ')
 }
 
-fn render_split_cell(
-    upper_level: usize,
-    lower_level: usize,
-    upper_intensity: f64,
-    lower_intensity: f64,
+fn split_pair_cell(
+    left_upper_level: usize,
+    right_upper_level: usize,
+    left_lower_level: usize,
+    right_lower_level: usize,
+) -> char {
+    const UPPER_LEFT_BITS: [u8; 2] = [1, 0];
+    const UPPER_RIGHT_BITS: [u8; 2] = [4, 3];
+    const LOWER_LEFT_BITS: [u8; 2] = [2, 6];
+    const LOWER_RIGHT_BITS: [u8; 2] = [5, 7];
+    let mut bits = 0_u32;
+
+    for bit in UPPER_LEFT_BITS.iter().take(left_upper_level.min(2)) {
+        bits |= 1 << u32::from(*bit);
+    }
+    for bit in UPPER_RIGHT_BITS.iter().take(right_upper_level.min(2)) {
+        bits |= 1 << u32::from(*bit);
+    }
+    for bit in LOWER_LEFT_BITS.iter().take(left_lower_level.min(2)) {
+        bits |= 1 << u32::from(*bit);
+    }
+    for bit in LOWER_RIGHT_BITS.iter().take(right_lower_level.min(2)) {
+        bits |= 1 << u32::from(*bit);
+    }
+
+    char::from_u32(0x2800 + bits).unwrap_or(' ')
+}
+
+fn render_split_pair_cell(
+    left_upper_level: usize,
+    right_upper_level: usize,
+    left_lower_level: usize,
+    right_lower_level: usize,
+    left_upper_intensity: f64,
+    right_upper_intensity: f64,
+    left_lower_intensity: f64,
+    right_lower_intensity: f64,
     metric: MetricKind,
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
 ) -> String {
-    if upper_level == 0 && lower_level == 0 {
+    if left_upper_level == 0
+        && right_upper_level == 0
+        && left_lower_level == 0
+        && right_lower_level == 0
+    {
         let ch = braille_half_cell(1, 1).to_string();
         let upper_color = color_for_intensity(metric, hues, 0.0, solid_colors);
         let lower_color = color_for_intensity(metric, hues, 0.0, solid_colors);
@@ -3035,9 +3073,27 @@ fn render_split_cell(
         return paint(&ch, color, color_enabled);
     }
 
-    let ch = braille_half_cell(upper_level, lower_level).to_string();
-    let upper_color = color_for_intensity(metric, hues, upper_intensity, solid_colors);
-    let lower_color = color_for_intensity(metric, hues, lower_intensity, solid_colors);
+    let upper_level = left_upper_level.max(right_upper_level);
+    let lower_level = left_lower_level.max(right_lower_level);
+    let ch = split_pair_cell(
+        left_upper_level,
+        right_upper_level,
+        left_lower_level,
+        right_lower_level,
+    )
+    .to_string();
+    let upper_color = color_for_intensity(
+        metric,
+        hues,
+        left_upper_intensity.max(right_upper_intensity),
+        solid_colors,
+    );
+    let lower_color = color_for_intensity(
+        metric,
+        hues,
+        left_lower_intensity.max(right_lower_intensity),
+        solid_colors,
+    );
     let color = blend_split_color(upper_level, lower_level, upper_color, lower_color);
     paint(&ch, color, color_enabled)
 }
@@ -3118,9 +3174,95 @@ mod tests {
         LayoutItem::new(metric, LayoutView::Default, None, 1)
     }
 
+    fn only_braille_char(graph: &str) -> char {
+        let chars = graph.chars().collect::<Vec<_>>();
+        assert_eq!(chars.len(), 1);
+        chars[0]
+    }
+
+    fn braille_bits(ch: char) -> [bool; 8] {
+        let bits = (ch as u32).saturating_sub(0x2800);
+        std::array::from_fn(|index| bits & (1 << index) != 0)
+    }
+
     #[test]
     fn full_braille_cell_is_filled() {
         assert_eq!(braille_cell(4, 4), '⣿');
+    }
+
+    #[test]
+    fn regular_tail_braille_shifts_between_left_and_right_subcolumns() {
+        let left = render_braille_graph_with_options(
+            &[MetricValue::Single(1.0), MetricValue::Single(0.0)],
+            1,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Tail,
+        );
+        let right = render_braille_graph_with_options(
+            &[MetricValue::Single(0.0), MetricValue::Single(1.0)],
+            1,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Tail,
+        );
+
+        assert_eq!(
+            braille_bits(only_braille_char(&left)),
+            [true, true, true, false, false, false, true, false]
+        );
+        assert_eq!(
+            braille_bits(only_braille_char(&right)),
+            [false, false, false, true, true, true, false, true]
+        );
+    }
+
+    #[test]
+    fn split_tail_braille_shifts_between_left_and_right_subcolumns() {
+        let full = MetricValue::Split {
+            upper: 1.0,
+            lower: 1.0,
+        };
+        let zero = MetricValue::Split {
+            upper: 0.0,
+            lower: 0.0,
+        };
+
+        let left = render_split_braille_graph_with_options(
+            &[full, zero],
+            1,
+            MetricKind::Net,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Tail,
+        );
+        let right = render_split_braille_graph_with_options(
+            &[zero, full],
+            1,
+            MetricKind::Net,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Tail,
+        );
+
+        assert_eq!(
+            braille_bits(only_braille_char(&left)),
+            [true, true, true, false, false, false, true, false]
+        );
+        assert_eq!(
+            braille_bits(only_braille_char(&right)),
+            [false, false, false, true, true, true, false, true]
+        );
     }
 
     #[test]
@@ -5533,7 +5675,10 @@ mod tests {
             false,
         );
 
-        assert_eq!(graph, "⠿");
+        assert_eq!(
+            braille_bits(only_braille_char(&graph)),
+            [false, false, false, true, true, true, false, false]
+        );
     }
 
     #[test]
@@ -5594,8 +5739,8 @@ mod tests {
 
         let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Net).unwrap();
         let expected = blend_split_color(
-            4,
-            4,
+            2,
+            2,
             interpolate(upper_gradient, 1.0),
             interpolate(lower_gradient, 1.0),
         );
@@ -5621,8 +5766,8 @@ mod tests {
 
         let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Io).unwrap();
         let expected = blend_split_color(
-            4,
-            4,
+            2,
+            2,
             interpolate(upper_gradient, 1.0),
             interpolate(lower_gradient, 1.0),
         );
@@ -5648,8 +5793,8 @@ mod tests {
 
         let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Sys).unwrap();
         let expected = blend_split_color(
-            4,
-            4,
+            2,
+            2,
             interpolate(upper_gradient, 1.0),
             interpolate(lower_gradient, 1.0),
         );
@@ -5675,8 +5820,8 @@ mod tests {
 
         let (upper_gradient, lower_gradient) = split_gradients_for(MetricKind::Gfx).unwrap();
         let expected = blend_split_color(
-            4,
-            4,
+            2,
+            2,
             interpolate(upper_gradient, 1.0),
             interpolate(lower_gradient, 1.0),
         );
