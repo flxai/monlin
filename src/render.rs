@@ -255,11 +255,7 @@ pub fn render_document_lines(
         .map(|row| row.items().len())
         .sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
-    let outer_prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let outer_prefix = config_label_prefix(config);
     let mut offset = 0;
     let mut lines = Vec::new();
 
@@ -456,11 +452,7 @@ fn render_pack_lines_with_headlines(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let packed_text_widths =
         packed_span_text_widths(layout, values, headline_values, stable_layout);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
@@ -522,11 +514,7 @@ fn render_flex_lines_with_headlines(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let column_text_widths =
         shared_column_text_widths(layout, values, headline_values, stable_layout);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
@@ -588,11 +576,7 @@ fn render_grid_lines_with_headlines(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let column_specs = grid_column_specs(config, width, layout, values, headline_values);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
@@ -641,11 +625,7 @@ fn grid_column_specs(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<GridColumnSpec> {
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let inner_width = width.saturating_sub(prefix.chars().count());
     let column_count = layout
         .rows()
@@ -1089,11 +1069,7 @@ fn stable_layout_column_widths(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
     label_width: usize,
 ) -> Vec<usize> {
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let inner_width = width.saturating_sub(prefix.chars().count());
     let column_count = layout
         .rows()
@@ -1192,11 +1168,7 @@ fn render_stream_group_lines(
         .unwrap_or(values.len())
         .max(values.len());
     let stream_hues = visible_hues(max_ref, config.colors.as_deref());
-    let outer_prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let outer_prefix = config_label_prefix(config);
 
     let mut lines = Vec::new();
     for group in groups {
@@ -1544,11 +1516,7 @@ fn render_stream_rows(
             .collect();
     }
 
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let stream_labels = config.stream_labels.as_deref().unwrap_or(&[]);
     let label_width = stream_labels
         .iter()
@@ -1628,11 +1596,7 @@ fn render_stream_columns_line(
         return pad_or_trim_visible(&segments.join(""), width);
     }
 
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let inner_width = width.saturating_sub(prefix.chars().count());
     let stream_hues = visible_hues(values.len(), config.colors.as_deref());
     let segments = values
@@ -1804,11 +1768,7 @@ fn render_row(
     row_hues: &[ColorSpec],
     stable_column_widths: Option<&[usize]>,
 ) -> String {
-    let prefix = config
-        .label
-        .as_ref()
-        .map(|label| format!("{label} "))
-        .unwrap_or_default();
+    let prefix = config_label_prefix(config);
     let stable_layout = matches!(config.space, Space::Stable);
     let inner_width = width.saturating_sub(prefix.chars().count());
     let separators = items.len().saturating_sub(1);
@@ -2193,6 +2153,14 @@ fn take_row_hues<'a>(
     let row_hues = &all_hues[*offset..*offset + count];
     *offset += count;
     row_hues
+}
+
+fn config_label_prefix(config: &Config) -> String {
+    config
+        .label
+        .as_ref()
+        .map(|label| format!("{label} "))
+        .unwrap_or_default()
 }
 
 fn render_inline_segment(
