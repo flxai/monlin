@@ -507,7 +507,10 @@ fn maybe_run_document_native(
     let Some(document) = &config.document else {
         return Ok(None);
     };
-    if !(document.uses_split_metrics() || document.has_row_labels()) {
+    if !(document.uses_split_metrics()
+        || document.has_row_labels()
+        || document_has_duplicate_rnd(document))
+    {
         return Ok(None);
     }
     if document.uses_stream_columns()
@@ -519,19 +522,59 @@ fn maybe_run_document_native(
         )));
     }
 
+    let runtime_document = document_with_rnd_instance_sources(document);
     let mut sampler = metrics::Sampler::default();
-    let requested_metrics = document_requested_metrics(document);
+    let requested_metrics = document_requested_metrics(&runtime_document);
     sampler.prime(&requested_metrics).map_err(monlin_error)?;
-    let mut histories = init_canonical_document_histories(document, config.history);
+    let mut histories = init_canonical_document_histories(&runtime_document, config.history);
     let result = match config.output_mode {
         OutputMode::Terminal => {
-            run_document_native_terminal(config, document, &mut sampler, &mut histories)
+            run_document_native_terminal(config, &runtime_document, &mut sampler, &mut histories)
         }
         OutputMode::I3bar => {
-            run_document_native_i3bar(config, document, &mut sampler, &mut histories)
+            run_document_native_i3bar(config, &runtime_document, &mut sampler, &mut histories)
         }
     };
     Ok(Some(result))
+}
+
+fn document_has_duplicate_rnd(document: &Document) -> bool {
+    let mut count = 0usize;
+    for row in document.rows() {
+        for item in row.items() {
+            if matches!(item.source(), Source::Metric(MetricKind::Rnd)) {
+                count += 1;
+                if count > 1 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn document_with_rnd_instance_sources(document: &Document) -> Document {
+    let mut next_instance = 0usize;
+    let rows = document
+        .rows()
+        .iter()
+        .map(|row| {
+            let items = row
+                .items()
+                .iter()
+                .map(|item| match item.source() {
+                    Source::Metric(MetricKind::Rnd) => {
+                        let instance = next_instance;
+                        next_instance += 1;
+                        item.with_source(Source::RndInstance(instance))
+                    }
+                    _ => item.clone(),
+                })
+                .collect();
+            layout::Row::new(row.label().map(str::to_owned), items)
+        })
+        .collect();
+    Document::new(rows, document.explicit_rows(), document.filter_available())
 }
 
 fn maybe_run_external_stream(
@@ -610,7 +653,8 @@ fn stream_groups_from_stream_document(document: &Document) -> Result<Vec<StreamG
         for item in row.items() {
             let column_index = match item.source() {
                 Source::StreamColumn(index) => *index,
-                Source::Metric(_)
+                Source::RndInstance(_)
+                | Source::Metric(_)
                 | Source::SplitMetric(_, _)
                 | Source::File(_)
                 | Source::Process(_) => {
@@ -729,6 +773,7 @@ fn validate_stream_shape(config: &config::Config, series_count: usize) -> Result
 fn describe_source(source: &Source) -> String {
     match source {
         Source::Metric(metric) => metric.short_label().to_owned(),
+        Source::RndInstance(index) => format!("rnd#{}", index + 1),
         Source::SplitMetric(upper, lower) => {
             format!("{}+{}", upper.short_label(), lower.short_label())
         }
@@ -1610,9 +1655,13 @@ impl ExternalPoller {
                 pending: String::new(),
             })),
             Source::Process(command) => Ok(Self::Process(command.clone())),
-            Source::Metric(_) | Source::SplitMetric(_, _) | Source::StreamColumn(_) => Err(
-                format!("unsupported polled source: {}", describe_source(source)),
-            ),
+            Source::RndInstance(_)
+            | Source::Metric(_)
+            | Source::SplitMetric(_, _)
+            | Source::StreamColumn(_) => Err(format!(
+                "unsupported polled source: {}",
+                describe_source(source)
+            )),
         }
     }
 
@@ -1899,6 +1948,7 @@ fn project_metric_values(sample: &CanonicalSample) -> HashMap<MetricKind, Metric
             Source::Metric(metric) => value
                 .normalized_metric_value()
                 .map(|value| (*metric, value)),
+            Source::RndInstance(_) => None,
             Source::SplitMetric(_, _)
             | Source::StreamColumn(_)
             | Source::File(_)
@@ -1915,6 +1965,7 @@ fn project_metric_headlines(
         .iter()
         .filter_map(|(source, headline)| match source {
             Source::Metric(metric) => Some((*metric, *headline)),
+            Source::RndInstance(_) => None,
             Source::SplitMetric(_, _)
             | Source::StreamColumn(_)
             | Source::File(_)
@@ -1971,6 +2022,7 @@ fn collect_source_metrics(source: &Source, metrics: &mut Vec<MetricKind>) {
                 metrics.push(*metric);
             }
         }
+        Source::RndInstance(_) => {}
         Source::SplitMetric(upper, lower) => {
             if !metrics.contains(upper) {
                 metrics.push(*upper);
@@ -1991,58 +2043,73 @@ fn sample_document_canonical(
     let mut sample = sampler.sample_canonical(&requested_metrics)?;
 
     for source in document.sources() {
-        let Source::SplitMetric(upper, lower) = source else {
-            continue;
-        };
-        let upper_source = Source::Metric(*upper);
-        let lower_source = Source::Metric(*lower);
-        let Some(upper_value) = sample.values.get(&upper_source).copied() else {
-            sample
-                .values
-                .insert(source.clone(), CanonicalValue::Unavailable);
-            continue;
-        };
-        let Some(lower_value) = sample.values.get(&lower_source).copied() else {
-            sample
-                .values
-                .insert(source.clone(), CanonicalValue::Unavailable);
-            continue;
-        };
-
-        let (upper_normalized, upper_absolute) = match upper_value {
-            CanonicalValue::Scalar {
-                normalized,
-                absolute,
-            } => (normalized, absolute),
-            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
+        match source {
+            Source::RndInstance(index) => {
+                let value = sampler.sample_rnd_instance(*index);
+                sample.values.insert(
+                    source.clone(),
+                    CanonicalValue::Scalar {
+                        normalized: value.normalized,
+                        absolute: Some(value.absolute),
+                    },
+                );
                 sample
-                    .values
-                    .insert(source.clone(), CanonicalValue::Unavailable);
-                continue;
+                    .headlines
+                    .insert(source.clone(), HeadlineValue::Scalar(value.absolute));
             }
-        };
-        let (lower_normalized, lower_absolute) = match lower_value {
-            CanonicalValue::Scalar {
-                normalized,
-                absolute,
-            } => (normalized, absolute),
-            CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
-                sample
-                    .values
-                    .insert(source.clone(), CanonicalValue::Unavailable);
-                continue;
-            }
-        };
+            Source::SplitMetric(upper, lower) => {
+                let upper_source = Source::Metric(*upper);
+                let lower_source = Source::Metric(*lower);
+                let Some(upper_value) = sample.values.get(&upper_source).copied() else {
+                    sample
+                        .values
+                        .insert(source.clone(), CanonicalValue::Unavailable);
+                    continue;
+                };
+                let Some(lower_value) = sample.values.get(&lower_source).copied() else {
+                    sample
+                        .values
+                        .insert(source.clone(), CanonicalValue::Unavailable);
+                    continue;
+                };
 
-        sample.values.insert(
-            source.clone(),
-            CanonicalValue::Split {
-                upper_normalized,
-                lower_normalized,
-                upper_absolute,
-                lower_absolute,
-            },
-        );
+                let (upper_normalized, upper_absolute) = match upper_value {
+                    CanonicalValue::Scalar {
+                        normalized,
+                        absolute,
+                    } => (normalized, absolute),
+                    CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
+                        sample
+                            .values
+                            .insert(source.clone(), CanonicalValue::Unavailable);
+                        continue;
+                    }
+                };
+                let (lower_normalized, lower_absolute) = match lower_value {
+                    CanonicalValue::Scalar {
+                        normalized,
+                        absolute,
+                    } => (normalized, absolute),
+                    CanonicalValue::Split { .. } | CanonicalValue::Unavailable => {
+                        sample
+                            .values
+                            .insert(source.clone(), CanonicalValue::Unavailable);
+                        continue;
+                    }
+                };
+
+                sample.values.insert(
+                    source.clone(),
+                    CanonicalValue::Split {
+                        upper_normalized,
+                        lower_normalized,
+                        upper_absolute,
+                        lower_absolute,
+                    },
+                );
+            }
+            Source::Metric(_) | Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => {}
+        }
     }
 
     Ok(sample)
@@ -2065,7 +2132,8 @@ fn sample_stream_document(document: &Document, frame: &[f64]) -> Result<Canonica
                 values.insert(source.clone(), CanonicalValue::from_stream_percent(raw));
                 headlines.insert(source.clone(), HeadlineValue::Scalar(raw.max(0.0)));
             }
-            Source::Metric(_)
+            Source::RndInstance(_)
+            | Source::Metric(_)
             | Source::SplitMetric(_, _)
             | Source::File(_)
             | Source::Process(_) => {
@@ -2455,6 +2523,53 @@ mod tests {
             document_requested_metrics(&document),
             vec![MetricKind::Storage, MetricKind::Memory]
         );
+    }
+
+    #[test]
+    fn duplicate_native_rnd_items_get_runtime_instance_sources() {
+        let document = layout::parse_layout_document("rnd rnd rnd").unwrap();
+        assert!(document_has_duplicate_rnd(&document));
+
+        let runtime_document = document_with_rnd_instance_sources(&document);
+        let sources = runtime_document
+            .rows()
+            .iter()
+            .flat_map(|row| row.items().iter().map(|item| item.source().clone()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            sources,
+            vec![
+                Source::RndInstance(0),
+                Source::RndInstance(1),
+                Source::RndInstance(2)
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_native_rnd_items_sample_independently() {
+        let document = document_with_rnd_instance_sources(
+            &layout::parse_layout_document("rnd rnd rnd").unwrap(),
+        );
+        let mut sampler = metrics::Sampler::default();
+        let sample = sample_document_canonical(&document, &mut sampler).unwrap();
+
+        let values = [0usize, 1, 2]
+            .into_iter()
+            .map(|index| {
+                sample
+                    .values
+                    .get(&Source::RndInstance(index))
+                    .and_then(|value| match value {
+                        CanonicalValue::Scalar { normalized, .. } => Some(*normalized),
+                        CanonicalValue::Split { .. } | CanonicalValue::Unavailable => None,
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        assert!(values[0] != values[1] || values[1] != values[2]);
     }
 
     #[test]

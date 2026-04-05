@@ -355,6 +355,7 @@ impl LayoutItem {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
     Metric(MetricKind),
+    RndInstance(usize),
     SplitMetric(MetricKind, MetricKind),
     StreamColumn(usize),
     File(PathBuf),
@@ -477,6 +478,18 @@ impl Item {
         &self.source
     }
 
+    pub fn with_source(&self, source: Source) -> Self {
+        Self {
+            label: self.label.clone(),
+            source,
+            view: self.view,
+            display: self.display,
+            size: self.size,
+            max_width: self.max_width,
+            min_width: self.min_width,
+        }
+    }
+
     pub fn view(&self) -> LayoutView {
         self.view
     }
@@ -507,6 +520,10 @@ impl Item {
                 self.size,
                 self.max_width,
                 self.min_width,
+            )),
+            Source::RndInstance(index) => Err(format!(
+                "synthetic rnd source #{} cannot yet be lowered into a native layout",
+                index + 1
             )),
             Source::StreamColumn(index) => Err(format!(
                 "stream source @{} cannot yet be lowered into a native layout",
@@ -606,9 +623,12 @@ impl Document {
 
     pub fn is_native_only(&self) -> bool {
         self.rows.iter().all(|row| {
-            row.items
-                .iter()
-                .all(|item| matches!(item.source, Source::Metric(_) | Source::SplitMetric(_, _)))
+            row.items.iter().all(|item| {
+                matches!(
+                    item.source,
+                    Source::Metric(_) | Source::RndInstance(_) | Source::SplitMetric(_, _)
+                )
+            })
         })
     }
 
@@ -1127,6 +1147,7 @@ fn push_unique(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
 fn push_unique_document_metrics(metrics: &mut Vec<MetricKind>, source: &Source) {
     match source {
         Source::Metric(metric) => push_unique(metrics, *metric),
+        Source::RndInstance(_) => push_unique(metrics, MetricKind::Rnd),
         Source::SplitMetric(upper, lower) => {
             push_unique(metrics, *upper);
             push_unique(metrics, *lower);

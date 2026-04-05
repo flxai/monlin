@@ -1468,6 +1468,7 @@ fn document_item_label(item: &Item) -> String {
                 .map(str::to_owned)
                 .unwrap_or_else(|| match item.source() {
                     Source::Metric(metric) => metric.short_label().to_owned(),
+                    Source::RndInstance(_) => MetricKind::Rnd.short_label().to_owned(),
                     Source::SplitMetric(_, _) => String::new(),
                     Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
                 })
@@ -1497,6 +1498,17 @@ fn document_item_usage_text(
                 )
             })
             .unwrap_or_else(|| "N/A".to_owned()),
+        Source::RndInstance(_) => value
+            .and_then(CanonicalValue::normalized_metric_value)
+            .map(|value| {
+                MetricKind::Rnd.format_value(
+                    item.view(),
+                    value.headline_value(),
+                    &headline_value
+                        .unwrap_or_else(|| HeadlineValue::Scalar(value.headline_value())),
+                )
+            })
+            .unwrap_or_else(|| "N/A".to_owned()),
         Source::SplitMetric(_, _) => String::new(),
         Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => String::new(),
     }
@@ -1505,6 +1517,7 @@ fn document_item_usage_text(
 fn document_render_metric(source: &Source) -> MetricKind {
     match source {
         Source::Metric(metric) => *metric,
+        Source::RndInstance(_) => MetricKind::Rnd,
         Source::SplitMetric(_, _) => MetricKind::Sys,
         Source::StreamColumn(_) | Source::File(_) | Source::Process(_) => MetricKind::Cpu,
     }
