@@ -1363,26 +1363,18 @@ fn render_stream_group_row(
                     }
                     Space::Stable | Space::Graph | Space::Segment => usage_text.clone(),
                 };
-                let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
+                let graph = render_metric_graph_with_options(
+                    &metric_history,
+                    graph_width,
+                    metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
                         color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                };
+                        solid_colors: config.solid_colors,
+                        window: config.window,
+                    },
+                );
                 let text_only = format!("{label}{separator}{display_usage_text}");
 
                 if graph_width == 0 {
@@ -1523,26 +1515,18 @@ fn render_document_row(
                     .unwrap_or_default();
                 let item_hues =
                     metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
-                let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        render_metric,
-                        Some(&item_hues),
+                let graph = render_metric_graph_with_options(
+                    &metric_history,
+                    graph_width,
+                    render_metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
                         color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        render_metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                };
+                        solid_colors: config.solid_colors,
+                        window: config.window,
+                    },
+                );
                 let text_only = format!("{label}{separator}{usage_text}");
                 let value = sample.values.get(item.source()).copied();
 
@@ -1750,26 +1734,18 @@ fn render_stream_rows(
                 .unwrap_or_default();
             let item_hues =
                 metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-            let graph = match config.renderer {
-                Renderer::Braille => render_braille_graph_with_options(
-                    &metric_history,
-                    graph_width,
-                    metric,
-                    Some(&item_hues),
+            let graph = render_metric_graph_with_options(
+                &metric_history,
+                graph_width,
+                metric,
+                config.renderer,
+                GraphRenderOptions {
+                    hues: Some(&item_hues),
                     color_enabled,
-                    config.solid_colors,
-                    config.window,
-                ),
-                Renderer::Block => render_block_graph_with_options(
-                    &metric_history,
-                    graph_width,
-                    metric,
-                    Some(&item_hues),
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                ),
-            };
+                    solid_colors: config.solid_colors,
+                    window: config.window,
+                },
+            );
 
             pad_or_trim_visible(
                 &match config.align {
@@ -1885,26 +1861,18 @@ fn render_stream_columns_line(
                     }
                     Space::Graph | Space::Segment => usage_text.clone(),
                 };
-                let graph = match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
+                let graph = render_metric_graph_with_options(
+                    &metric_history,
+                    graph_width,
+                    metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
                         color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                };
+                        solid_colors: config.solid_colors,
+                        window: config.window,
+                    },
+                );
                 let text_only = format!("{label}{separator}{display_usage_text}");
 
                 if graph_width == 0 {
