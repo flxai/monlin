@@ -47,6 +47,7 @@ struct PackedSpan {
 #[derive(Clone, Copy, Debug)]
 struct GraphRenderOptions {
     hues: Option<BaseHues>,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
@@ -62,12 +63,14 @@ struct RenderContext {
 
 fn graph_render_options(
     hues: Option<BaseHues>,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
 ) -> GraphRenderOptions {
     GraphRenderOptions {
         hues,
+        align,
         color_enabled,
         solid_colors,
         window,
@@ -84,7 +87,13 @@ fn render_context(
         align: config.align,
         renderer: config.renderer,
         stable_layout,
-        graph: graph_render_options(hues, color_enabled, config.solid_colors, config.window),
+        graph: graph_render_options(
+            hues,
+            config.align,
+            color_enabled,
+            config.solid_colors,
+            config.window,
+        ),
     }
 }
 
@@ -104,7 +113,13 @@ fn render_metric_graph_for_visible_hue(
         width,
         metric,
         renderer,
-        graph_render_options(Some(hues), color_enabled, solid_colors, window),
+        graph_render_options(
+            Some(hues),
+            Align::Right,
+            color_enabled,
+            solid_colors,
+            window,
+        ),
     )
 }
 
@@ -324,8 +339,13 @@ fn render_packed_metric_row(
     row_hues: &[ColorSpec],
 ) -> String {
     let widths = split_weighted_width(width, &normalized_items_for_sizing(items));
-    let graph_options =
-        graph_render_options(None, color_enabled, config.solid_colors, config.window);
+    let graph_options = graph_render_options(
+        None,
+        Align::Right,
+        color_enabled,
+        config.solid_colors,
+        config.window,
+    );
     let segments = items
         .iter()
         .zip(widths)
@@ -412,8 +432,13 @@ fn render_packed_document_row(
         })
         .collect::<Vec<_>>();
     let widths = split_weighted_width(width, &sizing_items);
-    let graph_options =
-        graph_render_options(None, color_enabled, config.solid_colors, config.window);
+    let graph_options = graph_render_options(
+        None,
+        Align::Right,
+        color_enabled,
+        config.solid_colors,
+        config.window,
+    );
     let segments = items
         .iter()
         .zip(widths)
@@ -1494,8 +1519,13 @@ fn render_stream_rows(
 ) -> Vec<String> {
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
-        let graph_options =
-            graph_render_options(None, color_enabled, config.solid_colors, config.window);
+        let graph_options = graph_render_options(
+            None,
+            Align::Right,
+            color_enabled,
+            config.solid_colors,
+            config.window,
+        );
         return values
             .iter()
             .enumerate()
@@ -1573,8 +1603,13 @@ fn render_stream_columns_line(
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
         let widths = split_stream_widths(width, values.len());
-        let graph_options =
-            graph_render_options(None, color_enabled, config.solid_colors, config.window);
+        let graph_options = graph_render_options(
+            None,
+            Align::Right,
+            color_enabled,
+            config.solid_colors,
+            config.window,
+        );
         let segments = widths
             .into_iter()
             .enumerate()
@@ -1940,7 +1975,7 @@ fn test_render_context(align: Align, renderer: Renderer, color_enabled: bool) ->
         align,
         renderer,
         stable_layout: false,
-        graph: graph_render_options(None, color_enabled, false, Window::Agg),
+        graph: graph_render_options(None, align, color_enabled, false, Window::Agg),
     }
 }
 
@@ -2601,6 +2636,7 @@ fn render_metric_graph_with_options(
             width,
             metric,
             options.hues.as_ref(),
+            options.align,
             options.color_enabled,
             options.solid_colors,
             options.window,
@@ -2610,6 +2646,7 @@ fn render_metric_graph_with_options(
             width,
             metric,
             options.hues.as_ref(),
+            options.align,
             options.color_enabled,
             options.solid_colors,
             options.window,
@@ -2701,6 +2738,7 @@ fn render_block_graph(
         width,
         metric,
         hues,
+        Align::Right,
         color_enabled,
         false,
         Window::Agg,
@@ -2712,11 +2750,12 @@ fn render_block_graph_with_options(
     width: usize,
     metric: MetricKind,
     hues: Option<&BaseHues>,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
 ) -> String {
-    let samples = resample_channel(samples, width, MetricValue::headline_value, window);
+    let samples = resample_channel(samples, width, MetricValue::headline_value, window, align);
     samples
         .into_iter()
         .map(|sample| {
@@ -2740,6 +2779,7 @@ pub(crate) fn render_braille_graph(
         width,
         metric,
         hues,
+        Align::Right,
         color_enabled,
         false,
         Window::Agg,
@@ -2751,6 +2791,7 @@ fn render_braille_graph_with_options(
     width: usize,
     metric: MetricKind,
     hues: Option<&BaseHues>,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
@@ -2761,6 +2802,7 @@ fn render_braille_graph_with_options(
             width,
             metric,
             hues,
+            align,
             color_enabled,
             solid_colors,
             window,
@@ -2772,6 +2814,7 @@ fn render_braille_graph_with_options(
         width.saturating_mul(2),
         MetricValue::headline_value,
         window,
+        align,
     );
     let mut out = String::new();
 
@@ -2792,12 +2835,13 @@ fn render_split_braille_graph_with_options(
     width: usize,
     metric: MetricKind,
     hues: Option<&BaseHues>,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
 ) -> String {
-    let mut uppers = resample_split_channel(samples, width, MetricValue::upper, window);
-    let mut lowers = resample_split_channel(samples, width, MetricValue::lower, window);
+    let mut uppers = resample_split_channel(samples, width, MetricValue::upper, window, align);
+    let mut lowers = resample_split_channel(samples, width, MetricValue::lower, window, align);
     normalize_split_channels(&mut uppers, &mut lowers);
     let mut out = String::new();
 
@@ -2827,6 +2871,7 @@ fn resample_split_channel(
     target: usize,
     channel: fn(MetricValue) -> f64,
     window: Window,
+    align: Align,
 ) -> Vec<f64> {
     if target == 0 {
         return Vec::new();
@@ -2841,10 +2886,10 @@ fn resample_split_channel(
         } else {
             samples
         };
-        return resample_channel(recent, target, channel, Window::Agg);
+        return resample_channel(recent, target, channel, Window::Agg, align);
     }
 
-    resample_channel(samples, target, channel, window)
+    resample_channel(samples, target, channel, window, align)
 }
 
 fn normalize_split_channels(uppers: &mut [f64], lowers: &mut [f64]) {
@@ -2868,6 +2913,7 @@ fn resample_channel(
     target: usize,
     channel: fn(MetricValue) -> f64,
     window: Window,
+    align: Align,
 ) -> Vec<f64> {
     if target == 0 {
         return Vec::new();
@@ -2881,8 +2927,16 @@ fn resample_channel(
         } else {
             samples
         };
-        let mut out = vec![0.0; target - tail.len()];
-        out.extend(tail.iter().copied().map(channel));
+        let mut out = tail.iter().copied().map(channel).collect::<Vec<_>>();
+        let pad = target - tail.len();
+        match align {
+            Align::Left => out.extend(std::iter::repeat_n(0.0, pad)),
+            Align::Right => {
+                let mut padded = vec![0.0; pad];
+                padded.extend(out);
+                out = padded;
+            }
+        }
         return out;
     }
 
@@ -5271,6 +5325,7 @@ mod tests {
             1,
             MetricKind::Cpu,
             Some(&hues),
+            Align::Right,
             true,
             false,
             Window::Agg,
@@ -5280,6 +5335,7 @@ mod tests {
             1,
             MetricKind::Cpu,
             Some(&hues),
+            Align::Right,
             true,
             true,
             Window::Agg,
@@ -5305,6 +5361,7 @@ mod tests {
             2,
             MetricKind::Cpu,
             None,
+            Align::Right,
             false,
             false,
             Window::Agg,
@@ -5314,6 +5371,7 @@ mod tests {
             2,
             MetricKind::Cpu,
             None,
+            Align::Right,
             false,
             false,
             Window::Tail,
@@ -5357,6 +5415,7 @@ mod tests {
             2,
             MetricKind::Net,
             None,
+            Align::Right,
             false,
             false,
             Window::Agg,
@@ -5366,6 +5425,7 @@ mod tests {
             2,
             MetricKind::Net,
             None,
+            Align::Right,
             false,
             false,
             Window::Tail,
@@ -5373,6 +5433,35 @@ mod tests {
 
         assert_eq!(agg, "⣿⣿");
         assert_eq!(tail, "⠰⣿");
+    }
+
+    #[test]
+    fn left_aligned_tail_graphs_grow_from_left_edge() {
+        let samples = [MetricValue::Single(1.0)];
+
+        let left = render_block_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Cpu,
+            None,
+            Align::Left,
+            false,
+            false,
+            Window::Tail,
+        );
+        let right = render_block_graph_with_options(
+            &samples,
+            2,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            Window::Tail,
+        );
+
+        assert_eq!(left, "█ ");
+        assert_eq!(right, " █");
     }
 
     #[test]
