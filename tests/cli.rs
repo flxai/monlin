@@ -137,6 +137,29 @@ fn debug_braille_command_prints_split_frames() {
 }
 
 #[test]
+fn multiple_process_layout_args_render_successfully() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "32",
+            "--color",
+            "never",
+            "a=p:printf '10\\n'",
+            "b=p:printf '20\\n'",
+        ])
+        .output()
+        .expect("failed to run monlin with multiple process layout args");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("a"));
+    assert!(stdout.contains("b"));
+}
+
+#[test]
 fn once_mode_exits_successfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([

@@ -6,7 +6,8 @@ use std::path::PathBuf;
 
 use crate::color::{named_colormap, named_palette, ColorSpec, Rgb};
 use crate::layout::{
-    parse_layout_document, parse_layout_spec, DisplayMode, Document, Item, Layout, Row,
+    parse_layout_document, parse_layout_part_item, parse_layout_spec, DisplayMode, Document, Item,
+    Layout, Row,
 };
 use crate::render::Renderer;
 
@@ -438,13 +439,19 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
     let joined_layout = cli.layout_parts.join(" ");
     let document = if joined_layout.trim().is_empty() {
         None
+    } else if should_preserve_layout_part_boundaries(&cli.layout_parts) {
+        parse_layout_document_from_parts(&cli.layout_parts)
+            .ok()
+            .or_else(|| parse_layout_document(&joined_layout).ok())
     } else {
-        parse_layout_document(&joined_layout).ok()
+        parse_layout_document(&joined_layout)
+            .ok()
+            .or_else(|| parse_layout_document_from_parts(&cli.layout_parts).ok())
     };
-    let (external_input, inline_stream_labels) = if cli.layout_parts.is_empty() {
-        (None, None)
-    } else {
+    let (external_input, inline_stream_labels) = if cli.layout_parts.len() == 1 {
         parse_external_input(&joined_layout)?
+    } else {
+        (None, None)
     };
     if external_input.is_some() && force_stream_input {
         return Err("'-' cannot be combined with f:... or p:... input sources".to_owned());
@@ -768,6 +775,54 @@ fn parse_external_input(
     }
 
     Ok((Some(source), Some(labels)))
+}
+
+fn should_preserve_layout_part_boundaries(parts: &[String]) -> bool {
+    parts.iter().any(|part| {
+        let trimmed = part.trim();
+        let has_whitespace = trimmed.chars().any(char::is_whitespace);
+        has_whitespace
+            && (trimmed.starts_with("p:")
+                || trimmed.starts_with("f:")
+                || trimmed.contains("=p:")
+                || trimmed.contains("=f:"))
+    })
+}
+
+fn parse_layout_document_from_parts(parts: &[String]) -> Result<Document, String> {
+    if parts.is_empty() {
+        return Err("layout must contain at least one metric".to_owned());
+    }
+
+    let mut items = Vec::new();
+    let mut filter_available = false;
+
+    for part in parts {
+        if let Ok(item) = parse_layout_part_item(part) {
+            items.push(item);
+            continue;
+        }
+
+        let document = parse_layout_document(part)?;
+        if document.explicit_rows()
+            || document.rows().len() != 1
+            || document.rows()[0].label().is_some()
+        {
+            return Err("layout part cannot be merged as a flat item sequence".to_owned());
+        }
+        filter_available |= document.filter_available();
+        items.extend(document.rows()[0].items().iter().cloned());
+    }
+
+    if items.is_empty() {
+        return Err("layout must contain at least one layout item".to_owned());
+    }
+
+    Ok(Document::new(
+        vec![Row::new(None, items)],
+        false,
+        filter_available,
+    ))
 }
 
 fn parse_external_input_source(raw: &str) -> Result<Option<ExternalInputSource>, String> {
@@ -1140,8 +1195,10 @@ mod tests {
     fn bare_monlin_still_loads_default_config_file() {
         let root = unique_temp_dir("bare-config");
         let config_dir = root.join("monlin");
+        let system_dir = root.join("system");
         let path = config_dir.join("config.toml");
         fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&system_dir).unwrap();
         fs::write(
             &path,
             r#"
@@ -1153,7 +1210,7 @@ mod tests {
         let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let old_xdg_dirs = std::env::var_os("XDG_CONFIG_DIRS");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &root) };
-        unsafe { std::env::set_var("XDG_CONFIG_DIRS", "") };
+        unsafe { std::env::set_var("XDG_CONFIG_DIRS", &system_dir) };
         let args = resolve_args_with_config(vec!["monlin".to_owned()]).unwrap();
         restore_env_var("XDG_CONFIG_HOME", old_xdg);
         restore_env_var("XDG_CONFIG_DIRS", old_xdg_dirs);
@@ -1433,6 +1490,41 @@ mod tests {
             Some(ExternalInputSource::Process("printf '10\\n'".to_owned()))
         );
         assert_eq!(config.stream_labels, Some(vec!["cpu".to_owned()]));
+    }
+
+    #[test]
+    fn parses_multiple_process_layout_args_as_document_sources() {
+        let config = parse(&["monlin", "p:printf '10\\n'", "p:printf '20\\n'"]);
+        assert_eq!(config.external_input, None);
+        let document = config.document.as_ref().unwrap();
+        assert_eq!(document.rows().len(), 1);
+        assert_eq!(document.rows()[0].items().len(), 2);
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &crate::layout::Source::Process("printf '10\\n'".to_owned())
+        );
+        assert_eq!(
+            document.rows()[0].items()[1].source(),
+            &crate::layout::Source::Process("printf '20\\n'".to_owned())
+        );
+    }
+
+    #[test]
+    fn parses_multiple_labeled_process_layout_args_as_document_sources() {
+        let config = parse(&["monlin", "cpu=p:printf '10\\n'", "ram=p:printf '20\\n'"]);
+        assert_eq!(config.external_input, None);
+        assert_eq!(config.stream_labels, None);
+        let document = config.document.as_ref().unwrap();
+        assert_eq!(document.rows()[0].items()[0].label(), Some("cpu"));
+        assert_eq!(document.rows()[0].items()[1].label(), Some("ram"));
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &crate::layout::Source::Process("printf '10\\n'".to_owned())
+        );
+        assert_eq!(
+            document.rows()[0].items()[1].source(),
+            &crate::layout::Source::Process("printf '20\\n'".to_owned())
+        );
     }
 
     #[test]

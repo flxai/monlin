@@ -911,6 +911,22 @@ pub fn parse_layout_document(spec: &str) -> Result<Document, String> {
     Ok(Document::new(rows, false, filter_available))
 }
 
+pub fn parse_layout_part_item(raw: &str) -> Result<Item, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("layout must contain at least one layout item".to_owned());
+    }
+
+    if let Some((label, source)) = trimmed.split_once('=') {
+        if source.starts_with('(') {
+            return Err("grouped layout fragments are not supported in argv item mode".to_owned());
+        }
+        return parse_document_source_item(Some(label.to_owned()), source);
+    }
+
+    parse_document_source_item(None, trimmed)
+}
+
 fn parse_document_rows(
     parser: &mut LayoutParser,
     stop_at_rparen: bool,
