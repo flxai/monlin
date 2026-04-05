@@ -88,6 +88,26 @@ fn render_context<'a>(
     }
 }
 
+fn render_metric_graph_for_visible_hue(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    renderer: Renderer,
+    visible_hue: ColorSpec,
+    color_enabled: bool,
+    solid_colors: bool,
+    window: Window,
+) -> String {
+    let hues = metric_hues_for_visible_hue(metric, visible_hue);
+    render_metric_graph_with_options(
+        samples,
+        width,
+        metric,
+        renderer,
+        graph_render_options(Some(&hues), color_enabled, solid_colors, window),
+    )
+}
+
 const UNAVAILABLE_GRAPH_BRAILLE: char = '⠄';
 const UNAVAILABLE_GRAPH_BLOCK: char = '░';
 const UNAVAILABLE_GRAPH_COLOR: crate::color::Rgb = crate::color::Rgb {
@@ -318,19 +338,18 @@ fn render_packed_metric_row(
         .enumerate()
         .map(|(index, (item, graph_width))| {
             let metric = item.metric();
-            let item_hues = metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
             if values.contains_key(&metric) {
                 let history = histories.get(&metric).cloned().unwrap_or_default();
                 let samples = history.iter().copied().collect::<Vec<_>>();
-                render_metric_graph_with_options(
+                render_metric_graph_for_visible_hue(
                     &samples,
                     graph_width,
                     metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
-                        ..graph_options
-                    },
+                    row_hues[index % row_hues.len()],
+                    graph_options.color_enabled,
+                    graph_options.solid_colors,
+                    graph_options.window,
                 )
             } else {
                 render_unavailable_graph(graph_width, config.renderer, color_enabled)
@@ -408,23 +427,21 @@ fn render_packed_document_row(
         .enumerate()
         .map(|(index, (item, graph_width))| {
             let render_metric = document_render_metric(item.source());
-            let item_hues =
-                metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
             let value = sample.values.get(item.source()).copied();
             if matches!(value, Some(CanonicalValue::Unavailable) | None) {
                 return render_unavailable_graph(graph_width, config.renderer, color_enabled);
             }
 
             let metric_history = document_metric_history(histories, item.source());
-            render_metric_graph_with_options(
+            render_metric_graph_for_visible_hue(
                 &metric_history,
                 graph_width,
                 render_metric,
                 config.renderer,
-                GraphRenderOptions {
-                    hues: Some(&item_hues),
-                    ..graph_options
-                },
+                row_hues[index % row_hues.len()],
+                graph_options.color_enabled,
+                graph_options.solid_colors,
+                graph_options.window,
             )
         })
         .collect::<Vec<_>>();
@@ -1369,10 +1386,6 @@ fn render_stream_group_row(
             |((item, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
                 let metric = stream_metric_for(item.column_index);
                 let metric_history = stream_metric_history(histories, item.column_index);
-                let item_hues = metric_hues_for_visible_hue(
-                    metric,
-                    stream_hues[item.column_index % stream_hues.len()],
-                );
                 let display_usage_text = match config.space {
                     Space::Stable if !usage_text.is_empty() => {
                         format!(
@@ -1382,17 +1395,15 @@ fn render_stream_group_row(
                     }
                     Space::Stable | Space::Graph | Space::Segment => usage_text.clone(),
                 };
-                let graph = render_metric_graph_with_options(
+                let graph = render_metric_graph_for_visible_hue(
                     &metric_history,
                     graph_width,
                     metric,
                     config.renderer,
-                    graph_render_options(
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
+                    stream_hues[item.column_index % stream_hues.len()],
+                    color_enabled,
+                    config.solid_colors,
+                    config.window,
                 );
                 if graph_width == 0 {
                     return pad_or_trim_visible(
@@ -1517,19 +1528,15 @@ fn render_document_row(
             )| {
                 let render_metric = document_render_metric(item.source());
                 let metric_history = document_metric_history(histories, item.source());
-                let item_hues =
-                    metric_hues_for_visible_hue(render_metric, row_hues[index % row_hues.len()]);
-                let graph = render_metric_graph_with_options(
+                let graph = render_metric_graph_for_visible_hue(
                     &metric_history,
                     graph_width,
                     render_metric,
                     config.renderer,
-                    graph_render_options(
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
+                    row_hues[index % row_hues.len()],
+                    color_enabled,
+                    config.solid_colors,
+                    config.window,
                 );
                 let value = sample.values.get(item.source()).copied();
 
@@ -1635,17 +1642,15 @@ fn render_stream_rows(
             .map(|(index, _value)| {
                 let metric = stream_metric_for(index);
                 let metric_history = stream_metric_history(histories, index);
-                let item_hues =
-                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-                render_metric_graph_with_options(
+                render_metric_graph_for_visible_hue(
                     &metric_history,
                     width,
                     metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
-                        ..graph_options
-                    },
+                    stream_hues[index % stream_hues.len()],
+                    graph_options.color_enabled,
+                    graph_options.solid_colors,
+                    graph_options.window,
                 )
             })
             .collect();
@@ -1680,19 +1685,15 @@ fn render_stream_rows(
             let graph_width = width.saturating_sub(fixed + 1);
             let metric = stream_metric_for(index);
             let metric_history = stream_metric_history(histories, index);
-            let item_hues =
-                metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-            let graph = render_metric_graph_with_options(
+            let graph = render_metric_graph_for_visible_hue(
                 &metric_history,
                 graph_width,
                 metric,
                 config.renderer,
-                graph_render_options(
-                    Some(&item_hues),
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                ),
+                stream_hues[index % stream_hues.len()],
+                color_enabled,
+                config.solid_colors,
+                config.window,
             );
 
             pad_or_trim_visible(
@@ -1724,17 +1725,15 @@ fn render_stream_columns_line(
             .map(|(index, graph_width)| {
                 let metric = stream_metric_for(index);
                 let metric_history = stream_metric_history(histories, index);
-                let item_hues =
-                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-                render_metric_graph_with_options(
+                render_metric_graph_for_visible_hue(
                     &metric_history,
                     graph_width,
                     metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
-                        ..graph_options
-                    },
+                    stream_hues[index % stream_hues.len()],
+                    graph_options.color_enabled,
+                    graph_options.solid_colors,
+                    graph_options.window,
                 )
             })
             .collect::<Vec<_>>();
@@ -1776,8 +1775,6 @@ fn render_stream_columns_line(
             |((index, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
                 let metric = stream_metric_for(index);
                 let metric_history = stream_metric_history(histories, index);
-                let item_hues =
-                    metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
                 let display_usage_text = match config.space {
                     Space::Stable => {
                         format!(
@@ -1787,17 +1784,15 @@ fn render_stream_columns_line(
                     }
                     Space::Graph | Space::Segment => usage_text.clone(),
                 };
-                let graph = render_metric_graph_with_options(
+                let graph = render_metric_graph_for_visible_hue(
                     &metric_history,
                     graph_width,
                     metric,
                     config.renderer,
-                    graph_render_options(
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
+                    stream_hues[index % stream_hues.len()],
+                    color_enabled,
+                    config.solid_colors,
+                    config.window,
                 );
                 if graph_width == 0 {
                     return pad_or_trim_visible(
