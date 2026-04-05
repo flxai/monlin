@@ -1319,65 +1319,22 @@ fn render_stream_group_row(
     let count = items.len();
     let separators = count.saturating_sub(1);
     let segment_space = inner_width.saturating_sub(separators);
-
-    let (segment_widths, graph_widths) = match config.space {
-        Space::Stable => {
-            let fixed_total = segments
-                .iter()
-                .map(|(_, label, separator, usage_text, _)| {
-                    label.chars().count()
-                        + separator.chars().count()
-                        + stable_stream_usage_width(usage_text)
-                        + 1
-                })
-                .sum::<usize>();
-            let graph_space = segment_space.saturating_sub(fixed_total);
-            let graph_widths = split_weighted_width(graph_space, &sizing_items);
-            let segment_widths = segments
-                .iter()
-                .zip(graph_widths.iter().copied())
-                .map(|((_, label, separator, usage_text, _), graph_width)| {
-                    label.chars().count()
-                        + separator.chars().count()
-                        + stable_stream_usage_width(usage_text)
-                        + usize::from(graph_width > 0)
-                        + graph_width
-                })
-                .collect::<Vec<_>>();
-            (segment_widths, graph_widths)
-        }
-        Space::Graph => {
-            let fixed_total = segments
-                .iter()
-                .map(|(_, _, _, _, fixed)| fixed + 1)
-                .sum::<usize>();
-            let graph_space = segment_space.saturating_sub(fixed_total);
-            let graph_widths = split_weighted_width(graph_space, &sizing_items);
-            let segment_widths = segments
-                .iter()
-                .zip(graph_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), graph_width)| {
-                    fixed + usize::from(graph_width > 0) + graph_width
-                })
-                .collect::<Vec<_>>();
-            (segment_widths, graph_widths)
-        }
-        Space::Segment => {
-            let segment_widths = split_weighted_width(segment_space, &sizing_items);
-            let graph_widths = segments
-                .iter()
-                .zip(segment_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), segment_width)| {
-                    if segment_width <= *fixed {
-                        0
-                    } else {
-                        segment_width.saturating_sub(*fixed + 1)
-                    }
-                })
-                .collect::<Vec<_>>();
-            (segment_widths, graph_widths)
-        }
+    let fixed_widths = match config.space {
+        Space::Stable => segments
+            .iter()
+            .map(|(_, label, separator, usage_text, _)| {
+                label.chars().count()
+                    + separator.chars().count()
+                    + stable_stream_usage_width(usage_text)
+            })
+            .collect::<Vec<_>>(),
+        Space::Graph | Space::Segment => segments
+            .iter()
+            .map(|(_, _, _, _, fixed)| *fixed)
+            .collect::<Vec<_>>(),
     };
+    let (segment_widths, graph_widths) =
+        segment_widths_for_fixed_parts(config.space, segment_space, &fixed_widths, &sizing_items);
 
     let rendered = segments
         .into_iter()
@@ -1482,40 +1439,12 @@ fn render_document_row(
         .collect::<Vec<_>>();
     let separators = items.len().saturating_sub(1);
     let segment_space = inner_width.saturating_sub(separators);
-
-    let (segment_widths, graph_widths) = match config.space {
-        Space::Stable | Space::Graph => {
-            let fixed_total = segments
-                .iter()
-                .map(|(_, _, _, _, fixed)| fixed + 1)
-                .sum::<usize>();
-            let graph_space = segment_space.saturating_sub(fixed_total);
-            let graph_widths = split_weighted_width(graph_space, &sizing_items);
-            let segment_widths = segments
-                .iter()
-                .zip(graph_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), graph_width)| {
-                    fixed + usize::from(graph_width > 0) + graph_width
-                })
-                .collect::<Vec<_>>();
-            (segment_widths, graph_widths)
-        }
-        Space::Segment => {
-            let segment_widths = split_weighted_width(segment_space, &sizing_items);
-            let graph_widths = segments
-                .iter()
-                .zip(segment_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), segment_width)| {
-                    if segment_width <= *fixed {
-                        0
-                    } else {
-                        segment_width.saturating_sub(*fixed + 1)
-                    }
-                })
-                .collect::<Vec<_>>();
-            (segment_widths, graph_widths)
-        }
-    };
+    let fixed_widths = segments
+        .iter()
+        .map(|(_, _, _, _, fixed)| *fixed)
+        .collect::<Vec<_>>();
+    let (segment_widths, graph_widths) =
+        segment_widths_for_fixed_parts(config.space, segment_space, &fixed_widths, &sizing_items);
 
     let rendered = segments
         .into_iter()
@@ -2259,6 +2188,46 @@ fn stream_metric_history(histories: &[VecDeque<f64>], index: usize) -> Vec<Metri
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn segment_widths_for_fixed_parts(
+    space: Space,
+    segment_space: usize,
+    fixed_widths: &[usize],
+    sizing_items: &[LayoutItem],
+) -> (Vec<usize>, Vec<usize>) {
+    match space {
+        Space::Stable | Space::Graph => {
+            let fixed_total = fixed_widths.iter().map(|fixed| fixed + 1).sum::<usize>();
+            let graph_space = segment_space.saturating_sub(fixed_total);
+            let graph_widths = split_weighted_width(graph_space, sizing_items);
+            let segment_widths = fixed_widths
+                .iter()
+                .copied()
+                .zip(graph_widths.iter().copied())
+                .map(|(fixed_width, graph_width)| {
+                    fixed_width + usize::from(graph_width > 0) + graph_width
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+        Space::Segment => {
+            let segment_widths = split_weighted_width(segment_space, sizing_items);
+            let graph_widths = fixed_widths
+                .iter()
+                .copied()
+                .zip(segment_widths.iter().copied())
+                .map(|(fixed_width, segment_width)| {
+                    if segment_width <= fixed_width {
+                        0
+                    } else {
+                        segment_width.saturating_sub(fixed_width + 1)
+                    }
+                })
+                .collect::<Vec<_>>();
+            (segment_widths, graph_widths)
+        }
+    }
 }
 
 fn render_inline_segment(
