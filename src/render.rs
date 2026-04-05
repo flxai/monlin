@@ -52,6 +52,14 @@ struct GraphRenderOptions<'a> {
     window: Window,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct RenderContext<'a> {
+    align: Align,
+    renderer: Renderer,
+    stable_layout: bool,
+    graph: GraphRenderOptions<'a>,
+}
+
 const UNAVAILABLE_GRAPH_BRAILLE: char = '⠄';
 const UNAVAILABLE_GRAPH_BLOCK: char = '░';
 const UNAVAILABLE_GRAPH_COLOR: crate::color::Rgb = crate::color::Rgb {
@@ -467,20 +475,33 @@ fn render_pack_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            config.renderer,
-                            Some(&item_hues),
-                            color_enabled,
-                            config.solid_colors,
-                            config.window,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: Some(&item_hues),
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            config.renderer,
-                            color_enabled,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: None,
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     }
                 })
@@ -544,20 +565,33 @@ fn render_flex_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            config.renderer,
-                            Some(&item_hues),
-                            color_enabled,
-                            config.solid_colors,
-                            config.window,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: Some(&item_hues),
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            config.renderer,
-                            color_enabled,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: None,
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     }
                 })
@@ -607,20 +641,33 @@ fn render_grid_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             column_specs[index],
-                            config.renderer,
-                            Some(&item_hues),
-                            color_enabled,
-                            config.solid_colors,
-                            config.window,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: Some(&item_hues),
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             column_specs[index],
-                            config.renderer,
-                            color_enabled,
-                            matches!(config.space, Space::Stable),
+                            RenderContext {
+                                align: config.align,
+                                renderer: config.renderer,
+                                stable_layout: matches!(config.space, Space::Stable),
+                                graph: GraphRenderOptions {
+                                    hues: None,
+                                    color_enabled,
+                                    solid_colors: config.solid_colors,
+                                    window: config.window,
+                                },
+                            },
                         )
                     }
                 })
@@ -2098,13 +2145,17 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         label_width,
                         graph_width,
-                        config.align,
-                        config.renderer,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                        stable_layout,
+                        RenderContext {
+                            align: config.align,
+                            renderer: config.renderer,
+                            stable_layout,
+                            graph: GraphRenderOptions {
+                                hues: Some(&item_hues),
+                                color_enabled,
+                                solid_colors: config.solid_colors,
+                                window: config.window,
+                            },
+                        },
                     )
                 } else {
                     render_segment_with_headline(
@@ -2114,13 +2165,17 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         width,
                         label_width,
-                        config.align,
-                        config.renderer,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                        stable_layout,
+                        RenderContext {
+                            align: config.align,
+                            renderer: config.renderer,
+                            stable_layout,
+                            graph: GraphRenderOptions {
+                                hues: Some(&item_hues),
+                                color_enabled,
+                                solid_colors: config.solid_colors,
+                                window: config.window,
+                            },
+                        },
                     )
                 }
             } else {
@@ -2129,10 +2184,17 @@ fn render_row(
                     width,
                     label_width,
                     graph_width,
-                    config.align,
-                    config.renderer,
-                    color_enabled,
-                    stable_layout,
+                    RenderContext {
+                        align: config.align,
+                        renderer: config.renderer,
+                        stable_layout,
+                        graph: GraphRenderOptions {
+                            hues: None,
+                            color_enabled,
+                            solid_colors: config.solid_colors,
+                            window: config.window,
+                        },
+                    },
                 )
             }
         })
@@ -2172,13 +2234,17 @@ fn render_segment(
         None,
         width,
         label_width,
-        align,
-        renderer,
-        None,
-        color_enabled,
-        false,
-        Window::Agg,
-        false,
+        RenderContext {
+            align,
+            renderer,
+            stable_layout: false,
+            graph: GraphRenderOptions {
+                hues: None,
+                color_enabled,
+                solid_colors: false,
+                window: Window::Agg,
+            },
+        },
     )
 }
 
@@ -2321,13 +2387,7 @@ fn render_segment_with_headline(
     headline_value: Option<HeadlineValue>,
     width: usize,
     label_width: usize,
-    align: Align,
-    renderer: Renderer,
-    hues: Option<&BaseHues>,
-    color_enabled: bool,
-    solid_colors: bool,
-    window: Window,
-    stable_layout: bool,
+    ctx: RenderContext<'_>,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
@@ -2337,7 +2397,7 @@ fn render_segment_with_headline(
         value,
         headline_value,
         label_width,
-        stable_layout,
+        ctx.stable_layout,
     );
 
     if width <= fixed {
@@ -2349,17 +2409,11 @@ fn render_segment_with_headline(
 
     let graph_width = width.saturating_sub(fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph_options = GraphRenderOptions {
-        hues,
-        color_enabled,
-        solid_colors,
-        window,
-    };
     let graph =
-        render_metric_graph_with_options(&samples, graph_width, metric, renderer, graph_options);
+        render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
 
     pad_or_trim_visible(
-        &match align {
+        &match ctx.align {
             Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
             Align::Right => format!("{label} {graph} {usage_text}"),
         },
@@ -2374,13 +2428,7 @@ fn render_segment_with_graph_width(
     headline_value: Option<HeadlineValue>,
     label_width: usize,
     graph_width: usize,
-    align: Align,
-    renderer: Renderer,
-    hues: Option<&BaseHues>,
-    color_enabled: bool,
-    solid_colors: bool,
-    window: Window,
-    stable_layout: bool,
+    ctx: RenderContext<'_>,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
@@ -2390,21 +2438,15 @@ fn render_segment_with_graph_width(
         value,
         headline_value,
         label_width,
-        stable_layout,
+        ctx.stable_layout,
     );
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph_options = GraphRenderOptions {
-        hues,
-        color_enabled,
-        solid_colors,
-        window,
-    };
     let graph =
-        render_metric_graph_with_options(&samples, graph_width, metric, renderer, graph_options);
+        render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
     let width = fixed + 1 + graph_width;
 
     pad_or_trim_visible(
-        &match align {
+        &match ctx.align {
             Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
             Align::Right => format!("{label} {graph} {usage_text}"),
         },
@@ -2417,10 +2459,7 @@ fn render_unavailable_segment(
     width: usize,
     label_width: usize,
     graph_width: usize,
-    align: Align,
-    renderer: Renderer,
-    color_enabled: bool,
-    stable_layout: bool,
+    ctx: RenderContext<'_>,
 ) -> String {
     let metric = item.metric();
     let (label, label_usage_separator, usage_text, fixed) = unavailable_segment_text_parts(
@@ -2428,14 +2467,14 @@ fn render_unavailable_segment(
         item.view(),
         item.display(),
         label_width,
-        stable_layout,
+        ctx.stable_layout,
     );
-    let label = paint_unavailable_text(&label, color_enabled);
-    let usage_text = paint_unavailable_text(&usage_text, color_enabled);
-    let graph = render_unavailable_graph(graph_width, renderer, color_enabled);
+    let label = paint_unavailable_text(&label, ctx.graph.color_enabled);
+    let usage_text = paint_unavailable_text(&usage_text, ctx.graph.color_enabled);
+    let graph = render_unavailable_graph(graph_width, ctx.renderer, ctx.graph.color_enabled);
 
     let text = if graph_width > 0 {
-        match align {
+        match ctx.align {
             Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
             Align::Right => format!("{label} {graph} {usage_text}"),
         }
@@ -2452,28 +2491,23 @@ fn render_grid_segment(
     value: MetricValue,
     headline_value: Option<HeadlineValue>,
     spec: GridColumnSpec,
-    renderer: Renderer,
-    hues: Option<&BaseHues>,
-    color_enabled: bool,
-    solid_colors: bool,
-    window: Window,
-    stable_layout: bool,
+    ctx: RenderContext<'_>,
 ) -> String {
     let metric = item.metric();
-    let usage_text = segment_usage_text(metric, item.view(), value, headline_value, stable_layout);
+    let usage_text = segment_usage_text(
+        metric,
+        item.view(),
+        value,
+        headline_value,
+        ctx.stable_layout,
+    );
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph_options = GraphRenderOptions {
-        hues,
-        color_enabled,
-        solid_colors,
-        window,
-    };
     let graph = render_metric_graph_with_options(
         &samples,
         spec.graph_width,
         metric,
-        renderer,
-        graph_options,
+        ctx.renderer,
+        ctx.graph,
     );
 
     let text = render_grid_text(
@@ -2490,17 +2524,15 @@ fn render_grid_segment(
 fn render_unavailable_grid_segment(
     item: LayoutItem,
     spec: GridColumnSpec,
-    renderer: Renderer,
-    color_enabled: bool,
-    stable_layout: bool,
+    ctx: RenderContext<'_>,
 ) -> String {
     let metric = item.metric();
-    let usage_text = unavailable_usage_text(metric, item.view(), stable_layout);
-    let graph = render_unavailable_graph(spec.graph_width, renderer, color_enabled);
+    let usage_text = unavailable_usage_text(metric, item.view(), ctx.stable_layout);
+    let graph = render_unavailable_graph(spec.graph_width, ctx.renderer, ctx.graph.color_enabled);
     let text = render_grid_text(
         item.display(),
-        &paint_unavailable_text(metric.short_label(), color_enabled),
-        &paint_unavailable_text(&usage_text, color_enabled),
+        &paint_unavailable_text(metric.short_label(), ctx.graph.color_enabled),
+        &paint_unavailable_text(&usage_text, ctx.graph.color_enabled),
         spec,
         Some(&graph),
     );
@@ -5269,13 +5301,17 @@ mod tests {
             Some(HeadlineValue::Scalar(0.0)),
             16,
             3,
-            Align::Left,
-            Renderer::Braille,
-            None,
-            false,
-            false,
-            Window::Agg,
-            false,
+            RenderContext {
+                align: Align::Left,
+                renderer: Renderer::Braille,
+                stable_layout: false,
+                graph: GraphRenderOptions {
+                    hues: None,
+                    color_enabled: false,
+                    solid_colors: false,
+                    window: Window::Agg,
+                },
+            },
         );
 
         assert!(segment.contains("net   0B"));
@@ -5290,13 +5326,17 @@ mod tests {
             Some(HeadlineValue::Scalar(0.0)),
             16,
             4,
-            Align::Left,
-            Renderer::Braille,
-            None,
-            false,
-            false,
-            Window::Agg,
-            false,
+            RenderContext {
+                align: Align::Left,
+                renderer: Renderer::Braille,
+                stable_layout: false,
+                graph: GraphRenderOptions {
+                    hues: None,
+                    color_enabled: false,
+                    solid_colors: false,
+                    window: Window::Agg,
+                },
+            },
         );
 
         assert!(segment.contains("vram  0%"));
@@ -5314,13 +5354,17 @@ mod tests {
             Some(HeadlineValue::Scalar(105.0 * 1024.0)),
             18,
             4,
-            Align::Left,
-            Renderer::Braille,
-            None,
-            false,
-            false,
-            Window::Agg,
-            false,
+            RenderContext {
+                align: Align::Left,
+                renderer: Renderer::Braille,
+                stable_layout: false,
+                graph: GraphRenderOptions {
+                    hues: None,
+                    color_enabled: false,
+                    solid_colors: false,
+                    window: Window::Agg,
+                },
+            },
         );
         let io_large = render_segment_with_headline(
             item(MetricKind::Io),
@@ -5332,13 +5376,17 @@ mod tests {
             Some(HeadlineValue::Scalar(14.0 * 1024.0 * 1024.0)),
             18,
             4,
-            Align::Left,
-            Renderer::Braille,
-            None,
-            false,
-            false,
-            Window::Agg,
-            false,
+            RenderContext {
+                align: Align::Left,
+                renderer: Renderer::Braille,
+                stable_layout: false,
+                graph: GraphRenderOptions {
+                    hues: None,
+                    color_enabled: false,
+                    solid_colors: false,
+                    window: Window::Agg,
+                },
+            },
         );
 
         assert!(io_small.starts_with("io 105K "));
@@ -5357,13 +5405,17 @@ mod tests {
             }),
             22,
             3,
-            Align::Left,
-            Renderer::Braille,
-            None,
-            false,
-            false,
-            Window::Agg,
-            false,
+            RenderContext {
+                align: Align::Left,
+                renderer: Renderer::Braille,
+                stable_layout: false,
+                graph: GraphRenderOptions {
+                    hues: None,
+                    color_enabled: false,
+                    solid_colors: false,
+                    window: Window::Agg,
+                },
+            },
         );
 
         assert!(segment.contains("spc 512M/2.0G"));
@@ -5409,13 +5461,17 @@ mod tests {
                 headline,
                 18,
                 4,
-                Align::Left,
-                Renderer::Braille,
-                None,
-                false,
-                false,
-                Window::Agg,
-                false,
+                RenderContext {
+                    align: Align::Left,
+                    renderer: Renderer::Braille,
+                    stable_layout: false,
+                    graph: GraphRenderOptions {
+                        hues: None,
+                        color_enabled: false,
+                        solid_colors: false,
+                        window: Window::Agg,
+                    },
+                },
             );
 
             assert!(
