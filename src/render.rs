@@ -477,56 +477,34 @@ fn render_pack_lines_with_headlines(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config_label_prefix(config);
     let packed_text_widths =
         packed_span_text_widths(layout, values, headline_values, stable_layout);
-    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
-    let all_hues = visible_hues(total_items, config.colors.as_deref());
-    let mut offset = 0;
-
-    layout
+    let row_specs = layout
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
-            let row_specs = pack_row_specs(
+            pack_row_specs(
                 config,
                 width,
-                &prefix,
+                &config_label_prefix(config),
                 items,
                 values,
                 headline_values,
                 &packed_text_widths,
-            );
-            let segments = items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    let metric = item.metric();
-                    let history = histories.get(&metric).cloned().unwrap_or_default();
-                    let item_hues =
-                        metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
-                    if let Some(value) = values.get(&metric).copied() {
-                        render_grid_segment(
-                            *item,
-                            &history,
-                            value,
-                            headline_values.get(&metric).copied(),
-                            row_specs[index],
-                            render_context(config, color_enabled, stable_layout, Some(item_hues)),
-                        )
-                    } else {
-                        render_unavailable_grid_segment(
-                            *item,
-                            row_specs[index],
-                            render_context(config, color_enabled, stable_layout, None),
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    render_native_grid_like_lines(
+        config,
+        width,
+        color_enabled,
+        histories,
+        layout,
+        values,
+        headline_values,
+        &row_specs,
+    )
 }
 
 fn render_flex_lines_with_headlines(
@@ -539,56 +517,34 @@ fn render_flex_lines_with_headlines(
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config_label_prefix(config);
     let column_text_widths =
         shared_column_text_widths(layout, values, headline_values, stable_layout);
-    let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
-    let all_hues = visible_hues(total_items, config.colors.as_deref());
-    let mut offset = 0;
-
-    layout
+    let row_specs = layout
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
-            let row_specs = flex_row_specs(
+            flex_row_specs(
                 config,
                 width,
-                &prefix,
+                &config_label_prefix(config),
                 items,
                 values,
                 headline_values,
                 &column_text_widths,
-            );
-            let segments = items
-                .iter()
-                .enumerate()
-                .map(|(index, item)| {
-                    let metric = item.metric();
-                    let history = histories.get(&metric).cloned().unwrap_or_default();
-                    let item_hues =
-                        metric_hues_for_visible_hue(metric, row_hues[index % row_hues.len()]);
-                    if let Some(value) = values.get(&metric).copied() {
-                        render_grid_segment(
-                            *item,
-                            &history,
-                            value,
-                            headline_values.get(&metric).copied(),
-                            row_specs[index],
-                            render_context(config, color_enabled, stable_layout, Some(item_hues)),
-                        )
-                    } else {
-                        render_unavailable_grid_segment(
-                            *item,
-                            row_specs[index],
-                            render_context(config, color_enabled, stable_layout, None),
-                        )
-                    }
-                })
-                .collect::<Vec<_>>();
-            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+            )
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    render_native_grid_like_lines(
+        config,
+        width,
+        color_enabled,
+        histories,
+        layout,
+        values,
+        headline_values,
+        &row_specs,
+    )
 }
 
 fn render_grid_lines_with_headlines(
@@ -600,9 +556,37 @@ fn render_grid_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
+    let column_specs = grid_column_specs(config, width, layout, values, headline_values);
+    let row_specs = layout
+        .rows()
+        .iter()
+        .map(|items| column_specs[..items.len()].to_vec())
+        .collect::<Vec<_>>();
+
+    render_native_grid_like_lines(
+        config,
+        width,
+        color_enabled,
+        histories,
+        layout,
+        values,
+        headline_values,
+        &row_specs,
+    )
+}
+
+fn render_native_grid_like_lines(
+    config: &Config,
+    width: usize,
+    color_enabled: bool,
+    histories: &HashMap<MetricKind, VecDeque<MetricValue>>,
+    layout: &Layout,
+    values: &HashMap<MetricKind, MetricValue>,
+    headline_values: &HashMap<MetricKind, HeadlineValue>,
+    row_specs: &[Vec<GridColumnSpec>],
+) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
     let prefix = config_label_prefix(config);
-    let column_specs = grid_column_specs(config, width, layout, values, headline_values);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let mut offset = 0;
@@ -610,12 +594,14 @@ fn render_grid_lines_with_headlines(
     layout
         .rows()
         .iter()
-        .map(|items| {
+        .zip(row_specs.iter())
+        .map(|(items, specs)| {
             let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
             let segments = items
                 .iter()
+                .zip(specs.iter().copied())
                 .enumerate()
-                .map(|(index, item)| {
+                .map(|(index, (item, spec))| {
                     let metric = item.metric();
                     let history = histories.get(&metric).cloned().unwrap_or_default();
                     let item_hues =
@@ -626,13 +612,13 @@ fn render_grid_lines_with_headlines(
                             &history,
                             value,
                             headline_values.get(&metric).copied(),
-                            column_specs[index],
+                            spec,
                             render_context(config, color_enabled, stable_layout, Some(item_hues)),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
-                            column_specs[index],
+                            spec,
                             render_context(config, color_enabled, stable_layout, None),
                         )
                     }
