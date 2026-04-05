@@ -32,6 +32,14 @@ struct GridColumnSpec {
     total_width: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InlineSegmentText {
+    label: String,
+    separator: &'static str,
+    usage_text: String,
+    fixed: usize,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct PackedFraction {
     num: usize,
@@ -1232,15 +1240,14 @@ fn render_stream_group_row(
                 ),
                 DisplayMode::Bare => String::new(),
             };
-            let separator = if label.is_empty() || usage_text.is_empty() {
-                ""
-            } else {
-                " "
-            };
-            let fixed =
-                label.chars().count() + separator.chars().count() + usage_text.chars().count();
-
-            (item, label, separator, usage_text, fixed)
+            (
+                item,
+                inline_segment_text(
+                    label.clone(),
+                    default_inline_separator(&label, &usage_text),
+                    usage_text,
+                ),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1264,15 +1271,15 @@ fn render_stream_group_row(
     let fixed_widths = match config.space {
         Space::Stable => segments
             .iter()
-            .map(|(_, label, separator, usage_text, _)| {
-                label.chars().count()
-                    + separator.chars().count()
-                    + stable_stream_usage_width(usage_text)
+            .map(|(_, parts)| {
+                visible_width(&parts.label)
+                    + parts.separator.chars().count()
+                    + stable_stream_usage_width(&parts.usage_text)
             })
             .collect::<Vec<_>>(),
         Space::Graph | Space::Segment => segments
             .iter()
-            .map(|(_, _, _, _, fixed)| *fixed)
+            .map(|(_, parts)| parts.fixed)
             .collect::<Vec<_>>(),
     };
     let (segment_widths, graph_widths) =
@@ -1281,54 +1288,37 @@ fn render_stream_group_row(
     let rendered = segments
         .into_iter()
         .zip(segment_widths.into_iter().zip(graph_widths))
-        .map(
-            |((item, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
-                let metric = stream_metric_for(item.column_index);
-                let metric_history = stream_metric_history(histories, item.column_index);
-                let display_usage_text = match config.space {
-                    Space::Stable if !usage_text.is_empty() => {
-                        format!(
-                            "{usage_text:>width$}",
-                            width = stable_stream_usage_width(&usage_text)
-                        )
-                    }
-                    Space::Stable | Space::Graph | Space::Segment => usage_text.clone(),
-                };
-                let graph = render_metric_graph_for_visible_hue(
-                    &metric_history,
-                    graph_width,
-                    metric,
-                    config.renderer,
-                    stream_hues[item.column_index % stream_hues.len()],
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                );
-                if graph_width == 0 {
-                    return pad_or_trim_visible(
-                        &render_inline_segment(
-                            config.align,
-                            &label,
-                            separator,
-                            &display_usage_text,
-                            "",
-                        ),
-                        segment_width,
-                    );
-                }
-
-                pad_or_trim_visible(
-                    &render_inline_segment(
-                        config.align,
-                        &label,
-                        separator,
-                        &display_usage_text,
-                        &graph,
+        .map(|((item, parts), (segment_width, graph_width))| {
+            let metric = stream_metric_for(item.column_index);
+            let metric_history = stream_metric_history(histories, item.column_index);
+            let display_parts = match config.space {
+                Space::Stable if !parts.usage_text.is_empty() => InlineSegmentText {
+                    usage_text: format!(
+                        "{usage_text:>width$}",
+                        usage_text = parts.usage_text,
+                        width = stable_stream_usage_width(&parts.usage_text)
                     ),
-                    segment_width,
-                )
-            },
-        )
+                    ..parts
+                },
+                Space::Stable | Space::Graph | Space::Segment => parts,
+            };
+            let graph = render_metric_graph_for_visible_hue(
+                &metric_history,
+                graph_width,
+                metric,
+                config.renderer,
+                stream_hues[item.column_index % stream_hues.len()],
+                color_enabled,
+                config.solid_colors,
+                config.window,
+            );
+            render_inline_segment_to_width(
+                &display_parts,
+                if graph_width == 0 { "" } else { &graph },
+                segment_width,
+                config.align,
+            )
+        })
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
@@ -1354,14 +1344,14 @@ fn render_document_row(
                 sample.values.get(item.source()).copied(),
                 sample.headlines.get(item.source()).copied(),
             );
-            let separator = if label.is_empty() || usage_text.is_empty() {
-                ""
-            } else {
-                " "
-            };
-            let fixed =
-                visible_width(&label) + separator.chars().count() + visible_width(&usage_text);
-            (item, label, separator, usage_text, fixed)
+            (
+                item,
+                inline_segment_text(
+                    label.clone(),
+                    default_inline_separator(&label, &usage_text),
+                    usage_text,
+                ),
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1383,7 +1373,7 @@ fn render_document_row(
     let segment_space = inner_width.saturating_sub(separators);
     let fixed_widths = segments
         .iter()
-        .map(|(_, _, _, _, fixed)| *fixed)
+        .map(|(_, parts)| parts.fixed)
         .collect::<Vec<_>>();
     let (segment_widths, graph_widths) =
         segment_widths_for_fixed_parts(config.space, segment_space, &fixed_widths, &sizing_items);
@@ -1392,56 +1382,49 @@ fn render_document_row(
         .into_iter()
         .zip(segment_widths.into_iter().zip(graph_widths))
         .enumerate()
-        .map(
-            |(
-                index,
-                ((item, label, separator, usage_text, fixed), (segment_width, graph_width)),
-            )| {
-                let render_metric = document_render_metric(item.source());
-                let metric_history = document_metric_history(histories, item.source());
-                let graph = render_metric_graph_for_visible_hue(
-                    &metric_history,
-                    graph_width,
-                    render_metric,
-                    config.renderer,
-                    row_hues[index % row_hues.len()],
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                );
-                let value = sample.values.get(item.source()).copied();
+        .map(|(index, ((item, parts), (segment_width, graph_width)))| {
+            let render_metric = document_render_metric(item.source());
+            let metric_history = document_metric_history(histories, item.source());
+            let graph = render_metric_graph_for_visible_hue(
+                &metric_history,
+                graph_width,
+                render_metric,
+                config.renderer,
+                row_hues[index % row_hues.len()],
+                color_enabled,
+                config.solid_colors,
+                config.window,
+            );
+            let value = sample.values.get(item.source()).copied();
 
-                let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
-                    let label = paint_unavailable_text(&label, color_enabled);
-                    let usage_text = paint_unavailable_text(&usage_text, color_enabled);
-                    let graph =
-                        render_unavailable_graph(graph_width, config.renderer, color_enabled);
-                    render_inline_segment(config.align, &label, separator, &usage_text, &graph)
-                } else if graph_width == 0 {
-                    pad_or_trim_visible(
-                        &render_inline_segment(config.align, &label, separator, &usage_text, ""),
-                        segment_width.max(fixed),
-                    )
-                } else {
-                    pad_or_trim_visible(
-                        &render_inline_segment(
-                            config.align,
-                            &label,
-                            separator,
-                            &usage_text,
-                            &graph,
-                        ),
-                        segment_width.max(fixed),
-                    )
+            let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                let unavailable_parts = InlineSegmentText {
+                    label: paint_unavailable_text(&parts.label, color_enabled),
+                    usage_text: paint_unavailable_text(&parts.usage_text, color_enabled),
+                    ..parts.clone()
                 };
+                let graph = render_unavailable_graph(graph_width, config.renderer, color_enabled);
+                render_inline_segment_to_width(
+                    &unavailable_parts,
+                    &graph,
+                    segment_width.max(parts.fixed),
+                    config.align,
+                )
+            } else {
+                render_inline_segment_to_width(
+                    &parts,
+                    if graph_width == 0 { "" } else { &graph },
+                    segment_width.max(parts.fixed),
+                    config.align,
+                )
+            };
 
-                if matches!(value, Some(CanonicalValue::Unavailable) | None) {
-                    pad_or_trim_visible(&text, segment_width.max(fixed))
-                } else {
-                    text
-                }
-            },
-        )
+            if matches!(value, Some(CanonicalValue::Unavailable) | None) {
+                pad_or_trim_visible(&text, segment_width.max(parts.fixed))
+            } else {
+                text
+            }
+        })
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
@@ -2231,6 +2214,46 @@ fn render_inline_segment(
     }
 }
 
+fn default_inline_separator(label: &str, usage_text: &str) -> &'static str {
+    if label.is_empty() || usage_text.is_empty() {
+        ""
+    } else {
+        " "
+    }
+}
+
+fn inline_segment_text(
+    label: String,
+    separator: &'static str,
+    usage_text: String,
+) -> InlineSegmentText {
+    let fixed = visible_width(&label) + separator.chars().count() + visible_width(&usage_text);
+    InlineSegmentText {
+        label,
+        separator,
+        usage_text,
+        fixed,
+    }
+}
+
+fn render_inline_segment_to_width(
+    parts: &InlineSegmentText,
+    graph: &str,
+    width: usize,
+    align: Align,
+) -> String {
+    pad_or_trim_visible(
+        &render_inline_segment(
+            align,
+            &parts.label,
+            parts.separator,
+            &parts.usage_text,
+            graph,
+        ),
+        width,
+    )
+}
+
 fn render_segment_with_headline(
     item: LayoutItem,
     history: &VecDeque<MetricValue>,
@@ -2241,7 +2264,7 @@ fn render_segment_with_headline(
     ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
+    let parts = segment_text_parts(
         metric,
         item.view(),
         item.display(),
@@ -2251,25 +2274,16 @@ fn render_segment_with_headline(
         ctx.stable_layout,
     );
 
-    if width <= fixed {
-        return pad_or_trim_visible(
-            &format!("{label}{label_usage_separator}{usage_text}"),
-            width,
-        );
+    if width <= parts.fixed {
+        return render_inline_segment_to_width(&parts, "", width, ctx.align);
     }
 
-    let graph_width = width.saturating_sub(fixed + 1);
+    let graph_width = width.saturating_sub(parts.fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph =
         render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
 
-    pad_or_trim_visible(
-        &match ctx.align {
-            Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
-            Align::Right => format!("{label} {graph} {usage_text}"),
-        },
-        width,
-    )
+    render_inline_segment_to_width(&parts, &graph, width, ctx.align)
 }
 
 fn render_segment_with_graph_width(
@@ -2282,7 +2296,7 @@ fn render_segment_with_graph_width(
     ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) = segment_text_parts(
+    let parts = segment_text_parts(
         metric,
         item.view(),
         item.display(),
@@ -2294,15 +2308,9 @@ fn render_segment_with_graph_width(
     let samples = history.iter().copied().collect::<Vec<_>>();
     let graph =
         render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
-    let width = fixed + 1 + graph_width;
+    let width = parts.fixed + 1 + graph_width;
 
-    pad_or_trim_visible(
-        &match ctx.align {
-            Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
-            Align::Right => format!("{label} {graph} {usage_text}"),
-        },
-        width,
-    )
+    render_inline_segment_to_width(&parts, &graph, width, ctx.align)
 }
 
 fn render_unavailable_segment(
@@ -2313,27 +2321,25 @@ fn render_unavailable_segment(
     ctx: RenderContext,
 ) -> String {
     let metric = item.metric();
-    let (label, label_usage_separator, usage_text, fixed) = unavailable_segment_text_parts(
+    let parts = unavailable_segment_text_parts(
         metric,
         item.view(),
         item.display(),
         label_width,
         ctx.stable_layout,
     );
-    let label = paint_unavailable_text(&label, ctx.graph.color_enabled);
-    let usage_text = paint_unavailable_text(&usage_text, ctx.graph.color_enabled);
-    let graph = render_unavailable_graph(graph_width, ctx.renderer, ctx.graph.color_enabled);
-
-    let text = if graph_width > 0 {
-        match ctx.align {
-            Align::Left => format!("{label}{label_usage_separator}{usage_text} {graph}"),
-            Align::Right => format!("{label} {graph} {usage_text}"),
-        }
-    } else {
-        format!("{label}{label_usage_separator}{usage_text}")
+    let painted_parts = InlineSegmentText {
+        label: paint_unavailable_text(&parts.label, ctx.graph.color_enabled),
+        usage_text: paint_unavailable_text(&parts.usage_text, ctx.graph.color_enabled),
+        ..parts
     };
-
-    pad_or_trim_visible(&text, width.max(fixed))
+    let graph = render_unavailable_graph(graph_width, ctx.renderer, ctx.graph.color_enabled);
+    render_inline_segment_to_width(
+        &painted_parts,
+        if graph_width > 0 { &graph } else { "" },
+        width.max(parts.fixed),
+        ctx.align,
+    )
 }
 
 fn render_grid_segment(
@@ -2429,7 +2435,7 @@ fn segment_text_parts(
     headline_value: Option<HeadlineValue>,
     _label_width: usize,
     stable_layout: bool,
-) -> (String, &'static str, String, usize) {
+) -> InlineSegmentText {
     let label = match display {
         DisplayMode::Full => metric.short_label().to_owned(),
         DisplayMode::Value | DisplayMode::Bare => String::new(),
@@ -2445,9 +2451,7 @@ fn segment_text_parts(
         (DisplayMode::Full, _) => " ",
         (DisplayMode::Value | DisplayMode::Bare, _) => "",
     };
-    let fixed =
-        label.chars().count() + label_usage_separator.chars().count() + usage_text.chars().count();
-    (label, label_usage_separator, usage_text, fixed)
+    inline_segment_text(label, label_usage_separator, usage_text)
 }
 
 fn unavailable_segment_text_parts(
@@ -2456,7 +2460,7 @@ fn unavailable_segment_text_parts(
     display: DisplayMode,
     _label_width: usize,
     stable_layout: bool,
-) -> (String, &'static str, String, usize) {
+) -> InlineSegmentText {
     let label = match display {
         DisplayMode::Full => metric.short_label().to_owned(),
         DisplayMode::Value | DisplayMode::Bare => String::new(),
@@ -2472,9 +2476,7 @@ fn unavailable_segment_text_parts(
         (DisplayMode::Full, _) => " ",
         (DisplayMode::Value | DisplayMode::Bare, _) => "",
     };
-    let fixed =
-        visible_width(&label) + label_usage_separator.chars().count() + visible_width(&usage_text);
-    (label, label_usage_separator, usage_text, fixed)
+    inline_segment_text(label, label_usage_separator, usage_text)
 }
 
 fn segment_usage_text(
@@ -2574,7 +2576,7 @@ fn segment_fixed_width(
         label_width,
         stable_layout,
     )
-    .3
+    .fixed
 }
 
 fn unavailable_segment_fixed_width(
@@ -2584,7 +2586,7 @@ fn unavailable_segment_fixed_width(
     label_width: usize,
     stable_layout: bool,
 ) -> usize {
-    unavailable_segment_text_parts(metric, view, display, label_width, stable_layout).3
+    unavailable_segment_text_parts(metric, view, display, label_width, stable_layout).fixed
 }
 
 fn effective_view(metric: MetricKind, view: LayoutView) -> LayoutView {
