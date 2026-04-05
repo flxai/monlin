@@ -60,6 +60,34 @@ struct RenderContext<'a> {
     graph: GraphRenderOptions<'a>,
 }
 
+fn graph_render_options<'a>(
+    hues: Option<&'a BaseHues>,
+    color_enabled: bool,
+    solid_colors: bool,
+    window: Window,
+) -> GraphRenderOptions<'a> {
+    GraphRenderOptions {
+        hues,
+        color_enabled,
+        solid_colors,
+        window,
+    }
+}
+
+fn render_context<'a>(
+    config: &Config,
+    color_enabled: bool,
+    stable_layout: bool,
+    hues: Option<&'a BaseHues>,
+) -> RenderContext<'a> {
+    RenderContext {
+        align: config.align,
+        renderer: config.renderer,
+        stable_layout,
+        graph: graph_render_options(hues, color_enabled, config.solid_colors, config.window),
+    }
+}
+
 const UNAVAILABLE_GRAPH_BRAILLE: char = '⠄';
 const UNAVAILABLE_GRAPH_BLOCK: char = '░';
 const UNAVAILABLE_GRAPH_COLOR: crate::color::Rgb = crate::color::Rgb {
@@ -282,12 +310,8 @@ fn render_packed_metric_row(
     row_hues: &[ColorSpec],
 ) -> String {
     let widths = split_weighted_width(width, &normalized_items_for_sizing(items));
-    let graph_options = GraphRenderOptions {
-        hues: None,
-        color_enabled,
-        solid_colors: config.solid_colors,
-        window: config.window,
-    };
+    let graph_options =
+        graph_render_options(None, color_enabled, config.solid_colors, config.window);
     let segments = items
         .iter()
         .zip(widths)
@@ -376,12 +400,8 @@ fn render_packed_document_row(
         })
         .collect::<Vec<_>>();
     let widths = split_weighted_width(width, &sizing_items);
-    let graph_options = GraphRenderOptions {
-        hues: None,
-        color_enabled,
-        solid_colors: config.solid_colors,
-        window: config.window,
-    };
+    let graph_options =
+        graph_render_options(None, color_enabled, config.solid_colors, config.window);
     let segments = items
         .iter()
         .zip(widths)
@@ -475,33 +495,23 @@ fn render_pack_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: Some(&item_hues),
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                Some(&item_hues),
+                            ),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: None,
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                None,
+                            ),
                         )
                     }
                 })
@@ -565,33 +575,23 @@ fn render_flex_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             row_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: Some(&item_hues),
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                Some(&item_hues),
+                            ),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             row_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: None,
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                None,
+                            ),
                         )
                     }
                 })
@@ -641,33 +641,23 @@ fn render_grid_lines_with_headlines(
                             value,
                             headline_values.get(&metric).copied(),
                             column_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: Some(&item_hues),
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                Some(&item_hues),
+                            ),
                         )
                     } else {
                         render_unavailable_grid_segment(
                             *item,
                             column_specs[index],
-                            RenderContext {
-                                align: config.align,
-                                renderer: config.renderer,
-                                stable_layout: matches!(config.space, Space::Stable),
-                                graph: GraphRenderOptions {
-                                    hues: None,
-                                    color_enabled,
-                                    solid_colors: config.solid_colors,
-                                    window: config.window,
-                                },
-                            },
+                            render_context(
+                                config,
+                                color_enabled,
+                                matches!(config.space, Space::Stable),
+                                None,
+                            ),
                         )
                     }
                 })
@@ -1415,12 +1405,12 @@ fn render_stream_group_row(
                     graph_width,
                     metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
+                    graph_render_options(
+                        Some(&item_hues),
                         color_enabled,
-                        solid_colors: config.solid_colors,
-                        window: config.window,
-                    },
+                        config.solid_colors,
+                        config.window,
+                    ),
                 );
                 let text_only = format!("{label}{separator}{display_usage_text}");
 
@@ -1567,12 +1557,12 @@ fn render_document_row(
                     graph_width,
                     render_metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
+                    graph_render_options(
+                        Some(&item_hues),
                         color_enabled,
-                        solid_colors: config.solid_colors,
-                        window: config.window,
-                    },
+                        config.solid_colors,
+                        config.window,
+                    ),
                 );
                 let text_only = format!("{label}{separator}{usage_text}");
                 let value = sample.values.get(item.source()).copied();
@@ -1704,12 +1694,8 @@ fn render_stream_rows(
 ) -> Vec<String> {
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
-        let graph_options = GraphRenderOptions {
-            hues: None,
-            color_enabled,
-            solid_colors: config.solid_colors,
-            window: config.window,
-        };
+        let graph_options =
+            graph_render_options(None, color_enabled, config.solid_colors, config.window);
         return values
             .iter()
             .enumerate()
@@ -1786,12 +1772,12 @@ fn render_stream_rows(
                 graph_width,
                 metric,
                 config.renderer,
-                GraphRenderOptions {
-                    hues: Some(&item_hues),
+                graph_render_options(
+                    Some(&item_hues),
                     color_enabled,
-                    solid_colors: config.solid_colors,
-                    window: config.window,
-                },
+                    config.solid_colors,
+                    config.window,
+                ),
             );
 
             pad_or_trim_visible(
@@ -1815,12 +1801,8 @@ fn render_stream_columns_line(
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
         let widths = split_stream_widths(width, values.len());
-        let graph_options = GraphRenderOptions {
-            hues: None,
-            color_enabled,
-            solid_colors: config.solid_colors,
-            window: config.window,
-        };
+        let graph_options =
+            graph_render_options(None, color_enabled, config.solid_colors, config.window);
         let segments = widths
             .into_iter()
             .enumerate()
@@ -1913,12 +1895,12 @@ fn render_stream_columns_line(
                     graph_width,
                     metric,
                     config.renderer,
-                    GraphRenderOptions {
-                        hues: Some(&item_hues),
+                    graph_render_options(
+                        Some(&item_hues),
                         color_enabled,
-                        solid_colors: config.solid_colors,
-                        window: config.window,
-                    },
+                        config.solid_colors,
+                        config.window,
+                    ),
                 );
                 let text_only = format!("{label}{separator}{display_usage_text}");
 
@@ -2145,17 +2127,7 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         label_width,
                         graph_width,
-                        RenderContext {
-                            align: config.align,
-                            renderer: config.renderer,
-                            stable_layout,
-                            graph: GraphRenderOptions {
-                                hues: Some(&item_hues),
-                                color_enabled,
-                                solid_colors: config.solid_colors,
-                                window: config.window,
-                            },
-                        },
+                        render_context(config, color_enabled, stable_layout, Some(&item_hues)),
                     )
                 } else {
                     render_segment_with_headline(
@@ -2165,17 +2137,7 @@ fn render_row(
                         headline_values.get(&metric).copied(),
                         width,
                         label_width,
-                        RenderContext {
-                            align: config.align,
-                            renderer: config.renderer,
-                            stable_layout,
-                            graph: GraphRenderOptions {
-                                hues: Some(&item_hues),
-                                color_enabled,
-                                solid_colors: config.solid_colors,
-                                window: config.window,
-                            },
-                        },
+                        render_context(config, color_enabled, stable_layout, Some(&item_hues)),
                     )
                 }
             } else {
@@ -2184,17 +2146,7 @@ fn render_row(
                     width,
                     label_width,
                     graph_width,
-                    RenderContext {
-                        align: config.align,
-                        renderer: config.renderer,
-                        stable_layout,
-                        graph: GraphRenderOptions {
-                            hues: None,
-                            color_enabled,
-                            solid_colors: config.solid_colors,
-                            window: config.window,
-                        },
-                    },
+                    render_context(config, color_enabled, stable_layout, None),
                 )
             }
         })
@@ -2234,18 +2186,22 @@ fn render_segment(
         None,
         width,
         label_width,
-        RenderContext {
-            align,
-            renderer,
-            stable_layout: false,
-            graph: GraphRenderOptions {
-                hues: None,
-                color_enabled,
-                solid_colors: false,
-                window: Window::Agg,
-            },
-        },
+        test_render_context(align, renderer, color_enabled),
     )
+}
+
+#[cfg(test)]
+fn test_render_context(
+    align: Align,
+    renderer: Renderer,
+    color_enabled: bool,
+) -> RenderContext<'static> {
+    RenderContext {
+        align,
+        renderer,
+        stable_layout: false,
+        graph: graph_render_options(None, color_enabled, false, Window::Agg),
+    }
 }
 
 fn split_weighted_width(total: usize, items: &[LayoutItem]) -> Vec<usize> {
@@ -5301,17 +5257,7 @@ mod tests {
             Some(HeadlineValue::Scalar(0.0)),
             16,
             3,
-            RenderContext {
-                align: Align::Left,
-                renderer: Renderer::Braille,
-                stable_layout: false,
-                graph: GraphRenderOptions {
-                    hues: None,
-                    color_enabled: false,
-                    solid_colors: false,
-                    window: Window::Agg,
-                },
-            },
+            test_render_context(Align::Left, Renderer::Braille, false),
         );
 
         assert!(segment.contains("net   0B"));
@@ -5326,17 +5272,7 @@ mod tests {
             Some(HeadlineValue::Scalar(0.0)),
             16,
             4,
-            RenderContext {
-                align: Align::Left,
-                renderer: Renderer::Braille,
-                stable_layout: false,
-                graph: GraphRenderOptions {
-                    hues: None,
-                    color_enabled: false,
-                    solid_colors: false,
-                    window: Window::Agg,
-                },
-            },
+            test_render_context(Align::Left, Renderer::Braille, false),
         );
 
         assert!(segment.contains("vram  0%"));
@@ -5354,17 +5290,7 @@ mod tests {
             Some(HeadlineValue::Scalar(105.0 * 1024.0)),
             18,
             4,
-            RenderContext {
-                align: Align::Left,
-                renderer: Renderer::Braille,
-                stable_layout: false,
-                graph: GraphRenderOptions {
-                    hues: None,
-                    color_enabled: false,
-                    solid_colors: false,
-                    window: Window::Agg,
-                },
-            },
+            test_render_context(Align::Left, Renderer::Braille, false),
         );
         let io_large = render_segment_with_headline(
             item(MetricKind::Io),
@@ -5376,17 +5302,7 @@ mod tests {
             Some(HeadlineValue::Scalar(14.0 * 1024.0 * 1024.0)),
             18,
             4,
-            RenderContext {
-                align: Align::Left,
-                renderer: Renderer::Braille,
-                stable_layout: false,
-                graph: GraphRenderOptions {
-                    hues: None,
-                    color_enabled: false,
-                    solid_colors: false,
-                    window: Window::Agg,
-                },
-            },
+            test_render_context(Align::Left, Renderer::Braille, false),
         );
 
         assert!(io_small.starts_with("io 105K "));
@@ -5405,17 +5321,7 @@ mod tests {
             }),
             22,
             3,
-            RenderContext {
-                align: Align::Left,
-                renderer: Renderer::Braille,
-                stable_layout: false,
-                graph: GraphRenderOptions {
-                    hues: None,
-                    color_enabled: false,
-                    solid_colors: false,
-                    window: Window::Agg,
-                },
-            },
+            test_render_context(Align::Left, Renderer::Braille, false),
         );
 
         assert!(segment.contains("spc 512M/2.0G"));
@@ -5461,17 +5367,7 @@ mod tests {
                 headline,
                 18,
                 4,
-                RenderContext {
-                    align: Align::Left,
-                    renderer: Renderer::Braille,
-                    stable_layout: false,
-                    graph: GraphRenderOptions {
-                        hues: None,
-                        color_enabled: false,
-                        solid_colors: false,
-                        window: Window::Agg,
-                    },
-                },
+                test_render_context(Align::Left, Renderer::Braille, false),
             );
 
             assert!(
