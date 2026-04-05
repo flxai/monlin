@@ -274,6 +274,12 @@ fn render_packed_metric_row(
     row_hues: &[ColorSpec],
 ) -> String {
     let widths = split_weighted_width(width, &normalized_items_for_sizing(items));
+    let graph_options = GraphRenderOptions {
+        hues: None,
+        color_enabled,
+        solid_colors: config.solid_colors,
+        window: config.window,
+    };
     let segments = items
         .iter()
         .zip(widths)
@@ -284,26 +290,16 @@ fn render_packed_metric_row(
             if values.contains_key(&metric) {
                 let history = histories.get(&metric).cloned().unwrap_or_default();
                 let samples = history.iter().copied().collect::<Vec<_>>();
-                match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &samples,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &samples,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                }
+                render_metric_graph_with_options(
+                    &samples,
+                    graph_width,
+                    metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
+                        ..graph_options
+                    },
+                )
             } else {
                 render_unavailable_graph(graph_width, config.renderer, color_enabled)
             }
@@ -372,6 +368,12 @@ fn render_packed_document_row(
         })
         .collect::<Vec<_>>();
     let widths = split_weighted_width(width, &sizing_items);
+    let graph_options = GraphRenderOptions {
+        hues: None,
+        color_enabled,
+        solid_colors: config.solid_colors,
+        window: config.window,
+    };
     let segments = items
         .iter()
         .zip(widths)
@@ -395,26 +397,16 @@ fn render_packed_document_row(
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            match config.renderer {
-                Renderer::Braille => render_braille_graph_with_options(
-                    &metric_history,
-                    graph_width,
-                    render_metric,
-                    Some(&item_hues),
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                ),
-                Renderer::Block => render_block_graph_with_options(
-                    &metric_history,
-                    graph_width,
-                    render_metric,
-                    Some(&item_hues),
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                ),
-            }
+            render_metric_graph_with_options(
+                &metric_history,
+                graph_width,
+                render_metric,
+                config.renderer,
+                GraphRenderOptions {
+                    hues: Some(&item_hues),
+                    ..graph_options
+                },
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1681,6 +1673,12 @@ fn render_stream_rows(
 ) -> Vec<String> {
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
+        let graph_options = GraphRenderOptions {
+            hues: None,
+            color_enabled,
+            solid_colors: config.solid_colors,
+            window: config.window,
+        };
         return values
             .iter()
             .enumerate()
@@ -1698,26 +1696,16 @@ fn render_stream_rows(
                     .unwrap_or_default();
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-                match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &metric_history,
-                        width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &metric_history,
-                        width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                }
+                render_metric_graph_with_options(
+                    &metric_history,
+                    width,
+                    metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
+                        ..graph_options
+                    },
+                )
             })
             .collect();
     }
@@ -1804,6 +1792,12 @@ fn render_stream_columns_line(
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
         let widths = split_stream_widths(width, values.len());
+        let graph_options = GraphRenderOptions {
+            hues: None,
+            color_enabled,
+            solid_colors: config.solid_colors,
+            window: config.window,
+        };
         let segments = widths
             .into_iter()
             .enumerate()
@@ -1821,26 +1815,16 @@ fn render_stream_columns_line(
                     .unwrap_or_default();
                 let item_hues =
                     metric_hues_for_visible_hue(metric, stream_hues[index % stream_hues.len()]);
-                match config.renderer {
-                    Renderer::Braille => render_braille_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                    Renderer::Block => render_block_graph_with_options(
-                        &metric_history,
-                        graph_width,
-                        metric,
-                        Some(&item_hues),
-                        color_enabled,
-                        config.solid_colors,
-                        config.window,
-                    ),
-                }
+                render_metric_graph_with_options(
+                    &metric_history,
+                    graph_width,
+                    metric,
+                    config.renderer,
+                    GraphRenderOptions {
+                        hues: Some(&item_hues),
+                        ..graph_options
+                    },
+                )
             })
             .collect::<Vec<_>>();
         return pad_or_trim_visible(&segments.join(""), width);
