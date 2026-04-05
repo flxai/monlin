@@ -267,7 +267,7 @@ _monlin() {{
   opts=(
     '--history:Number of history samples to retain'
     '--interval-ms:Sampling interval in milliseconds'
-    '--align:Place the value before or after the graph'
+    '--align:Place the value at the left or right side of the graph'
     '-w:How to display retained history'
     '--window:How to display retained history'
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'

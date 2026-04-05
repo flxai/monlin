@@ -198,7 +198,7 @@ struct Cli {
     )]
     interval_ms: u64,
 
-    #[arg(long, value_enum, default_value_t = Align::Left, help = "Place the value before or after the graph")]
+    #[arg(long, value_enum, default_value_t = Align::Right, help = "Place the value at the left or right side of the graph")]
     align: Align,
 
     #[arg(

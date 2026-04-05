@@ -332,11 +332,16 @@ fn stream_mode_lines_layout_preserves_old_per_series_rows() {
     let lines = stdout.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 2, "unexpected stream output: {stdout}");
     assert!(
-        lines[0].starts_with("wifi  10%"),
+        lines[0].starts_with("wifi "),
         "unexpected first row: {stdout}"
     );
+    assert!(lines[0].contains("  10%"), "unexpected first row: {stdout}");
     assert!(
-        lines[1].starts_with(" vpn  20%"),
+        lines[1].starts_with(" vpn "),
+        "unexpected second row: {stdout}"
+    );
+    assert!(
+        lines[1].contains("  20%"),
         "unexpected second row: {stdout}"
     );
 }
