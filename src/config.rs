@@ -22,7 +22,7 @@ Metrics:
 Notes:
   Layout is the canonical interface.
   Without a layout, monlin defaults to avail.
-  Defaults can be read from $XDG_CONFIG_HOME/monlin/config.toml or ~/.config/monlin/config.toml.
+  Defaults can be read from /etc/xdg/monlin/config.toml, $XDG_CONFIG_HOME/monlin/config.toml, or ~/.config/monlin/config.toml.
   Legacy shell-word configs in .../config are still supported.
   Item syntax is metric[.view][:size][+max][-min], e.g. xpu io net.abs:12+20-8.
   Rows can be separated with ',' or a literal newline.
@@ -625,10 +625,11 @@ fn cli_requests_subcommand(args: &[String]) -> bool {
 }
 
 fn load_default_config_args() -> Result<Vec<String>, String> {
-    let Some(source) = default_config_source() else {
-        return Ok(Vec::new());
-    };
-    load_config_args_from_path(&source.path, source.format)
+    let mut args = Vec::new();
+    for source in default_config_sources() {
+        args.extend(load_config_args_from_path(&source.path, source.format)?);
+    }
+    Ok(args)
 }
 
 fn load_config_args_from_path(
@@ -648,31 +649,49 @@ fn load_config_args_from_path(
     .map_err(|error| format!("invalid config file {}: {error}", path.display()))
 }
 
-fn default_config_source() -> Option<ConfigSource> {
+fn default_config_sources() -> Vec<ConfigSource> {
+    let mut sources = system_config_sources();
+    if let Some(source) = user_config_source() {
+        sources.push(source);
+    }
+    sources
+}
+
+fn system_config_sources() -> Vec<ConfigSource> {
+    let dirs = env::var("XDG_CONFIG_DIRS")
+        .ok()
+        .filter(|dirs| !dirs.trim().is_empty())
+        .map(|dirs| {
+            dirs.split(':')
+                .filter(|dir| !dir.trim().is_empty())
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![PathBuf::from("/etc/xdg")]);
+
+    let mut sources = Vec::new();
+    for dir in dirs.into_iter().rev() {
+        if let Some(source) = config_source_in_root(dir.join("monlin")) {
+            sources.push(source);
+        }
+    }
+    sources
+}
+
+fn user_config_source() -> Option<ConfigSource> {
     if let Ok(xdg_config_home) = env::var("XDG_CONFIG_HOME") {
         if !xdg_config_home.trim().is_empty() {
-            let root = PathBuf::from(xdg_config_home).join("monlin");
-            let toml_path = root.join("config.toml");
-            if toml_path.is_file() {
-                return Some(ConfigSource {
-                    path: toml_path,
-                    format: ConfigFormat::Toml,
-                });
-            }
-            let legacy_path = root.join("config");
-            if legacy_path.is_file() {
-                return Some(ConfigSource {
-                    path: legacy_path,
-                    format: ConfigFormat::LegacyArgs,
-                });
-            }
+            return config_source_in_root(PathBuf::from(xdg_config_home).join("monlin"));
         }
     }
 
     let home = env::var("HOME")
         .ok()
         .filter(|home| !home.trim().is_empty())?;
-    let root = PathBuf::from(home).join(".config").join("monlin");
+    config_source_in_root(PathBuf::from(home).join(".config").join("monlin"))
+}
+
+fn config_source_in_root(root: PathBuf) -> Option<ConfigSource> {
     let toml_path = root.join("config.toml");
     if toml_path.is_file() {
         return Some(ConfigSource {
@@ -990,6 +1009,7 @@ pub fn clap_command() -> clap::Command {
 mod tests {
     use super::*;
     use crate::layout::MetricKind;
+    use std::ffi::OsString;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1004,6 +1024,13 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("monlin-{name}-{nonce}"))
+    }
+
+    fn restore_env_var(name: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(name, value) },
+            None => unsafe { std::env::remove_var(name) },
+        }
     }
 
     #[test]
@@ -1181,15 +1208,103 @@ mod tests {
         .unwrap();
 
         let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let old_xdg_dirs = std::env::var_os("XDG_CONFIG_DIRS");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &root) };
+        unsafe { std::env::set_var("XDG_CONFIG_DIRS", "") };
         let args = resolve_args_with_config(vec!["monlin".to_owned()]).unwrap();
-        match old_xdg {
-            Some(value) => unsafe { std::env::set_var("XDG_CONFIG_HOME", value) },
-            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
-        }
+        restore_env_var("XDG_CONFIG_HOME", old_xdg);
+        restore_env_var("XDG_CONFIG_DIRS", old_xdg_dirs);
         fs::remove_dir_all(&root).ok();
 
         assert_eq!(args, vec!["monlin", "--colors", "gruvbox"]);
+    }
+
+    #[test]
+    fn system_and_user_configs_merge_with_user_higher_priority() {
+        let root = unique_temp_dir("system-user-config");
+        let system_low = root.join("system-low").join("monlin");
+        let system_high = root.join("system-high").join("monlin");
+        let user = root.join("user").join("monlin");
+        fs::create_dir_all(&system_low).unwrap();
+        fs::create_dir_all(&system_high).unwrap();
+        fs::create_dir_all(&user).unwrap();
+
+        fs::write(system_low.join("config.toml"), "align = \"left\"\n").unwrap();
+        fs::write(
+            system_high.join("config.toml"),
+            "align = \"right\"\nrenderer = \"block\"\n",
+        )
+        .unwrap();
+        fs::write(
+            user.join("config.toml"),
+            "renderer = \"braille\"\nwidth = 123\n",
+        )
+        .unwrap();
+
+        let old_xdg_home = std::env::var_os("XDG_CONFIG_HOME");
+        let old_xdg_dirs = std::env::var_os("XDG_CONFIG_DIRS");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", root.join("user"));
+            std::env::set_var(
+                "XDG_CONFIG_DIRS",
+                format!(
+                    "{}:{}",
+                    root.join("system-high").display(),
+                    root.join("system-low").display()
+                ),
+            );
+            std::env::remove_var("HOME");
+        }
+
+        let config = parse_args(["monlin".to_owned()].into_iter()).unwrap();
+
+        restore_env_var("XDG_CONFIG_HOME", old_xdg_home);
+        restore_env_var("XDG_CONFIG_DIRS", old_xdg_dirs);
+        restore_env_var("HOME", old_home);
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(config.align, Align::Right);
+        assert_eq!(config.renderer, Renderer::Braille);
+        assert_eq!(config.width, Some(123));
+    }
+
+    #[test]
+    fn cli_still_overrides_system_and_user_configs() {
+        let root = unique_temp_dir("cli-overrides-system-user");
+        let system = root.join("system").join("monlin");
+        let user = root.join("user").join("monlin");
+        fs::create_dir_all(&system).unwrap();
+        fs::create_dir_all(&user).unwrap();
+
+        fs::write(system.join("config.toml"), "align = \"left\"\n").unwrap();
+        fs::write(user.join("config.toml"), "align = \"right\"\n").unwrap();
+
+        let old_xdg_home = std::env::var_os("XDG_CONFIG_HOME");
+        let old_xdg_dirs = std::env::var_os("XDG_CONFIG_DIRS");
+        let old_home = std::env::var_os("HOME");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", root.join("user"));
+            std::env::set_var("XDG_CONFIG_DIRS", root.join("system"));
+            std::env::remove_var("HOME");
+        }
+
+        let args = resolve_args_with_config(vec![
+            "monlin".to_owned(),
+            "--align".to_owned(),
+            "left".to_owned(),
+        ])
+        .unwrap();
+        let config = parse_args_from_vec(args).unwrap();
+
+        restore_env_var("XDG_CONFIG_HOME", old_xdg_home);
+        restore_env_var("XDG_CONFIG_DIRS", old_xdg_dirs);
+        restore_env_var("HOME", old_home);
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(config.align, Align::Left);
     }
 
     #[test]
