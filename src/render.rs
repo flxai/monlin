@@ -44,6 +44,14 @@ struct PackedSpan {
     end: PackedFraction,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GraphRenderOptions<'a> {
+    hues: Option<&'a BaseHues>,
+    color_enabled: bool,
+    solid_colors: bool,
+    window: Window,
+}
+
 const UNAVAILABLE_GRAPH_BRAILLE: char = '⠄';
 const UNAVAILABLE_GRAPH_BLOCK: char = '░';
 const UNAVAILABLE_GRAPH_COLOR: crate::color::Rgb = crate::color::Rgb {
@@ -2389,26 +2397,14 @@ fn render_segment_with_headline(
 
     let graph_width = width.saturating_sub(fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph = match renderer {
-        Renderer::Braille => render_braille_graph_with_options(
-            &samples,
-            graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
-        Renderer::Block => render_block_graph_with_options(
-            &samples,
-            graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
+    let graph_options = GraphRenderOptions {
+        hues,
+        color_enabled,
+        solid_colors,
+        window,
     };
+    let graph =
+        render_metric_graph_with_options(&samples, graph_width, metric, renderer, graph_options);
 
     pad_or_trim_visible(
         &match align {
@@ -2445,26 +2441,14 @@ fn render_segment_with_graph_width(
         stable_layout,
     );
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph = match renderer {
-        Renderer::Braille => render_braille_graph_with_options(
-            &samples,
-            graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
-        Renderer::Block => render_block_graph_with_options(
-            &samples,
-            graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
+    let graph_options = GraphRenderOptions {
+        hues,
+        color_enabled,
+        solid_colors,
+        window,
     };
+    let graph =
+        render_metric_graph_with_options(&samples, graph_width, metric, renderer, graph_options);
     let width = fixed + 1 + graph_width;
 
     pad_or_trim_visible(
@@ -2526,26 +2510,19 @@ fn render_grid_segment(
     let metric = item.metric();
     let usage_text = segment_usage_text(metric, item.view(), value, headline_value, stable_layout);
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph = match renderer {
-        Renderer::Braille => render_braille_graph_with_options(
-            &samples,
-            spec.graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
-        Renderer::Block => render_block_graph_with_options(
-            &samples,
-            spec.graph_width,
-            metric,
-            hues,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
+    let graph_options = GraphRenderOptions {
+        hues,
+        color_enabled,
+        solid_colors,
+        window,
     };
+    let graph = render_metric_graph_with_options(
+        &samples,
+        spec.graph_width,
+        metric,
+        renderer,
+        graph_options,
+    );
 
     let text = render_grid_text(
         item.display(),
@@ -2808,6 +2785,35 @@ fn render_unavailable_graph(width: usize, renderer: Renderer, color_enabled: boo
     };
     let graph = glyph.to_string().repeat(width);
     paint(&graph, UNAVAILABLE_GRAPH_COLOR, color_enabled)
+}
+
+fn render_metric_graph_with_options(
+    samples: &[MetricValue],
+    width: usize,
+    metric: MetricKind,
+    renderer: Renderer,
+    options: GraphRenderOptions<'_>,
+) -> String {
+    match renderer {
+        Renderer::Braille => render_braille_graph_with_options(
+            samples,
+            width,
+            metric,
+            options.hues,
+            options.color_enabled,
+            options.solid_colors,
+            options.window,
+        ),
+        Renderer::Block => render_block_graph_with_options(
+            samples,
+            width,
+            metric,
+            options.hues,
+            options.color_enabled,
+            options.solid_colors,
+            options.window,
+        ),
+    }
 }
 
 fn paint_unavailable_text(text: &str, color_enabled: bool) -> String {
