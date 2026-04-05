@@ -1412,33 +1412,27 @@ fn render_stream_group_row(
                         config.window,
                     ),
                 );
-                let text_only = format!("{label}{separator}{display_usage_text}");
-
                 if graph_width == 0 {
-                    return pad_or_trim_visible(&text_only, segment_width);
+                    return pad_or_trim_visible(
+                        &render_inline_segment(
+                            config.align,
+                            &label,
+                            separator,
+                            &display_usage_text,
+                            "",
+                        ),
+                        segment_width,
+                    );
                 }
 
                 pad_or_trim_visible(
-                    &match config.align {
-                        Align::Left => {
-                            if text_only.is_empty() {
-                                graph.clone()
-                            } else {
-                                format!("{label}{separator}{display_usage_text} {graph}")
-                            }
-                        }
-                        Align::Right => {
-                            if label.is_empty() {
-                                if display_usage_text.is_empty() {
-                                    graph.clone()
-                                } else {
-                                    format!("{graph} {display_usage_text}")
-                                }
-                            } else {
-                                format!("{label} {graph} {display_usage_text}")
-                            }
-                        }
-                    },
+                    &render_inline_segment(
+                        config.align,
+                        &label,
+                        separator,
+                        &display_usage_text,
+                        &graph,
+                    ),
                     segment_width,
                 )
             },
@@ -1564,7 +1558,6 @@ fn render_document_row(
                         config.window,
                     ),
                 );
-                let text_only = format!("{label}{separator}{usage_text}");
                 let value = sample.values.get(item.source()).copied();
 
                 let text = if matches!(value, Some(CanonicalValue::Unavailable) | None) {
@@ -1572,54 +1565,21 @@ fn render_document_row(
                     let usage_text = paint_unavailable_text(&usage_text, color_enabled);
                     let graph =
                         render_unavailable_graph(graph_width, config.renderer, color_enabled);
-                    if graph_width == 0 {
-                        format!("{label}{separator}{usage_text}")
-                    } else {
-                        match config.align {
-                            Align::Left => {
-                                if text_only.is_empty() {
-                                    graph
-                                } else {
-                                    format!("{label}{separator}{usage_text} {graph}")
-                                }
-                            }
-                            Align::Right => {
-                                if label.is_empty() {
-                                    if usage_text.is_empty() {
-                                        graph
-                                    } else {
-                                        format!("{graph} {usage_text}")
-                                    }
-                                } else {
-                                    format!("{label} {graph} {usage_text}")
-                                }
-                            }
-                        }
-                    }
+                    render_inline_segment(config.align, &label, separator, &usage_text, &graph)
                 } else if graph_width == 0 {
-                    pad_or_trim_visible(&text_only, segment_width.max(fixed))
+                    pad_or_trim_visible(
+                        &render_inline_segment(config.align, &label, separator, &usage_text, ""),
+                        segment_width.max(fixed),
+                    )
                 } else {
                     pad_or_trim_visible(
-                        &match config.align {
-                            Align::Left => {
-                                if text_only.is_empty() {
-                                    graph.clone()
-                                } else {
-                                    format!("{label}{separator}{usage_text} {graph}")
-                                }
-                            }
-                            Align::Right => {
-                                if label.is_empty() {
-                                    if usage_text.is_empty() {
-                                        graph.clone()
-                                    } else {
-                                        format!("{graph} {usage_text}")
-                                    }
-                                } else {
-                                    format!("{label} {graph} {usage_text}")
-                                }
-                            }
-                        },
+                        &render_inline_segment(
+                            config.align,
+                            &label,
+                            separator,
+                            &usage_text,
+                            &graph,
+                        ),
                         segment_width.max(fixed),
                     )
                 };
@@ -1902,23 +1862,27 @@ fn render_stream_columns_line(
                         config.window,
                     ),
                 );
-                let text_only = format!("{label}{separator}{display_usage_text}");
-
                 if graph_width == 0 {
-                    return pad_or_trim_visible(&text_only, segment_width);
+                    return pad_or_trim_visible(
+                        &render_inline_segment(
+                            config.align,
+                            &label,
+                            separator,
+                            &display_usage_text,
+                            "",
+                        ),
+                        segment_width,
+                    );
                 }
 
                 pad_or_trim_visible(
-                    &match config.align {
-                        Align::Left => format!("{label}{separator}{display_usage_text} {graph}"),
-                        Align::Right => {
-                            if label.is_empty() {
-                                format!("{graph} {display_usage_text}")
-                            } else {
-                                format!("{label} {graph} {display_usage_text}")
-                            }
-                        }
-                    },
+                    &render_inline_segment(
+                        config.align,
+                        &label,
+                        separator,
+                        &display_usage_text,
+                        &graph,
+                    ),
                     segment_width,
                 )
             },
@@ -2334,6 +2298,40 @@ fn split_stream_widths(total: usize, count: usize) -> Vec<usize> {
     (0..count)
         .map(|index| base + usize::from(index < remainder))
         .collect()
+}
+
+fn render_inline_segment(
+    align: Align,
+    label: &str,
+    separator: &str,
+    usage_text: &str,
+    graph: &str,
+) -> String {
+    if graph.is_empty() {
+        return format!("{label}{separator}{usage_text}");
+    }
+
+    let text_only = format!("{label}{separator}{usage_text}");
+    match align {
+        Align::Left => {
+            if text_only.is_empty() {
+                graph.to_owned()
+            } else {
+                format!("{text_only} {graph}")
+            }
+        }
+        Align::Right => {
+            if label.is_empty() {
+                if usage_text.is_empty() {
+                    graph.to_owned()
+                } else {
+                    format!("{graph} {usage_text}")
+                }
+            } else {
+                format!("{label} {graph} {usage_text}")
+            }
+        }
+    }
 }
 
 fn render_segment_with_headline(
