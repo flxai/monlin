@@ -24,8 +24,8 @@ Notes:
   Without a layout, monlin defaults to avail.
   Defaults can be read from /etc/xdg/monlin/config.toml, $XDG_CONFIG_HOME/monlin/config.toml, or ~/.config/monlin/config.toml.
   Legacy shell-word configs in .../config are still supported.
-  Item syntax is source[.view][.display][:size][+max][-min], e.g. xpu io net.abs:12+20-8.
-  View modes are pct and abs. Display modes are full, value, and bare.
+  Item syntax is source[.view][!display][:size][+max][-min], e.g. xpu io net.abs!value:12+20-8.
+  View modes are .pct and .abs. Display modes are !full, !value, and !bare.
   Rows can be separated with ',' or a literal newline.
   Use label=source or label=(...) to label items and groups. Use a+b to compose split sources.
   Flat layouts auto-wrap after 5 metrics per row.
@@ -1689,8 +1689,8 @@ mod tests {
     #[test]
     fn help_text_documents_current_layout_syntax() {
         let help = help_text();
-        assert!(help.contains("source[.view][.display][:size][+max][-min]"));
-        assert!(help.contains("View modes are pct and abs."));
+        assert!(help.contains("source[.view][!display][:size][+max][-min]"));
+        assert!(help.contains("View modes are .pct and .abs."));
         assert!(help.contains("Use label=source or label=(...)"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
         assert!(help.contains("named palette like gruvbox or solarized"));

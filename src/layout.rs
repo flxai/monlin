@@ -99,6 +99,13 @@ pub fn completion_source_names() -> Vec<&'static str> {
         .collect()
 }
 
+pub fn completion_split_source_names() -> &'static [&'static str] {
+    &[
+        "cpu", "rnd", "sys", "gpu", "vram", "vrm", "gfx", "memory", "ram", "storage", "disk",
+        "space", "spc", "io", "net", "in", "out", "rx", "tx",
+    ]
+}
+
 impl MetricKind {
     pub fn parse(token: &str) -> Option<Self> {
         match token {
@@ -1136,6 +1143,29 @@ enum ParsedEntry {
 }
 
 fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
+    let is_all = token == "all"
+        || token.starts_with("all.")
+        || token.starts_with("all!")
+        || token.starts_with("all/")
+        || token.starts_with("all:");
+    let is_avail = token == "avail"
+        || token.starts_with("avail.")
+        || token.starts_with("avail!")
+        || token.starts_with("avail/")
+        || token.starts_with("avail:");
+    if !(is_all || is_avail) {
+        return Ok(None);
+    }
+
+    let (token, display) = match token.rsplit_once('!') {
+        Some((head, display_token)) => (
+            head,
+            DisplayMode::parse(display_token)
+                .ok_or_else(|| format!("unknown display mode: {display_token}"))?,
+        ),
+        None => (token, DisplayMode::Full),
+    };
+
     if token.starts_with("all/") || token.starts_with("all:") {
         return Err("invalid all syntax; use 'all', 'avail', or write explicit rows".to_owned());
     }
@@ -1150,16 +1180,7 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
             items: all_metrics()
                 .iter()
                 .copied()
-                .map(|metric| {
-                    Item::metric(
-                        metric,
-                        LayoutView::Default,
-                        DisplayMode::Full,
-                        1,
-                        None,
-                        None,
-                    )
-                })
+                .map(|metric| Item::metric(metric, LayoutView::Default, display, 1, None, None))
                 .collect(),
         }));
     }
@@ -1171,7 +1192,25 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
             items: default_avail_document_rows(LayoutView::Default)
                 .into_iter()
                 .next()
-                .map(|row| row.items)
+                .map(|row| {
+                    row.items
+                        .into_iter()
+                        .map(|item| {
+                            let metric = match item.source() {
+                                Source::Metric(metric) => *metric,
+                                _ => unreachable!("avail rows contain only native metrics"),
+                            };
+                            Item::metric(
+                                metric,
+                                item.view(),
+                                display,
+                                item.size(),
+                                item.max_width(),
+                                item.min_width(),
+                            )
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
         }));
     }
@@ -1209,11 +1248,29 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
                 )
                 .into_iter()
                 .next()
-                .map(|row| row.items)
+                .map(|row| {
+                    row.items
+                        .into_iter()
+                        .map(|item| {
+                            let metric = match item.source() {
+                                Source::Metric(metric) => *metric,
+                                _ => unreachable!("avail rows contain only native metrics"),
+                            };
+                            Item::metric(
+                                metric,
+                                item.view(),
+                                display,
+                                item.size(),
+                                item.max_width(),
+                                item.min_width(),
+                            )
+                        })
+                        .collect()
+                })
                 .unwrap_or_default(),
             }));
         } else {
-            return Ok(None);
+            unreachable!("non-macro tokens return early");
         };
 
     Ok(Some(ParsedEntry::Items {
@@ -1222,12 +1279,31 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
         items: metrics
             .iter()
             .copied()
-            .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
+            .map(|metric| Item::metric(metric, view, display, 1, None, None))
             .collect(),
     }))
 }
 
 fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
+    if !(token == "xpu"
+        || token == "mem"
+        || token.starts_with("xpu.")
+        || token.starts_with("mem.")
+        || token.starts_with("xpu!")
+        || token.starts_with("mem!"))
+    {
+        return Ok(None);
+    }
+
+    let (token, display) = match token.rsplit_once('!') {
+        Some((head, display_token)) => (
+            head,
+            DisplayMode::parse(display_token)
+                .ok_or_else(|| format!("unknown display mode: {display_token}"))?,
+        ),
+        None => (token, DisplayMode::Full),
+    };
+
     let (metrics, view) = if token == "xpu" {
         (vec![MetricKind::Cpu, MetricKind::Gpu], LayoutView::Default)
     } else if token == "mem" {
@@ -1262,13 +1338,13 @@ fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
                 .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
         )
     } else {
-        return Ok(None);
+        unreachable!("non-alias tokens return early");
     };
 
     Ok(Some(
         metrics
             .into_iter()
-            .map(|metric| Item::metric(metric, view, DisplayMode::Full, 1, None, None))
+            .map(|metric| Item::metric(metric, view, display, 1, None, None))
             .collect(),
     ))
 }
@@ -1297,10 +1373,17 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
 
     let mut metric_token = head;
     let mut view = LayoutView::Default;
-    let mut display = DisplayMode::Full;
+    let display = match metric_token.rsplit_once('!') {
+        Some((prefix, suffix)) => {
+            metric_token = prefix;
+            DisplayMode::parse(suffix).ok_or_else(|| format!("unknown display mode: {suffix}"))?
+        }
+        None => DisplayMode::Full,
+    };
+
     let mut suffixes = Vec::new();
     while let Some((prefix, suffix)) = metric_token.rsplit_once('.') {
-        if LayoutView::parse(suffix).is_some() || DisplayMode::parse(suffix).is_some() {
+        if LayoutView::parse(suffix).is_some() {
             suffixes.push(suffix);
             metric_token = prefix;
             continue;
@@ -1310,21 +1393,19 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
     suffixes.reverse();
 
     for suffix in suffixes {
-        if let Some(parsed_view) = LayoutView::parse(suffix) {
-            if view != LayoutView::Default {
-                return Err(format!("duplicate metric view: {suffix}"));
-            }
-            view = parsed_view;
-            continue;
+        let Some(parsed_view) = LayoutView::parse(suffix) else {
+            return Err(format!("unknown metric view: {suffix}"));
+        };
+        if view != LayoutView::Default {
+            return Err(format!("duplicate metric view: {suffix}"));
         }
-        if let Some(parsed_display) = DisplayMode::parse(suffix) {
-            if display != DisplayMode::Full {
-                return Err(format!("duplicate display mode: {suffix}"));
-            }
-            display = parsed_display;
-            continue;
+        view = parsed_view;
+    }
+
+    if !metric_token.starts_with("f:") && !metric_token.starts_with("p:") {
+        if let Some((_, suffix)) = metric_token.rsplit_once('.') {
+            return Err(format!("unknown metric view: {suffix}"));
         }
-        return Err(format!("unknown metric suffix: {suffix}"));
     }
 
     if let (Some(min_width), Some(max_width)) = (min_width, max_width) {
@@ -1608,7 +1689,7 @@ mod tests {
 
     #[test]
     fn document_lowering_matches_current_layout_behavior() {
-        let document = parse_layout_document("cpu:3 ram.value+8-2").unwrap();
+        let document = parse_layout_document("cpu:3 ram!value+8-2").unwrap();
         let layout = document.lower().unwrap();
         let item0 = layout.rows()[0][0];
         let item1 = layout.rows()[0][1];
@@ -2248,6 +2329,23 @@ mod tests {
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(layout.rows()[0].len(), 2);
         assert_eq!(layout.metrics(), &[MetricKind::Storage]);
+    }
+
+    #[test]
+    fn parses_display_modes_with_bang_marker() {
+        let document = parse_layout_document("cpu!bare ram.abs!value @12!full").unwrap();
+        let items = document.rows()[0].items();
+        assert_eq!(items[0].display(), DisplayMode::Bare);
+        assert_eq!(items[1].view(), LayoutView::Abs);
+        assert_eq!(items[1].display(), DisplayMode::Value);
+        assert_eq!(items[2].display(), DisplayMode::Full);
+        assert_eq!(items[2].source(), &Source::StreamColumn(11));
+    }
+
+    #[test]
+    fn rejects_old_dot_display_syntax() {
+        let error = parse_layout_document("cpu.bare").unwrap_err();
+        assert!(error.contains("unknown metric view"));
     }
 
     #[test]

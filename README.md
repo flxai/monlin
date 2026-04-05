@@ -130,17 +130,17 @@ Value modes:
 
 Display modes:
 
-- `.full`
-- `.value`
-- `.bare`
+- `!full`
+- `!value`
+- `!bare`
 
 Examples:
 
 ```sh
 monlin "cpu.pct ram.abs"
 monlin "net.abs io.abs"
-monlin "@1.bare @2.bare @3.bare"
-monlin "cpu.value gpu.value"
+monlin "@1!bare @2!bare @3!bare"
+monlin "cpu!value gpu!value"
 ```
 
 Defaults are metric-aware:
@@ -161,14 +161,14 @@ So for example:
 The canonical item syntax is:
 
 ```text
-source[.value_mode][.display_mode][:size][+max][-min]
+source[.value_mode][!display_mode][:size][+max][-min]
 ```
 
 Where:
 
 - `source` selects what to render
 - `.pct` or `.abs` selects the value mode
-- `.full`, `.value`, or `.bare` selects how much text to show
+- `!full`, `!value`, or `!bare` selects how much text to show
 - `:size` reserves width for the item
 - `+max` caps how wide the item may expand
 - `-min` prefers at least that many columns when there is room
@@ -227,7 +227,7 @@ Explicit stream columns:
 
 ```sh
 printf '10 20 30\n' | monlin '@1 @2 @3'
-printf '10 20 30\n' | monlin '@1.bare @2.bare @3.bare'
+printf '10 20 30\n' | monlin '@1!bare @2!bare @3!bare'
 ```
 
 Dense split summaries:

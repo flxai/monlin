@@ -171,12 +171,13 @@ fn zsh_describe_specs(specs: &[(&str, &str)], indent: &str) -> String {
 }
 
 fn zsh_completion_script() -> String {
-    let metric_sources = crate::layout::completion_source_names();
-    let metric_source_words = zsh_multiline_words(&metric_sources, "    ");
-    let metric_source_patterns = zsh_case_patterns(&metric_sources);
-    let mut suffixes = crate::layout::LayoutView::names().to_vec();
-    suffixes.extend(crate::layout::DisplayMode::names());
-    let suffix_words = zsh_words(&suffixes);
+    let item_sources = crate::layout::completion_source_names();
+    let item_source_words = zsh_multiline_words(&item_sources, "    ");
+    let item_source_patterns = zsh_case_patterns(&item_sources);
+    let split_source_words = zsh_words(crate::layout::completion_split_source_names());
+    let value_suffix_words = zsh_words(crate::layout::LayoutView::names());
+    let value_suffix_patterns = zsh_case_patterns(crate::layout::LayoutView::names());
+    let display_suffix_words = zsh_words(crate::layout::DisplayMode::names());
     let color_names = crate::color::palette_names()
         .iter()
         .chain(crate::color::colormap_names().iter())
@@ -187,8 +188,7 @@ fn zsh_completion_script() -> String {
         .iter()
         .map(|(name, desc)| (*name, *desc))
         .chain([
-            ("@1", "First stdin stream column"),
-            ("@2", "Second stdin stream column"),
+            ("@N", "Nth stdin stream column reference"),
             ("f:/path/to/file", "Poll a file for numeric rows"),
             ("p:command", "Poll a shell command for numeric rows"),
             ("(", "Start a grouped layout expression"),
@@ -201,24 +201,30 @@ fn zsh_completion_script() -> String {
         r#"#compdef monlin
 
 _monlin_layout() {{
-  local cur token prefix label_prefix base
-  local -a metric_sources sources suffixes stream_refs sizes
-  metric_sources=(
-{metric_source_words}
+  local cur token prefix label_prefix base tail view
+  local -a item_sources split_sources start_sources value_suffixes display_suffixes sizes
+  item_sources=(
+{item_source_words}
   )
-  stream_refs=(@1 @2 @3 @4 @5 @6 @7 @8)
-  sources=($metric_sources $stream_refs 'f:' 'p:' '(')
-  suffixes=({suffix_words})
+  split_sources=({split_source_words})
+  start_sources=($item_sources '@' 'f:' 'p:' '(')
+  value_suffixes=({value_suffix_words})
+  display_suffixes=({display_suffix_words})
   sizes=(1 2 3 4 6 8 10 12 16 24)
 
   cur="${{words[CURRENT]}}"
-  token="${{cur##*[\(,]}}"
+  token="${{cur##*[\(, ]}}"
   prefix="${{cur%$token}}"
   label_prefix=""
 
   if [[ "$token" == *"="* ]]; then
     label_prefix="${{token%%=*}}="
     token="${{token#*=}}"
+  fi
+
+  if [[ "$token" == "@" || "$token" == @<-> ]]; then
+    _message 'stream column reference (@N)'
+    return
   fi
 
   if [[ "$token" == f:* ]]; then
@@ -230,37 +236,103 @@ _monlin_layout() {{
     return
   fi
 
-  if [[ "$token" == *"+"* ]]; then
-    base="${{token%+*}}+"
-    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $metric_sources
-    return
-  fi
-
-  if [[ "$token" == *":"* ]]; then
-    base="${{token%%:*}}:"
-    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $sizes
-    return
-  fi
-
-  if [[ "$token" == @* ]]; then
-    compadd -Q -P "${{prefix}}${{label_prefix}}" -- $stream_refs
-    return
-  fi
-
-  if [[ "$token" == *.* ]]; then
-    base="${{token%%.*}}"
+  if [[ "$token" == *"."* && "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+    base="${{token%.*}}"
     case "$base" in
-      {metric_source_patterns}|@*)
-        compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}." -- $suffixes
+      {item_source_patterns}|@*|f:*|p:*)
+        if [[ "$base" != *"."* ]]; then
+          compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}." -- $value_suffixes
+          return
+        fi
+        ;;
+    esac
+  fi
+
+  if [[ "$token" == *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+    base="${{token%!*}}"
+    case "$base" in
+      *"!"*)
+        ;;
+      {item_source_patterns}|{item_source_patterns}.*|@*|@*.*|f:*|p:*)
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}!" -- $display_suffixes
         return
         ;;
     esac
   fi
 
-  if [[ -n "$prefix" || -n "$label_prefix" ]]; then
-    compadd -Q -P "${{prefix}}${{label_prefix}}" -- $sources
+  if [[ "$token" == *":" ]]; then
+    base="${{token%%:*}}:"
+    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $sizes
     return
   fi
+
+  if [[ "$token" == *"-" ]]; then
+    base="${{token%-*}}-"
+    compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $sizes
+    return
+  fi
+
+  if [[ "$token" == *"+" ]]; then
+    base="${{token%+}}"
+    if [[ "$base" == *":"* || "$base" == *"+"* ]]; then
+      compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}+" -- $sizes
+    else
+      compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}+" -- $split_sources
+    fi
+    return
+  fi
+
+  if [[ "$token" == *"+"* ]]; then
+    tail="${{token##*+}}"
+    if [[ "$tail" != <->* && "$token" != *":"* ]]; then
+      base="${{token%+*}}+"
+      compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}" -- $split_sources
+      return
+    fi
+  fi
+
+  case "$token" in
+    {item_source_patterns}|@*|f:*|p:*)
+      if [[ "$token" != *"."* && "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}." -- $value_suffixes
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}!" -- $display_suffixes
+        return
+      fi
+      ;;
+    {item_source_patterns}.*|@*.*)
+      if [[ "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+        view="${{token##*.}}"
+        case "$view" in
+          {value_suffix_patterns})
+            compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}!" -- $display_suffixes
+            return
+            ;;
+        esac
+      fi
+      ;;
+  esac
+
+  if [[ "$token" == @* ]]; then
+    _message 'stream column reference (@N)'
+    return
+  fi
+
+  if [[ -n "$prefix" || -n "$label_prefix" ]]; then
+    compadd -Q -P "${{prefix}}${{label_prefix}}" -- $start_sources
+    return
+  fi
+
+  case "$token" in
+    {item_source_patterns}|@*)
+      return
+      ;;
+    *)
+      if [[ -n "$token" ]]; then
+        compadd -Q -P "${{prefix}}${{label_prefix}}" -- $start_sources
+        return
+      fi
+      ;;
+  esac
 
   _describe -t sources 'layout item or source' \
 {described_sources}
@@ -2541,10 +2613,12 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_debug_commands() {
         let script = zsh_completion_script();
-        assert!(script.contains("pct abs full value bare"));
+        assert!(script.contains("value_suffixes=(pct abs)"));
+        assert!(script.contains("display_suffixes=(full value bare)"));
+        assert!(script.contains("${token}!\" -- $display_suffixes"));
         assert!(script.contains("--solid-colors"));
         assert!(script.contains("-i:Sampling interval in milliseconds"));
-        assert!(script.contains("@1"));
+        assert!(script.contains("stream column reference (@N)"));
         assert!(script.contains("debug_commands=(colors window braille)"));
         assert!(
             script.contains("--split-upper:Comma- or space-separated upper split-channel samples")
