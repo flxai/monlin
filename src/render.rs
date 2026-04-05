@@ -264,8 +264,7 @@ pub fn render_document_lines(
     let mut lines = Vec::new();
 
     for row in document.rows() {
-        let row_hues = &all_hues[offset..offset + row.items().len()];
-        offset += row.items().len();
+        let row_hues = take_row_hues(&all_hues, &mut offset, row.items().len());
         let prefix = match row.label() {
             Some(label) => format!("{outer_prefix}{label} "),
             None => outer_prefix.clone(),
@@ -305,8 +304,7 @@ fn render_packed_native_lines(
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = &all_hues[offset..offset + items.len()];
-            offset += items.len();
+            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
             render_packed_metric_row(
                 config,
                 width,
@@ -380,8 +378,7 @@ fn render_packed_document_lines(
         .rows()
         .iter()
         .map(|row| {
-            let row_hues = &all_hues[offset..offset + row.items().len()];
-            offset += row.items().len();
+            let row_hues = take_row_hues(&all_hues, &mut offset, row.items().len());
             render_packed_document_row(
                 config,
                 width,
@@ -477,8 +474,7 @@ fn render_pack_lines_with_headlines(
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = &all_hues[offset..offset + items.len()];
-            offset += items.len();
+            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
             let row_specs = pack_row_specs(
                 config,
                 width,
@@ -557,8 +553,7 @@ fn render_flex_lines_with_headlines(
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = &all_hues[offset..offset + items.len()];
-            offset += items.len();
+            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
             let row_specs = flex_row_specs(
                 config,
                 width,
@@ -632,8 +627,7 @@ fn render_grid_lines_with_headlines(
         .rows()
         .iter()
         .map(|items| {
-            let row_hues = &all_hues[offset..offset + items.len()];
-            offset += items.len();
+            let row_hues = take_row_hues(&all_hues, &mut offset, items.len());
             let segments = items
                 .iter()
                 .enumerate()
@@ -2224,6 +2218,16 @@ fn segment_widths_for_fixed_parts(
             (segment_widths, graph_widths)
         }
     }
+}
+
+fn take_row_hues<'a>(
+    all_hues: &'a [ColorSpec],
+    offset: &mut usize,
+    count: usize,
+) -> &'a [ColorSpec] {
+    let row_hues = &all_hues[*offset..*offset + count];
+    *offset += count;
+    row_hues
 }
 
 fn render_inline_segment(
