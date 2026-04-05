@@ -346,7 +346,6 @@ fn render_packed_metric_row(
     values: &HashMap<MetricKind, MetricValue>,
     row_hues: &[ColorSpec],
 ) -> String {
-    let widths = split_weighted_width(width, &normalized_items_for_sizing(items));
     let graph_options = graph_render_options(
         None,
         Align::Right,
@@ -354,12 +353,11 @@ fn render_packed_metric_row(
         config.solid_colors,
         config.window,
     );
-    let segments = items
-        .iter()
-        .zip(widths)
-        .enumerate()
-        .map(|(index, (item, graph_width))| {
-            let metric = item.metric();
+    render_packed_row_with_widths(
+        &packed_metric_row_widths(width, items),
+        width,
+        |index, graph_width| {
+            let metric = items[index].metric();
             if values.contains_key(&metric) {
                 let history = histories.get(&metric).cloned().unwrap_or_default();
                 let samples = history.iter().copied().collect::<Vec<_>>();
@@ -376,10 +374,8 @@ fn render_packed_metric_row(
             } else {
                 render_unavailable_graph(graph_width, config.renderer, color_enabled)
             }
-        })
-        .collect::<Vec<_>>();
-
-    pad_or_trim_visible(&segments.join(""), width)
+        },
+    )
 }
 
 fn render_packed_document_lines(
@@ -425,21 +421,6 @@ fn render_packed_document_row(
     items: &[Item],
     row_hues: &[ColorSpec],
 ) -> String {
-    let sizing_items = items
-        .iter()
-        .map(|item| {
-            LayoutItem::with_constraints(
-                MetricKind::Cpu,
-                LayoutView::Default,
-                DisplayMode::Bare,
-                Some(item.size()),
-                item.size(),
-                item.max_width(),
-                item.min_width(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let widths = split_weighted_width(width, &sizing_items);
     let graph_options = graph_render_options(
         None,
         Align::Right,
@@ -447,11 +428,11 @@ fn render_packed_document_row(
         config.solid_colors,
         config.window,
     );
-    let segments = items
-        .iter()
-        .zip(widths)
-        .enumerate()
-        .map(|(index, (item, graph_width))| {
+    render_packed_row_with_widths(
+        &packed_document_row_widths(width, items),
+        width,
+        |index, graph_width| {
+            let item = &items[index];
             let render_metric = document_render_metric(item.source());
             let value = sample.values.get(item.source()).copied();
             if matches!(value, Some(CanonicalValue::Unavailable) | None) {
@@ -469,9 +450,43 @@ fn render_packed_document_row(
                 graph_options.solid_colors,
                 graph_options.window,
             )
+        },
+    )
+}
+
+fn packed_metric_row_widths(width: usize, items: &[LayoutItem]) -> Vec<usize> {
+    split_weighted_width(width, &normalized_items_for_sizing(items))
+}
+
+fn packed_document_row_widths(width: usize, items: &[Item]) -> Vec<usize> {
+    let sizing_items = items
+        .iter()
+        .map(|item| {
+            LayoutItem::with_constraints(
+                MetricKind::Cpu,
+                LayoutView::Default,
+                DisplayMode::Bare,
+                Some(item.size()),
+                item.size(),
+                item.max_width(),
+                item.min_width(),
+            )
         })
         .collect::<Vec<_>>();
+    split_weighted_width(width, &sizing_items)
+}
 
+fn render_packed_row_with_widths(
+    graph_widths: &[usize],
+    width: usize,
+    mut render_graph: impl FnMut(usize, usize) -> String,
+) -> String {
+    let segments = graph_widths
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, graph_width)| render_graph(index, graph_width))
+        .collect::<Vec<_>>();
     pad_or_trim_visible(&segments.join(""), width)
 }
 
@@ -1501,28 +1516,17 @@ fn render_stream_rows(
 ) -> Vec<String> {
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
-        let graph_options = graph_render_options(
-            None,
-            Align::Right,
-            color_enabled,
-            config.solid_colors,
-            config.window,
-        );
         return values
             .iter()
             .enumerate()
             .map(|(index, _value)| {
-                let metric = stream_metric_for(index);
-                let metric_history = stream_metric_history(histories, index);
-                render_metric_graph_for_visible_hue(
-                    &metric_history,
+                render_stream_graph_for_visible_hue(
+                    config,
+                    color_enabled,
+                    histories,
+                    index,
                     width,
-                    metric,
-                    config.renderer,
                     stream_hues[index % stream_hues.len()],
-                    graph_options.color_enabled,
-                    graph_options.solid_colors,
-                    graph_options.window,
                 )
             })
             .collect();
@@ -1546,22 +1550,18 @@ fn render_stream_rows(
                 .get(index)
                 .map(|label| format!("{label:>label_width$} "))
                 .unwrap_or_default();
-            let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
+            let usage_text = stream_usage_text(DisplayMode::Value, *value);
             let fixed =
                 prefix.chars().count() + row_label.chars().count() + usage_text.chars().count();
 
             let graph_width = width.saturating_sub(fixed + 1);
-            let metric = stream_metric_for(index);
-            let metric_history = stream_metric_history(histories, index);
-            let graph = render_metric_graph_for_visible_hue(
-                &metric_history,
-                graph_width,
-                metric,
-                config.renderer,
-                stream_hues[index % stream_hues.len()],
+            let graph = render_stream_graph_for_visible_hue(
+                config,
                 color_enabled,
-                config.solid_colors,
-                config.window,
+                histories,
+                index,
+                graph_width,
+                stream_hues[index % stream_hues.len()],
             );
 
             pad_or_trim_visible(
@@ -1585,28 +1585,17 @@ fn render_stream_columns_line(
     if config.packed {
         let stream_hues = visible_hues(values.len(), config.colors.as_deref());
         let widths = split_stream_widths(width, values.len());
-        let graph_options = graph_render_options(
-            None,
-            Align::Right,
-            color_enabled,
-            config.solid_colors,
-            config.window,
-        );
         let segments = widths
             .into_iter()
             .enumerate()
             .map(|(index, graph_width)| {
-                let metric = stream_metric_for(index);
-                let metric_history = stream_metric_history(histories, index);
-                render_metric_graph_for_visible_hue(
-                    &metric_history,
+                render_stream_graph_for_visible_hue(
+                    config,
+                    color_enabled,
+                    histories,
+                    index,
                     graph_width,
-                    metric,
-                    config.renderer,
                     stream_hues[index % stream_hues.len()],
-                    graph_options.color_enabled,
-                    graph_options.solid_colors,
-                    graph_options.window,
                 )
             })
             .collect::<Vec<_>>();
@@ -1625,14 +1614,11 @@ fn render_stream_columns_line(
                 .as_deref()
                 .unwrap_or(&[])
                 .get(index)
-                .cloned()
-                .unwrap_or_default();
-            let usage_text = format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0);
-            let separator = if label.is_empty() { "" } else { " " };
-            let fixed =
-                label.chars().count() + separator.chars().count() + usage_text.chars().count();
-
-            (index, label, separator, usage_text, fixed)
+                .map(String::as_str);
+            (
+                index,
+                stream_inline_segment_text(DisplayMode::Full, label, *value),
+            )
         })
         .collect::<Vec<_>>();
     let (segment_widths, graph_widths) = stream_column_widths(config.space, inner_width, &segments);
@@ -1640,54 +1626,23 @@ fn render_stream_columns_line(
     let segments = segments
         .into_iter()
         .zip(segment_widths.into_iter().zip(graph_widths))
-        .map(
-            |((index, label, separator, usage_text, _fixed), (segment_width, graph_width))| {
-                let metric = stream_metric_for(index);
-                let metric_history = stream_metric_history(histories, index);
-                let display_usage_text = match config.space {
-                    Space::Stable => {
-                        format!(
-                            "{usage_text:>width$}",
-                            width = stable_stream_usage_width(&usage_text)
-                        )
-                    }
-                    Space::Graph | Space::Segment => usage_text.clone(),
-                };
-                let graph = render_metric_graph_for_visible_hue(
-                    &metric_history,
-                    graph_width,
-                    metric,
-                    config.renderer,
-                    stream_hues[index % stream_hues.len()],
-                    color_enabled,
-                    config.solid_colors,
-                    config.window,
-                );
-                if graph_width == 0 {
-                    return pad_or_trim_visible(
-                        &render_inline_segment(
-                            config.align,
-                            &label,
-                            separator,
-                            &display_usage_text,
-                            "",
-                        ),
-                        segment_width,
-                    );
-                }
-
-                pad_or_trim_visible(
-                    &render_inline_segment(
-                        config.align,
-                        &label,
-                        separator,
-                        &display_usage_text,
-                        &graph,
-                    ),
-                    segment_width,
-                )
-            },
-        )
+        .map(|((index, parts), (segment_width, graph_width))| {
+            let display_parts = stable_stream_inline_segment_text(config.space, parts);
+            let graph = render_stream_graph_for_visible_hue(
+                config,
+                color_enabled,
+                histories,
+                index,
+                graph_width,
+                stream_hues[index % stream_hues.len()],
+            );
+            render_inline_segment_to_width(
+                &display_parts,
+                if graph_width == 0 { "" } else { &graph },
+                segment_width,
+                config.align,
+            )
+        })
         .collect::<Vec<_>>();
 
     pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
@@ -1696,7 +1651,7 @@ fn render_stream_columns_line(
 fn stream_column_widths(
     space: Space,
     inner_width: usize,
-    segments: &[(usize, String, &'static str, String, usize)],
+    segments: &[(usize, InlineSegmentText)],
 ) -> (Vec<usize>, Vec<usize>) {
     let count = segments.len();
     if count == 0 {
@@ -1708,10 +1663,10 @@ fn stream_column_widths(
         Space::Stable => {
             let fixed_total = segments
                 .iter()
-                .map(|(_, label, separator, usage_text, _)| {
-                    label.chars().count()
-                        + separator.chars().count()
-                        + stable_stream_usage_width(usage_text)
+                .map(|(_, parts)| {
+                    visible_width(&parts.label)
+                        + parts.separator.chars().count()
+                        + stable_stream_usage_width(&parts.usage_text)
                         + 1
                 })
                 .sum::<usize>();
@@ -1722,10 +1677,10 @@ fn stream_column_widths(
             let segment_widths = segments
                 .iter()
                 .zip(graph_widths.iter().copied())
-                .map(|((_, label, separator, usage_text, _), graph_width)| {
-                    label.chars().count()
-                        + separator.chars().count()
-                        + stable_stream_usage_width(usage_text)
+                .map(|((_, parts), graph_width)| {
+                    visible_width(&parts.label)
+                        + parts.separator.chars().count()
+                        + stable_stream_usage_width(&parts.usage_text)
                         + usize::from(graph_width > 0)
                         + graph_width
                 })
@@ -1735,7 +1690,7 @@ fn stream_column_widths(
         Space::Graph => {
             let fixed_total = segments
                 .iter()
-                .map(|(_, _, _, _, fixed)| fixed + 1)
+                .map(|(_, parts)| parts.fixed + 1)
                 .sum::<usize>();
             let graph_space = inner_width
                 .saturating_sub(separators)
@@ -1744,8 +1699,8 @@ fn stream_column_widths(
             let segment_widths = segments
                 .iter()
                 .zip(graph_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), graph_width)| {
-                    fixed + usize::from(graph_width > 0) + graph_width
+                .map(|((_, parts), graph_width)| {
+                    parts.fixed + usize::from(graph_width > 0) + graph_width
                 })
                 .collect::<Vec<_>>();
             (segment_widths, graph_widths)
@@ -1756,11 +1711,11 @@ fn stream_column_widths(
             let graph_widths = segments
                 .iter()
                 .zip(segment_widths.iter().copied())
-                .map(|((_, _, _, _, fixed), segment_width)| {
-                    if segment_width <= *fixed {
+                .map(|((_, parts), segment_width)| {
+                    if segment_width <= parts.fixed {
                         0
                     } else {
-                        segment_width.saturating_sub(*fixed + 1)
+                        segment_width.saturating_sub(parts.fixed + 1)
                     }
                 })
                 .collect::<Vec<_>>();
@@ -1771,6 +1726,68 @@ fn stream_column_widths(
 
 fn stable_stream_usage_width(usage_text: &str) -> usize {
     usage_text.chars().count().max(4)
+}
+
+fn stream_usage_text(display: DisplayMode, value: f64) -> String {
+    match display {
+        DisplayMode::Full | DisplayMode::Value => {
+            format!("{:>3.0}%", value.clamp(0.0, 1.0) * 100.0)
+        }
+        DisplayMode::Bare => String::new(),
+    }
+}
+
+fn stream_inline_segment_text(
+    display: DisplayMode,
+    label: Option<&str>,
+    value: f64,
+) -> InlineSegmentText {
+    let label = match display {
+        DisplayMode::Full => label.unwrap_or_default().to_owned(),
+        DisplayMode::Value | DisplayMode::Bare => String::new(),
+    };
+    let usage_text = stream_usage_text(display, value);
+    inline_segment_text(
+        label.clone(),
+        default_inline_separator(&label, &usage_text),
+        usage_text,
+    )
+}
+
+fn stable_stream_inline_segment_text(space: Space, parts: InlineSegmentText) -> InlineSegmentText {
+    match space {
+        Space::Stable if !parts.usage_text.is_empty() => InlineSegmentText {
+            usage_text: format!(
+                "{usage_text:>width$}",
+                usage_text = parts.usage_text,
+                width = stable_stream_usage_width(&parts.usage_text)
+            ),
+            ..parts
+        },
+        Space::Stable | Space::Graph | Space::Segment => parts,
+    }
+}
+
+fn render_stream_graph_for_visible_hue(
+    config: &Config,
+    color_enabled: bool,
+    histories: &[VecDeque<f64>],
+    index: usize,
+    graph_width: usize,
+    visible_hue: ColorSpec,
+) -> String {
+    let metric = stream_metric_for(index);
+    let metric_history = stream_metric_history(histories, index);
+    render_metric_graph_for_visible_hue(
+        &metric_history,
+        graph_width,
+        metric,
+        config.renderer,
+        visible_hue,
+        color_enabled,
+        config.solid_colors,
+        config.window,
+    )
 }
 
 fn render_row(
@@ -3801,13 +3818,17 @@ mod tests {
     #[test]
     fn stream_columns_can_use_legacy_segment_spacing() {
         let segments = vec![
-            (0, "a".to_owned(), " ", "100%".to_owned(), 6),
+            (
+                0,
+                inline_segment_text("a".to_owned(), " ", "100%".to_owned()),
+            ),
             (
                 1,
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                " ",
-                "100%".to_owned(),
-                43,
+                inline_segment_text(
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+                    " ",
+                    "100%".to_owned(),
+                ),
             ),
         ];
 
