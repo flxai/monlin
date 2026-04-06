@@ -145,6 +145,7 @@ fn render_metric_graph_for_visible_hue(
     metric: MetricKind,
     renderer: Renderer,
     visible_hue: ColorSpec,
+    align: Align,
     color_enabled: bool,
     solid_colors: bool,
     window: Window,
@@ -155,13 +156,7 @@ fn render_metric_graph_for_visible_hue(
         width,
         metric,
         renderer,
-        graph_render_options(
-            Some(hues),
-            Align::Right,
-            color_enabled,
-            solid_colors,
-            window,
-        ),
+        graph_render_options(Some(hues), align, color_enabled, solid_colors, window),
     )
 }
 
@@ -503,7 +498,7 @@ fn render_packed_metric_row(
 ) -> String {
     let graph_options = graph_render_options(
         None,
-        Align::Right,
+        config.align,
         color_enabled,
         config.solid_colors,
         config.window,
@@ -522,6 +517,7 @@ fn render_packed_metric_row(
                     metric,
                     config.renderer,
                     row_hues[index % row_hues.len()],
+                    graph_options.align,
                     graph_options.color_enabled,
                     graph_options.solid_colors,
                     graph_options.window,
@@ -578,7 +574,7 @@ fn render_packed_document_row(
 ) -> String {
     let graph_options = graph_render_options(
         None,
-        Align::Right,
+        config.align,
         color_enabled,
         config.solid_colors,
         config.window,
@@ -601,6 +597,7 @@ fn render_packed_document_row(
                 render_metric,
                 config.renderer,
                 row_hues[index % row_hues.len()],
+                graph_options.align,
                 graph_options.color_enabled,
                 graph_options.solid_colors,
                 graph_options.window,
@@ -1478,6 +1475,7 @@ fn render_stream_group_row(
                 metric,
                 config.renderer,
                 stream_hues[item.column_index % stream_hues.len()],
+                config.align,
                 color_enabled,
                 config.solid_colors,
                 config.window,
@@ -1561,6 +1559,7 @@ fn render_document_row(
                 render_metric,
                 config.renderer,
                 row_hues[index % row_hues.len()],
+                config.align,
                 color_enabled,
                 config.solid_colors,
                 config.window,
@@ -1720,9 +1719,10 @@ fn render_stream_rows(
             );
 
             pad_or_trim_visible(
-                &match config.align {
-                    Align::Left => format!("{prefix}{row_label}{usage_text} {graph}"),
-                    Align::Right => format!("{prefix}{row_label}{graph} {usage_text}"),
+                &if graph.is_empty() {
+                    format!("{prefix}{row_label}{usage_text}")
+                } else {
+                    format!("{prefix}{row_label}{usage_text} {graph}")
                 },
                 width,
             )
@@ -1939,6 +1939,7 @@ fn render_stream_graph_for_visible_hue(
         metric,
         config.renderer,
         visible_hue,
+        config.align,
         color_enabled,
         config.solid_colors,
         config.window,
@@ -2353,7 +2354,7 @@ fn config_label_prefix(config: &Config) -> String {
 }
 
 fn render_inline_segment(
-    align: Align,
+    _align: Align,
     label: &str,
     separator: &str,
     usage_text: &str,
@@ -2364,25 +2365,10 @@ fn render_inline_segment(
     }
 
     let text_only = format!("{label}{separator}{usage_text}");
-    match align {
-        Align::Left => {
-            if text_only.is_empty() {
-                graph.to_owned()
-            } else {
-                format!("{text_only} {graph}")
-            }
-        }
-        Align::Right => {
-            if label.is_empty() {
-                if usage_text.is_empty() {
-                    graph.to_owned()
-                } else {
-                    format!("{graph} {usage_text}")
-                }
-            } else {
-                format!("{label} {graph} {usage_text}")
-            }
-        }
+    if text_only.is_empty() {
+        graph.to_owned()
+    } else {
+        format!("{text_only} {graph}")
     }
 }
 
@@ -3585,6 +3571,49 @@ mod tests {
     }
 
     #[test]
+    fn packed_line_layout_respects_left_graph_alignment() {
+        let layout = crate::layout::parse_layout_spec("cpu").unwrap();
+        let config = Config {
+            document: None,
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Left,
+            packed: true,
+            solid_colors: false,
+            window: Window::Agg,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
+            layout: layout.clone(),
+            renderer: Renderer::Block,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(2),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([(
+            MetricKind::Cpu,
+            VecDeque::from(vec![MetricValue::Single(1.0)]),
+        )]);
+        let values = HashMap::from([(MetricKind::Cpu, MetricValue::Single(1.0))]);
+
+        let lines = render_lines(&config, 2, false, &histories, &layout, &values);
+
+        assert_eq!(lines, vec!["█ ".to_owned()]);
+    }
+
+    #[test]
     fn segment_rendering_uses_exact_requested_width() {
         let segment = render_segment(
             item(MetricKind::Cpu),
@@ -3603,6 +3632,27 @@ mod tests {
         );
 
         assert_eq!(visible_width(&segment), 18);
+    }
+
+    #[test]
+    fn right_aligned_segments_keep_text_before_graph() {
+        let segment = render_segment(
+            item(MetricKind::Cpu),
+            &VecDeque::from(vec![MetricValue::Single(1.0)]),
+            MetricValue::Single(1.0),
+            12,
+            4,
+            Align::Right,
+            Renderer::Block,
+            false,
+        );
+
+        assert!(
+            segment.starts_with("cpu 100%"),
+            "unexpected segment: {segment}"
+        );
+        assert!(segment.ends_with('█'), "unexpected segment: {segment}");
+        assert_eq!(visible_width(&segment), 12);
     }
 
     #[test]
@@ -3962,6 +4012,16 @@ mod tests {
 
     #[test]
     fn stream_columns_keep_graph_widths_balanced_with_long_labels() {
+        fn first_graph_glyph(line: &str, token: &str) -> char {
+            let byte_index = line
+                .find(token)
+                .unwrap_or_else(|| panic!("missing token {token:?} in {line:?}"));
+            line[byte_index + token.len()..]
+                .chars()
+                .next()
+                .unwrap_or_else(|| panic!("missing graph after token {token:?} in {line:?}"))
+        }
+
         let config = Config {
             document: None,
             history: 8,
@@ -4007,9 +4067,10 @@ mod tests {
             line.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 100%"),
             "unexpected row: {line}"
         );
-        assert!(
-            line.matches('⢸').count() >= 2 || line.matches('⣠').count() >= 2,
-            "expected both segments to retain visible graph width: {line}"
+        assert_ne!(first_graph_glyph(line, "a 100% "), '⠀');
+        assert_ne!(
+            first_graph_glyph(line, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 100% "),
+            '⠀'
         );
     }
 
@@ -5122,6 +5183,57 @@ mod tests {
             "unexpected second row: {}",
             lines[1]
         );
+    }
+
+    #[test]
+    fn stream_lines_keep_text_fixed_when_right_aligned() {
+        let config = Config {
+            document: None,
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Right,
+            packed: false,
+            solid_colors: false,
+            window: Window::Agg,
+            label: None,
+            stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
+            stream_groups: None,
+            stream_layout: StreamLayout::Lines,
+            space: Space::Graph,
+            layout_engine: LayoutEngine::Flow,
+            layout: Layout::default(),
+            renderer: Renderer::Block,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(16),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
+            show_help: false,
+        };
+        let histories = vec![VecDeque::from(vec![0.25]), VecDeque::from(vec![0.75])];
+        let values = vec![0.25, 0.75];
+
+        let lines = render_stream_lines(&config, 16, false, &histories, &values);
+
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines[0].starts_with("wifi  25%"),
+            "unexpected first row: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].starts_with(" vpn  75%"),
+            "unexpected second row: {}",
+            lines[1]
+        );
+        assert_eq!(visible_width(&lines[0]), 16);
+        assert_eq!(visible_width(&lines[1]), 16);
     }
 
     #[test]

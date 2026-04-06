@@ -3,17 +3,50 @@
 `monlin` is a compact terminal monitor for narrow panes, bars, and shell-driven
 status views.
 
-It started as the monitor inside `nxu` tmux panes, but it has grown into a
-general CLI for rendering multi-metric, multi-line monitors with a small layout
-DSL.
+It renders dense multi-metric layouts with a small DSL, sane defaults, and
+braille-first history graphs.
 
-## Goals
+## Quick Start
 
-- dense output that still reads well in narrow terminals
-- stable shell-facing CLI
-- good defaults with or without config files
-- braille-first history rendering
-- explicit, inspectable layout and rendering behavior
+Default compact layout:
+
+```sh
+monlin
+monlin avail
+```
+
+Exhaustive built-in layout:
+
+```sh
+monlin all
+```
+
+One-shot preview:
+
+```sh
+monlin --once --interval-ms 0 --width 96 --color never
+```
+
+Packed graph-only output:
+
+```sh
+monlin -p avail
+printf '10 20 30\n' | monlin -p '@1 @2 @3'
+```
+
+Explicit stdin columns:
+
+```sh
+printf '10 20 30\n' | monlin '@1 @2 @3'
+printf '10 20 30\n' | monlin '@1!bare @2!bare @3!bare'
+```
+
+Polled sources:
+
+```sh
+monlin "a=p:printf '10\n' b=p:printf '20\n'"
+monlin "left=f:/tmp/a right=f:/tmp/b"
+```
 
 ## Build And Run
 
@@ -35,30 +68,6 @@ Show help:
 nix run 'path:/home/flx/pro/git/monlin' -- --help
 ```
 
-One-shot render:
-
-```sh
-nix run 'path:/home/flx/pro/git/monlin' -- --once --interval-ms 0
-```
-
-## Default Behavior
-
-With no arguments, `monlin` renders the compact available layout:
-
-```sh
-monlin
-monlin avail
-```
-
-The exhaustive layout is:
-
-```sh
-monlin all
-```
-
-`avail` adapts to the host. For example, on non-GPU systems it naturally
-collapses from `xpu mem spc io net` to something like `cpu ram spc io net`.
-
 ## Config Files
 
 `monlin` prefers TOML config files and merges them in this order:
@@ -69,7 +78,7 @@ collapses from `xpu mem spc io net` to something like `cpu ram spc io net`.
 4. user config fallback `~/.config/monlin/config.toml`
 5. explicit CLI flags
 
-Legacy shell-word configs at `.../config` are still supported for compatibility.
+Later layers override earlier ones.
 
 Example:
 
@@ -88,7 +97,98 @@ List-like fields can also be written as arrays:
 colors = ["gruvbox", "320"]
 ```
 
-## Sources And Aliases
+## Layout DSL
+
+The layout syntax is the main interface.
+
+These are equivalent:
+
+```sh
+monlin cpu ram spc io net
+monlin "cpu ram spc io net"
+```
+
+Positional layout arguments are joined with spaces before parsing. Quote the
+whole layout when it contains spaces, parentheses, or `p:...` commands.
+
+The canonical item syntax is:
+
+```text
+source[.value_mode][!display_mode][:size][+max][-min]
+```
+
+Examples:
+
+```sh
+monlin "cpu"
+monlin "cpu.abs!value"
+monlin "cpu.abs!value:12+20-8"
+monlin "@1!bare"
+monlin "temp=p:printf '42\n'"
+```
+
+Read `cpu.abs!value:12+20-8` left to right:
+
+- `cpu`: source
+- `.abs`: absolute value mode
+- `!value`: show only the value text, not the label
+- `:12`: basis width
+- `+20`: maximum width
+- `-8`: preferred minimum width
+
+An item can be:
+
+- a native source like `cpu`, `ram`, or `net`
+- a stream column like `@1`
+- a file source like `f:/tmp/data`
+- a process source like `p:printf '10\n'`
+- a labeled item like `cpu=@1` or `load=p:'cut -f1 /proc/loadavg'`
+
+Modifiers:
+
+- `.pct` or `.abs` selects the value mode
+- `!full`, `!value`, or `!bare` selects how much text to show
+- `:size` sets the item's basis width
+- `+max` caps how wide the item may expand
+- `-min` asks for at least that many columns when there is room
+
+Items on the same row are separated by spaces. Rows are separated by:
+
+- `,`
+- or a literal newline
+
+Without explicit row separators, flat layouts auto-wrap after 5 items.
+
+Labels and groups:
+
+- `label=source`
+- `label=(source source)`
+- `label=(source, source)`
+
+Read those as:
+
+- `label=source`: label one item
+- `label=(a b)`: label a group whose items stay on the same row
+- `label=(a, b)`: label a group split across multiple rows
+
+Split composition uses `+` inside a single item:
+
+- `cpu gpu`: two separate items
+- `cpu+gpu`: one split item
+
+Examples:
+
+```sh
+monlin "cpu ram spc io net"
+monlin "xpu mem spc, io net"
+monlin "spcram=(spc+ram)"
+monlin "spcram=(spc,ram)"
+monlin "graph=(cpu=@1 ram=@2)"
+monlin "disk=(in.abs out.abs) net=(rx.abs tx.abs)"
+monlin "a=p:printf '10\n' b=p:printf '20\n'"
+```
+
+## Sources, Aliases, And Defaults
 
 Native sources:
 
@@ -115,13 +215,29 @@ Special layouts:
 - `avail`
 - `all`
 
-External and streamed sources:
+External sources:
 
 - `@1`, `@2`, ... for stdin stream columns
 - `f:/path/to/file` to poll a file for numeric rows
 - `p:command` to poll a shell command for numeric rows
 
-## Views And Display Modes
+`f:/...` works especially well for sysfs and other generated numeric files:
+
+```sh
+monlin "cpu=f:/sys/class/thermal/thermal_zone0/temp"
+monlin "bat=f:/sys/class/power_supply/BAT0/capacity"
+monlin "bl=f:/sys/class/backlight/intel_backlight/brightness"
+monlin "fan=f:/sys/class/hwmon/hwmon1/fan1_input"
+monlin "eth=f:/sys/class/net/enp3s0/speed"
+```
+
+If you want transformed values, normalize or convert them before feeding them to
+`monlin`:
+
+```sh
+monlin "bl=p:awk '{ print $1 / $2 * 100 }' /sys/class/backlight/intel_backlight/brightness /sys/class/backlight/intel_backlight/max_brightness"
+monlin "cpu=p:awk '{ print $1 / 1000 }' /sys/class/thermal/thermal_zone0/temp"
+```
 
 Value modes:
 
@@ -134,129 +250,18 @@ Display modes:
 - `!value`
 - `!bare`
 
-Examples:
-
-```sh
-monlin "cpu.pct ram.abs"
-monlin "net.abs io.abs"
-monlin "@1!bare @2!bare @3!bare"
-monlin "cpu!value gpu!value"
-```
-
 Defaults are metric-aware:
 
 - compute-style metrics default to `.pct`
 - memory, storage, disk, and network metrics default to `.abs`
 
-So for example:
+For example:
 
 - `cpu` -> ` 37%`
 - `ram` -> ` 15G`
 - `spc` -> `412G`
 - `net` -> `3.5M`
 - `rx` -> `812K`
-
-## Layout DSL
-
-The canonical item syntax is:
-
-```text
-source[.value_mode][!display_mode][:size][+max][-min]
-```
-
-Where:
-
-- `source` selects what to render
-- `.pct` or `.abs` selects the value mode
-- `!full`, `!value`, or `!bare` selects how much text to show
-- `:size` reserves width for the item
-- `+max` caps how wide the item may expand
-- `-min` prefers at least that many columns when there is room
-
-Rows are separated with:
-
-- `,`
-- or a literal newline
-
-Labels and groups:
-
-- `label=source`
-- `label=(source source)`
-- `label=(source, source)`
-
-Split composition uses `+`:
-
-- `spcram=(spc+ram)`
-- `cpu+gpu`
-- `rx+tx`
-
-Examples:
-
-```sh
-monlin "cpu ram spc io net"
-monlin "xpu mem spc, io net"
-monlin "spcram=(spc+ram)"
-monlin "spcram=(spc,ram)"
-monlin "graph=(cpu=@1 ram=@2)"
-monlin "disk=(in.abs out.abs) net=(rx.abs tx.abs)"
-```
-
-## Common Invocations
-
-Compact host overview:
-
-```sh
-monlin
-monlin avail
-```
-
-Exhaustive built-in layout:
-
-```sh
-monlin all
-```
-
-Packed graph-only output:
-
-```sh
-monlin -p avail
-printf '10 20 30\n' | monlin -p '@1 @2 @3'
-```
-
-Explicit stream columns:
-
-```sh
-printf '10 20 30\n' | monlin '@1 @2 @3'
-printf '10 20 30\n' | monlin '@1!bare @2!bare @3!bare'
-```
-
-Dense split summaries:
-
-```sh
-monlin "io net"
-monlin "in out rx tx"
-```
-
-Alignment and window behavior:
-
-```sh
-monlin --align right
-monlin --align left
-monlin --window tail
-monlin --window agg
-```
-
-No color:
-
-```sh
-monlin --color never
-```
-
-One-shot preview at fixed width:
-
-```sh
-monlin --once --interval-ms 0 --width 96 --color never avail
-```
 
 ## CLI Flags
 
