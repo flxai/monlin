@@ -175,9 +175,7 @@ fn zsh_completion_script() -> String {
     let item_source_words = zsh_multiline_words(&item_sources, "    ");
     let item_source_patterns = zsh_case_patterns(&item_sources);
     let split_source_words = zsh_words(crate::layout::completion_split_source_names());
-    let value_suffix_words = zsh_words(crate::layout::LayoutView::names());
-    let value_suffix_patterns = zsh_case_patterns(crate::layout::LayoutView::names());
-    let display_suffix_words = zsh_words(crate::layout::DisplayMode::names());
+    let modifier_suffix_words = zsh_words(crate::layout::item_modifier_names());
     let color_names = crate::color::palette_names()
         .iter()
         .chain(crate::color::colormap_names().iter())
@@ -201,15 +199,14 @@ fn zsh_completion_script() -> String {
         r#"#compdef monlin
 
 _monlin_layout() {{
-  local cur token prefix label_prefix base tail view
-  local -a item_sources split_sources start_sources value_suffixes display_suffixes sizes
+  local cur token prefix label_prefix base tail
+  local -a item_sources split_sources start_sources modifier_suffixes sizes
   item_sources=(
 {item_source_words}
   )
   split_sources=({split_source_words})
   start_sources=($item_sources '@' 'f:' 'p:' '(')
-  value_suffixes=({value_suffix_words})
-  display_suffixes=({display_suffix_words})
+  modifier_suffixes=({modifier_suffix_words})
   sizes=(1 2 3 4 6 8 10 12 16 24)
 
   cur="${{words[CURRENT]}}"
@@ -236,28 +233,9 @@ _monlin_layout() {{
     return
   fi
 
-  if [[ "$token" == *"."* && "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
-    base="${{token%.*}}"
-    case "$base" in
-      {item_source_patterns}|@*|f:*|p:*)
-        if [[ "$base" != *"."* ]]; then
-          compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}." -- $value_suffixes
-          return
-        fi
-        ;;
-    esac
-  fi
-
-  if [[ "$token" == *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
-    base="${{token%!*}}"
-    case "$base" in
-      *"!"*)
-        ;;
-      {item_source_patterns}|{item_source_patterns}.*|@*|@*.*|f:*|p:*)
-        compadd -Q -P "${{prefix}}${{label_prefix}}${{base}}!" -- $display_suffixes
-        return
-        ;;
-    esac
+  if [[ "$token" == *"." && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+    compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}" -- $modifier_suffixes
+    return
   fi
 
   if [[ "$token" == *":" ]]; then
@@ -293,21 +271,15 @@ _monlin_layout() {{
 
   case "$token" in
     {item_source_patterns}|@*|f:*|p:*)
-      if [[ "$token" != *"."* && "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
-        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}." -- $value_suffixes
-        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}!" -- $display_suffixes
+      if [[ "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}." -- $modifier_suffixes
         return
       fi
       ;;
-    {item_source_patterns}.*|@*.*)
-      if [[ "$token" != *"!"* && "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
-        view="${{token##*.}}"
-        case "$view" in
-          {value_suffix_patterns})
-            compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}!" -- $display_suffixes
-            return
-            ;;
-        esac
+    {item_source_patterns}.*|@*.*|f:*.*|p:*.*)
+      if [[ "$token" != *":"* && "$token" != *"+"* && "$token" != *"-"* ]]; then
+        compadd -Q -P "${{prefix}}${{label_prefix}}${{token}}." -- $modifier_suffixes
+        return
       fi
       ;;
   esac
@@ -356,6 +328,9 @@ _monlin() {{
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'
     '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
     '--solid-colors:Disable palette or theme shading for full-intensity colors'
+    '--no-solid-colors:Use palette or theme shading for non-colormap colors'
+    '--invert-vertical:Flip graph fill direction vertically'
+    '--no-invert-vertical:Use normal bottom-up graph fill direction'
     '-e:How native layouts arrange rows'
     '--engine:How native layouts arrange rows'
     '--renderer:Graph renderer to use'
@@ -619,10 +594,16 @@ fn print_scalar_braille_frames(
     width: usize,
     window: config::Window,
     align: config::Align,
+    invert_vertical: bool,
 ) {
     for prefix_len in 1..=samples.len() {
-        let frame =
-            render::debug_scalar_braille_preview(&samples[..prefix_len], width, window, align);
+        let frame = render::debug_scalar_braille_preview(
+            &samples[..prefix_len],
+            width,
+            window,
+            align,
+            invert_vertical,
+        );
         let glyphs = frame
             .cells
             .iter()
@@ -644,6 +625,7 @@ fn print_split_braille_frames(
     width: usize,
     window: config::Window,
     align: config::Align,
+    invert_vertical: bool,
 ) {
     for prefix_len in 1..=upper.len() {
         let frame = render::debug_split_braille_preview(
@@ -652,6 +634,7 @@ fn print_split_braille_frames(
             width,
             window,
             align,
+            invert_vertical,
         );
         let glyphs = frame
             .cells
@@ -676,15 +659,26 @@ fn print_debug_braille(spec: &config::DebugBrailleSpec) -> Result<(), String> {
                 .width
                 .unwrap_or_else(|| samples.len().div_ceil(2).max(1));
             if spec.frames {
-                print_scalar_braille_frames(&samples, width, spec.window, spec.align);
+                print_scalar_braille_frames(
+                    &samples,
+                    width,
+                    spec.window,
+                    spec.align,
+                    spec.invert_vertical,
+                );
                 return Ok(());
             }
-            let preview =
-                render::debug_scalar_braille_preview(&samples, width, spec.window, spec.align);
+            let preview = render::debug_scalar_braille_preview(
+                &samples,
+                width,
+                spec.window,
+                spec.align,
+                spec.invert_vertical,
+            );
             println!("mode: scalar");
             println!(
-                "window: {:?} align: {:?} width: {}",
-                spec.window, spec.align, width
+                "window: {:?} align: {:?} invert_vertical: {} width: {}",
+                spec.window, spec.align, spec.invert_vertical, width
             );
             println!("input:   {}", format_float_list(&samples));
             println!("visible: {}", format_float_list(&preview.visible_samples));
@@ -710,15 +704,28 @@ fn print_debug_braille(spec: &config::DebugBrailleSpec) -> Result<(), String> {
             }
             let width = spec.width.unwrap_or_else(|| upper.len().div_ceil(2).max(1));
             if spec.frames {
-                print_split_braille_frames(&upper, &lower, width, spec.window, spec.align);
+                print_split_braille_frames(
+                    &upper,
+                    &lower,
+                    width,
+                    spec.window,
+                    spec.align,
+                    spec.invert_vertical,
+                );
                 return Ok(());
             }
-            let preview =
-                render::debug_split_braille_preview(&upper, &lower, width, spec.window, spec.align);
+            let preview = render::debug_split_braille_preview(
+                &upper,
+                &lower,
+                width,
+                spec.window,
+                spec.align,
+                spec.invert_vertical,
+            );
             println!("mode: split");
             println!(
-                "window: {:?} align: {:?} width: {}",
-                spec.window, spec.align, width
+                "window: {:?} align: {:?} invert_vertical: {} width: {}",
+                spec.window, spec.align, spec.invert_vertical, width
             );
             println!("upper:   {}", format_float_list(&upper));
             println!("lower:   {}", format_float_list(&lower));
@@ -958,6 +965,7 @@ fn stream_groups_from_external_document(
                 label: item.label().map(str::to_owned),
                 column_index: index,
                 display: item.display(),
+                invert_vertical: item.invert_vertical(),
                 basis: item.size(),
                 max_width: item.max_width(),
                 min_width: item.min_width(),
@@ -999,6 +1007,7 @@ fn stream_groups_from_stream_document(document: &Document) -> Result<Vec<StreamG
                 label: item.label().map(str::to_owned),
                 column_index,
                 display: item.display(),
+                invert_vertical: item.invert_vertical(),
                 basis: item.size(),
                 max_width: item.max_width(),
                 min_width: item.min_width(),
@@ -2613,10 +2622,11 @@ mod tests {
     #[test]
     fn zsh_completion_script_mentions_layout_views_and_debug_commands() {
         let script = zsh_completion_script();
-        assert!(script.contains("value_suffixes=(pct abs)"));
-        assert!(script.contains("display_suffixes=(full value bare)"));
-        assert!(script.contains("${token}!\" -- $display_suffixes"));
+        assert!(script.contains("modifier_suffixes=(pct abs full value bare inv)"));
+        assert!(script.contains("${token}.\" -- $modifier_suffixes"));
         assert!(script.contains("--solid-colors"));
+        assert!(script.contains("--no-solid-colors"));
+        assert!(script.contains("--invert-vertical"));
         assert!(script.contains("-i:Sampling interval in milliseconds"));
         assert!(script.contains("stream column reference (@N)"));
         assert!(script.contains("debug_commands=(colors window braille)"));
@@ -2760,6 +2770,17 @@ mod tests {
         assert_eq!(sources.len(), 2);
         assert!(matches!(sources[0], Source::Process(_)));
         assert!(matches!(sources[1], Source::File(_)));
+    }
+
+    #[test]
+    fn document_stream_sources_preserve_invert_modifier_in_stream_groups() {
+        let document = layout::parse_layout_document("cpu=@1.inv ram=@2.value").unwrap();
+        let groups = stream_groups_from_stream_document(&document).unwrap();
+
+        assert_eq!(groups.len(), 1);
+        assert!(groups[0].rows[0][0].invert_vertical);
+        assert_eq!(groups[0].rows[0][1].display, layout::DisplayMode::Value);
+        assert!(!groups[0].rows[0][1].invert_vertical);
     }
 
     #[test]

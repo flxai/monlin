@@ -21,8 +21,11 @@ pub enum Renderer {
 }
 
 const BLOCKS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+const INVERTED_BLOCKS: &[char] = &[' ', '▔', '🮂', '🮃', '▀', '🮄', '🮅', '🮆', '█'];
 const BRAILLE_LEFT_BITS: [u8; 4] = [6, 2, 1, 0];
 const BRAILLE_RIGHT_BITS: [u8; 4] = [7, 5, 4, 3];
+const INVERTED_BRAILLE_LEFT_BITS: [u8; 4] = [0, 1, 2, 6];
+const INVERTED_BRAILLE_RIGHT_BITS: [u8; 4] = [3, 4, 5, 7];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GridColumnSpec {
@@ -58,7 +61,17 @@ struct GraphRenderOptions {
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
+}
+
+impl GraphRenderOptions {
+    fn with_invert_vertical(self, invert_vertical: bool) -> Self {
+        Self {
+            invert_vertical,
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +121,7 @@ fn graph_render_options(
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
 ) -> GraphRenderOptions {
     GraphRenderOptions {
@@ -115,6 +129,7 @@ fn graph_render_options(
         align,
         color_enabled,
         solid_colors,
+        invert_vertical,
         window,
     }
 }
@@ -134,6 +149,7 @@ fn render_context(
             config.align,
             color_enabled,
             config.solid_colors,
+            config.invert_vertical,
             config.window,
         ),
     }
@@ -148,6 +164,7 @@ fn render_metric_graph_for_visible_hue(
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
 ) -> String {
     let hues = metric_hues_for_visible_hue(metric, visible_hue);
@@ -156,7 +173,14 @@ fn render_metric_graph_for_visible_hue(
         width,
         metric,
         renderer,
-        graph_render_options(Some(hues), align, color_enabled, solid_colors, window),
+        graph_render_options(
+            Some(hues),
+            align,
+            color_enabled,
+            solid_colors,
+            invert_vertical,
+            window,
+        ),
     )
 }
 
@@ -230,6 +254,7 @@ pub(crate) fn debug_scalar_braille_preview(
     width: usize,
     window: Window,
     align: Align,
+    invert_vertical: bool,
 ) -> DebugScalarBraillePreview {
     let preview = debug_window_preview(samples, width, Renderer::Braille, window, align);
     let cells = preview
@@ -238,7 +263,7 @@ pub(crate) fn debug_scalar_braille_preview(
         .map(|chunk| {
             let left = chunk.first().copied().unwrap_or(0.0);
             let right = chunk.get(1).copied().unwrap_or(0.0);
-            let glyph = braille_cell(quantize_level(left), quantize_level(right));
+            let glyph = braille_cell(quantize_level(left), quantize_level(right), invert_vertical);
             DebugScalarBrailleCell {
                 glyph,
                 bits: braille_bits(glyph),
@@ -258,6 +283,7 @@ pub(crate) fn debug_split_braille_preview(
     width: usize,
     window: Window,
     align: Align,
+    invert_vertical: bool,
 ) -> DebugSplitBraillePreview {
     let samples = upper
         .iter()
@@ -292,6 +318,7 @@ pub(crate) fn debug_split_braille_preview(
                 quantize_visible_split_column_level(right_upper),
                 quantize_visible_split_column_level(left_lower),
                 quantize_visible_split_column_level(right_lower),
+                invert_vertical,
             );
             DebugSplitBrailleCell {
                 glyph,
@@ -501,6 +528,7 @@ fn render_packed_metric_row(
         config.align,
         color_enabled,
         config.solid_colors,
+        config.invert_vertical,
         config.window,
     );
     render_packed_row_with_widths(
@@ -520,6 +548,7 @@ fn render_packed_metric_row(
                     graph_options.align,
                     graph_options.color_enabled,
                     graph_options.solid_colors,
+                    graph_options.invert_vertical || items[index].invert_vertical(),
                     graph_options.window,
                 )
             } else {
@@ -577,6 +606,7 @@ fn render_packed_document_row(
         config.align,
         color_enabled,
         config.solid_colors,
+        config.invert_vertical,
         config.window,
     );
     render_packed_row_with_widths(
@@ -600,6 +630,7 @@ fn render_packed_document_row(
                 graph_options.align,
                 graph_options.color_enabled,
                 graph_options.solid_colors,
+                graph_options.invert_vertical || item.invert_vertical(),
                 graph_options.window,
             )
         },
@@ -906,15 +937,8 @@ fn grid_column_specs(
                 (true, None, Some(right)) => Some(right),
                 (true, None, None) => None,
             };
-            column_items[index] = LayoutItem::with_constraints(
-                metric,
-                item.view(),
-                item.display(),
-                merged_basis,
-                merged_grow,
-                merged_max,
-                merged_min,
-            );
+            column_items[index] =
+                (*item).with_sizing(merged_basis, merged_grow, merged_max, merged_min);
             column_item_seen[index] = true;
         }
     }
@@ -1478,6 +1502,7 @@ fn render_stream_group_row(
                 config.align,
                 color_enabled,
                 config.solid_colors,
+                config.invert_vertical || item.invert_vertical,
                 config.window,
             );
             render_inline_segment_to_width(
@@ -1562,6 +1587,7 @@ fn render_document_row(
                 config.align,
                 color_enabled,
                 config.solid_colors,
+                config.invert_vertical || item.invert_vertical(),
                 config.window,
             );
             let value = sample.values.get(item.source()).copied();
@@ -1942,6 +1968,7 @@ fn render_stream_graph_for_visible_hue(
         config.align,
         color_enabled,
         config.solid_colors,
+        config.invert_vertical,
         config.window,
     )
 }
@@ -2130,7 +2157,7 @@ fn test_render_context(align: Align, renderer: Renderer, color_enabled: bool) ->
         align,
         renderer,
         stable_layout: false,
-        graph: graph_render_options(None, align, color_enabled, false, Window::Agg),
+        graph: graph_render_options(None, align, color_enabled, false, false, Window::Agg),
     }
 }
 
@@ -2241,15 +2268,7 @@ fn normalized_items_for_sizing(items: &[LayoutItem]) -> Vec<LayoutItem> {
             } else {
                 item.grow()
             };
-            LayoutItem::with_constraints(
-                item.metric(),
-                item.view(),
-                item.display(),
-                item.basis(),
-                grow,
-                item.max_width(),
-                item.min_width(),
-            )
+            (*item).with_sizing(item.basis(), grow, item.max_width(), item.min_width())
         })
         .collect()
 }
@@ -2438,8 +2457,14 @@ fn render_segment_with_headline(
 
     let graph_width = width.saturating_sub(parts.fixed + 1);
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph =
-        render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
+    let graph = render_metric_graph_with_options(
+        &samples,
+        graph_width,
+        metric,
+        ctx.renderer,
+        ctx.graph
+            .with_invert_vertical(ctx.graph.invert_vertical || item.invert_vertical()),
+    );
 
     render_inline_segment_to_width(&parts, &graph, width, ctx.align)
 }
@@ -2464,8 +2489,14 @@ fn render_segment_with_graph_width(
         ctx.stable_layout,
     );
     let samples = history.iter().copied().collect::<Vec<_>>();
-    let graph =
-        render_metric_graph_with_options(&samples, graph_width, metric, ctx.renderer, ctx.graph);
+    let graph = render_metric_graph_with_options(
+        &samples,
+        graph_width,
+        metric,
+        ctx.renderer,
+        ctx.graph
+            .with_invert_vertical(ctx.graph.invert_vertical || item.invert_vertical()),
+    );
     let width = parts.fixed + 1 + graph_width;
 
     render_inline_segment_to_width(&parts, &graph, width, ctx.align)
@@ -2522,7 +2553,8 @@ fn render_grid_segment(
         spec.graph_width,
         metric,
         ctx.renderer,
-        ctx.graph,
+        ctx.graph
+            .with_invert_vertical(ctx.graph.invert_vertical || item.invert_vertical()),
     );
 
     let text = render_grid_text(
@@ -2800,6 +2832,7 @@ fn render_metric_graph_with_options(
             options.align,
             options.color_enabled,
             options.solid_colors,
+            options.invert_vertical,
             options.window,
         ),
         Renderer::Block => render_block_graph_with_options(
@@ -2810,6 +2843,7 @@ fn render_metric_graph_with_options(
             options.align,
             options.color_enabled,
             options.solid_colors,
+            options.invert_vertical,
             options.window,
         ),
     }
@@ -2902,6 +2936,7 @@ fn render_block_graph(
         Align::Right,
         color_enabled,
         false,
+        false,
         Window::Agg,
     )
 }
@@ -2914,14 +2949,20 @@ fn render_block_graph_with_options(
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
 ) -> String {
     let samples = resample_channel(samples, width, MetricValue::headline_value, window, align);
+    let blocks = if invert_vertical {
+        INVERTED_BLOCKS
+    } else {
+        BLOCKS
+    };
     samples
         .into_iter()
         .map(|sample| {
-            let idx = (sample.clamp(0.0, 1.0) * (BLOCKS.len() - 1) as f64).round() as usize;
-            let ch = BLOCKS[idx.min(BLOCKS.len() - 1)].to_string();
+            let idx = (sample.clamp(0.0, 1.0) * (blocks.len() - 1) as f64).round() as usize;
+            let ch = blocks[idx.min(blocks.len() - 1)].to_string();
             let color = color_for_intensity(metric, hues, sample, solid_colors);
             paint(&ch, color, color_enabled)
         })
@@ -2943,6 +2984,7 @@ pub(crate) fn render_braille_graph(
         Align::Right,
         color_enabled,
         false,
+        false,
         Window::Agg,
     )
 }
@@ -2955,6 +2997,7 @@ fn render_braille_graph_with_options(
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
 ) -> String {
     if metric.is_split() {
@@ -2966,6 +3009,7 @@ fn render_braille_graph_with_options(
             align,
             color_enabled,
             solid_colors,
+            invert_vertical,
             window,
         );
     }
@@ -2982,7 +3026,7 @@ fn render_braille_graph_with_options(
     for chunk in samples.chunks(2) {
         let left = quantize_level(chunk.first().copied().unwrap_or(0.0));
         let right = quantize_level(chunk.get(1).copied().unwrap_or(0.0));
-        let cell = braille_cell(left, right);
+        let cell = braille_cell(left, right, invert_vertical);
         let intensity = chunk.iter().copied().reduce(f64::max).unwrap_or(0.0);
         let color = color_for_intensity(metric, hues, intensity, solid_colors);
         out.push_str(&paint(&cell.to_string(), color, color_enabled));
@@ -2999,6 +3043,7 @@ fn render_split_braille_graph_with_options(
     align: Align,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
     window: Window,
 ) -> String {
     let mut uppers = resample_split_channel(
@@ -3042,6 +3087,7 @@ fn render_split_braille_graph_with_options(
             hues,
             color_enabled,
             solid_colors,
+            invert_vertical,
         ));
     }
 
@@ -3139,13 +3185,18 @@ fn quantize_visible_split_column_level(sample: f64) -> usize {
     }
 }
 
-fn braille_cell(left_level: usize, right_level: usize) -> char {
+fn braille_cell(left_level: usize, right_level: usize, invert_vertical: bool) -> char {
     let mut bits = 0_u32;
+    let (left_bits, right_bits) = if invert_vertical {
+        (&INVERTED_BRAILLE_LEFT_BITS, &INVERTED_BRAILLE_RIGHT_BITS)
+    } else {
+        (&BRAILLE_LEFT_BITS, &BRAILLE_RIGHT_BITS)
+    };
 
-    for bit in BRAILLE_LEFT_BITS.iter().take(left_level.min(4)) {
+    for bit in left_bits.iter().take(left_level.min(4)) {
         bits |= 1 << u32::from(*bit);
     }
-    for bit in BRAILLE_RIGHT_BITS.iter().take(right_level.min(4)) {
+    for bit in right_bits.iter().take(right_level.min(4)) {
         bits |= 1 << u32::from(*bit);
     }
 
@@ -3157,11 +3208,28 @@ fn split_pair_cell(
     right_upper_level: usize,
     left_lower_level: usize,
     right_lower_level: usize,
+    invert_vertical: bool,
 ) -> char {
     const UPPER_LEFT_BITS: [u8; 2] = [1, 0];
     const UPPER_RIGHT_BITS: [u8; 2] = [4, 3];
     const LOWER_LEFT_BITS: [u8; 2] = [2, 6];
     const LOWER_RIGHT_BITS: [u8; 2] = [5, 7];
+    let (left_upper_level, right_upper_level, left_lower_level, right_lower_level) =
+        if invert_vertical {
+            (
+                left_lower_level,
+                right_lower_level,
+                left_upper_level,
+                right_upper_level,
+            )
+        } else {
+            (
+                left_upper_level,
+                right_upper_level,
+                left_lower_level,
+                right_lower_level,
+            )
+        };
     let mut bits = 0_u32;
 
     for bit in UPPER_LEFT_BITS.iter().take(left_upper_level.min(2)) {
@@ -3198,6 +3266,7 @@ fn render_split_pair_cell(
     hues: Option<&BaseHues>,
     color_enabled: bool,
     solid_colors: bool,
+    invert_vertical: bool,
 ) -> String {
     let upper_level = left_upper_level.max(right_upper_level);
     let lower_level = left_lower_level.max(right_lower_level);
@@ -3206,6 +3275,7 @@ fn render_split_pair_cell(
         right_upper_level,
         left_lower_level,
         right_lower_level,
+        invert_vertical,
     )
     .to_string();
     let upper_color = color_for_intensity(
@@ -3308,7 +3378,7 @@ mod tests {
 
     #[test]
     fn full_braille_cell_is_filled() {
-        assert_eq!(braille_cell(4, 4), '⣿');
+        assert_eq!(braille_cell(4, 4, false), '⣿');
     }
 
     #[test]
@@ -3321,6 +3391,7 @@ mod tests {
             Align::Right,
             false,
             false,
+            false,
             Window::Tail,
         );
         let right = render_braille_graph_with_options(
@@ -3329,6 +3400,7 @@ mod tests {
             MetricKind::Cpu,
             None,
             Align::Right,
+            false,
             false,
             false,
             Window::Tail,
@@ -3363,6 +3435,7 @@ mod tests {
             Align::Right,
             false,
             false,
+            false,
             Window::Tail,
         );
         let right = render_split_braille_graph_with_options(
@@ -3371,6 +3444,7 @@ mod tests {
             MetricKind::Net,
             None,
             Align::Right,
+            false,
             false,
             false,
             Window::Tail,
@@ -3402,8 +3476,14 @@ mod tests {
 
     #[test]
     fn debug_split_braille_preview_reports_cell_bits_and_visible_samples() {
-        let preview =
-            debug_split_braille_preview(&[1.0, 0.0], &[0.0, 1.0], 1, Window::Tail, Align::Right);
+        let preview = debug_split_braille_preview(
+            &[1.0, 0.0],
+            &[0.0, 1.0],
+            1,
+            Window::Tail,
+            Align::Right,
+            false,
+        );
 
         assert_eq!(preview.upper_visible_samples, vec![1.0, 0.0]);
         assert_eq!(preview.lower_visible_samples, vec![0.0, 1.0]);
@@ -3456,6 +3536,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -3529,6 +3610,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -3580,6 +3662,7 @@ mod tests {
             align: Align::Left,
             packed: true,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -3664,6 +3747,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: Some("host".to_owned()),
             stream_labels: None,
@@ -3726,6 +3810,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -3862,6 +3947,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -3906,6 +3992,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
@@ -3952,6 +4039,7 @@ mod tests {
             align: Align::Left,
             packed: true,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: Some("host".to_owned()),
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
@@ -4029,6 +4117,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: Some(vec![
@@ -4111,6 +4200,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
@@ -4161,6 +4251,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4311,6 +4402,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4454,6 +4546,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4600,6 +4693,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4713,6 +4807,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4828,6 +4923,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4908,6 +5004,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -4999,6 +5096,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -5090,6 +5188,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -5142,6 +5241,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
@@ -5194,6 +5294,7 @@ mod tests {
             align: Align::Right,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
@@ -5413,6 +5514,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -5493,6 +5595,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -5598,6 +5701,7 @@ mod tests {
             align: Align::Left,
             packed: false,
             solid_colors: false,
+            invert_vertical: false,
             window: Window::Agg,
             label: None,
             stream_labels: None,
@@ -5814,6 +5918,7 @@ mod tests {
             Align::Right,
             true,
             false,
+            false,
             Window::Agg,
         );
         let solid = render_braille_graph_with_options(
@@ -5824,6 +5929,7 @@ mod tests {
             Align::Right,
             true,
             true,
+            false,
             Window::Agg,
         );
         let low = crate::color::gradient_for_with_hues(MetricKind::Cpu, Some(&hues)).low;
@@ -5850,6 +5956,7 @@ mod tests {
             Align::Right,
             false,
             false,
+            false,
             Window::Agg,
         );
         let tail = render_block_graph_with_options(
@@ -5858,6 +5965,7 @@ mod tests {
             MetricKind::Cpu,
             None,
             Align::Right,
+            false,
             false,
             false,
             Window::Tail,
@@ -5900,6 +6008,7 @@ mod tests {
             Align::Right,
             false,
             false,
+            false,
             Window::Tail,
         );
 
@@ -5909,6 +6018,7 @@ mod tests {
             MetricKind::Net,
             None,
             Align::Right,
+            false,
             false,
             false,
             Window::Agg,
@@ -5929,6 +6039,7 @@ mod tests {
             Align::Left,
             false,
             false,
+            false,
             Window::Tail,
         );
         let right = render_block_graph_with_options(
@@ -5939,11 +6050,194 @@ mod tests {
             Align::Right,
             false,
             false,
+            false,
             Window::Tail,
         );
 
         assert_eq!(left, "█ ");
         assert_eq!(right, " █");
+    }
+
+    #[test]
+    fn inverted_braille_cells_fill_from_the_top() {
+        let normal = render_braille_graph_with_options(
+            &[MetricValue::Single(0.25)],
+            1,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            false,
+            Window::Agg,
+        );
+        let inverted = render_braille_graph_with_options(
+            &[MetricValue::Single(0.25)],
+            1,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            true,
+            Window::Agg,
+        );
+
+        assert_eq!(
+            braille_bits(only_braille_char(&normal)),
+            [false, false, false, false, false, false, false, true]
+        );
+        assert_eq!(
+            braille_bits(only_braille_char(&inverted)),
+            [false, false, false, true, false, false, false, false]
+        );
+    }
+
+    #[test]
+    fn inverted_split_braille_swaps_upper_and_lower_halves() {
+        let normal = render_split_braille_graph_with_options(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 0.0,
+            }],
+            1,
+            MetricKind::Net,
+            None,
+            Align::Right,
+            false,
+            false,
+            false,
+            Window::Agg,
+        );
+        let inverted = render_split_braille_graph_with_options(
+            &[MetricValue::Split {
+                upper: 1.0,
+                lower: 0.0,
+            }],
+            1,
+            MetricKind::Net,
+            None,
+            Align::Right,
+            false,
+            false,
+            true,
+            Window::Agg,
+        );
+
+        assert_eq!(
+            braille_bits(only_braille_char(&normal)),
+            [false, false, false, true, true, false, false, false]
+        );
+        assert_eq!(
+            braille_bits(only_braille_char(&inverted)),
+            [false, false, false, false, false, true, false, true]
+        );
+    }
+
+    #[test]
+    fn inverted_block_graph_uses_upper_blocks() {
+        let graph = render_block_graph_with_options(
+            &[MetricValue::Single(0.5)],
+            1,
+            MetricKind::Cpu,
+            None,
+            Align::Right,
+            false,
+            false,
+            true,
+            Window::Agg,
+        );
+
+        assert_eq!(graph, "▀");
+    }
+
+    #[test]
+    fn layout_item_invert_modifier_overrides_graph_orientation() {
+        let history = VecDeque::from(vec![MetricValue::Single(0.5)]);
+        let normal = render_segment_with_graph_width(
+            LayoutItem::new(MetricKind::Cpu, LayoutView::Default, None, 1),
+            &history,
+            MetricValue::Single(0.5),
+            None,
+            4,
+            1,
+            test_render_context(Align::Right, Renderer::Block, false),
+        );
+        let inverted = render_segment_with_graph_width(
+            LayoutItem::new(MetricKind::Cpu, LayoutView::Default, None, 1)
+                .with_invert_vertical(true),
+            &history,
+            MetricValue::Single(0.5),
+            None,
+            4,
+            1,
+            test_render_context(Align::Right, Renderer::Block, false),
+        );
+
+        assert!(normal.contains('▄'));
+        assert!(inverted.contains('▀'));
+    }
+
+    #[test]
+    fn rate_metric_invert_modifier_changes_native_layout_graphs() {
+        let layout = crate::layout::parse_layout_spec("rx tx, rx.inv tx.inv").unwrap();
+        let config = Config {
+            document: None,
+            history: 8,
+            interval_ms: 1000,
+            align: Align::Right,
+            packed: false,
+            solid_colors: false,
+            invert_vertical: false,
+            window: Window::Agg,
+            label: None,
+            stream_labels: None,
+            stream_groups: None,
+            stream_layout: StreamLayout::Columns,
+            space: Space::Graph,
+            layout_engine: LayoutEngine::Grid,
+            layout: layout.clone(),
+            renderer: Renderer::Block,
+            color_mode: ColorMode::Never,
+            output_mode: OutputMode::Terminal,
+            width: Some(32),
+            once: true,
+            colors: None,
+            force_stream_input: false,
+            external_input: None,
+            print_completion: None,
+            debug_colors_steps: None,
+            debug_window: None,
+            debug_braille: None,
+            show_help: false,
+        };
+        let histories = HashMap::from([
+            (
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.25)]),
+            ),
+            (
+                MetricKind::Egress,
+                VecDeque::from(vec![MetricValue::Single(0.5)]),
+            ),
+        ]);
+        let values = HashMap::from([
+            (MetricKind::Ingress, MetricValue::Single(0.25)),
+            (MetricKind::Egress, MetricValue::Single(0.5)),
+        ]);
+        let headlines = HashMap::from([
+            (MetricKind::Ingress, HeadlineValue::Scalar(211.0)),
+            (MetricKind::Egress, HeadlineValue::Scalar(105.0)),
+        ]);
+
+        let lines = render_lines_with_headlines(
+            &config, 32, false, &histories, &layout, &values, &headlines,
+        );
+
+        assert_eq!(lines.len(), 2);
+        assert_ne!(lines[0], lines[1]);
+        assert!(lines[0].contains('▂') || lines[0].contains('▄'));
+        assert!(lines[1].contains('🮃') || lines[1].contains('▀'));
     }
 
     #[test]

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::color::{named_colormap, named_palette, ColorSpec, Rgb};
 use crate::layout::{
-    parse_layout_document, parse_layout_part_item, parse_layout_spec, DisplayMode, Document, Item,
-    Layout, Row,
+    parse_external_source_token, parse_layout_document, parse_layout_part_item, parse_layout_spec,
+    DisplayMode, Document, Item, Layout, Row, Source,
 };
 use crate::render::Renderer;
 
@@ -25,8 +25,8 @@ Notes:
   Without a layout, monlin defaults to avail.
   Defaults can be read from /etc/xdg/monlin/config.toml, $XDG_CONFIG_HOME/monlin/config.toml, or ~/.config/monlin/config.toml.
   Legacy shell-word configs in .../config are still supported.
-  Item syntax is source[.view][!display][:size][+max][-min], e.g. xpu io net.abs!value:12+20-8.
-  View modes are .pct and .abs. Display modes are !full, !value, and !bare.
+  Item syntax is source[.modifier...][:size][+max][-min], e.g. xpu io net.abs.value.inv:12+20-8.
+  Modifiers are .pct, .abs, .full, .value, .bare, and .inv. Legacy !full, !value, and !bare still work.
   Rows can be separated with ',' or a literal newline.
   Use label=source or label=(...) to label items and groups. Use a+b to compose split sources.
   Flat layouts auto-wrap after 5 metrics per row.
@@ -104,6 +104,7 @@ pub struct StreamItem {
     pub label: Option<String>,
     pub column_index: usize,
     pub display: DisplayMode,
+    pub invert_vertical: bool,
     pub basis: usize,
     pub max_width: Option<usize>,
     pub min_width: Option<usize>,
@@ -201,6 +202,7 @@ pub struct Config {
     pub align: Align,
     pub packed: bool,
     pub solid_colors: bool,
+    pub invert_vertical: bool,
     pub window: Window,
     pub label: Option<String>,
     pub stream_labels: Option<Vec<String>>,
@@ -240,6 +242,7 @@ pub struct DebugBrailleSpec {
     pub split_lower: Option<String>,
     pub window: Window,
     pub align: Align,
+    pub invert_vertical: bool,
     pub width: Option<usize>,
     pub frames: bool,
 }
@@ -288,9 +291,34 @@ struct Cli {
     #[arg(
         long = "solid-colors",
         action = ArgAction::SetTrue,
+        overrides_with = "no_solid_colors",
         help = "Disable palette/theme shading so non-colormap colors render at full intensity"
     )]
     solid_colors: bool,
+
+    #[arg(
+        long = "no-solid-colors",
+        action = ArgAction::SetTrue,
+        overrides_with = "solid_colors",
+        help = "Use palette/theme shading for non-colormap colors"
+    )]
+    no_solid_colors: bool,
+
+    #[arg(
+        long = "invert-vertical",
+        action = ArgAction::SetTrue,
+        overrides_with = "no_invert_vertical",
+        help = "Flip graph fill direction vertically"
+    )]
+    invert_vertical: bool,
+
+    #[arg(
+        long = "no-invert-vertical",
+        action = ArgAction::SetTrue,
+        overrides_with = "invert_vertical",
+        help = "Use normal bottom-up graph fill direction"
+    )]
+    no_invert_vertical: bool,
 
     #[arg(
         short = 'w',
@@ -392,6 +420,8 @@ struct TomlConfig {
     packed: Option<bool>,
     #[serde(alias = "solid-colors")]
     solid_colors: Option<bool>,
+    #[serde(alias = "invert-vertical")]
+    invert_vertical: Option<bool>,
     window: Option<String>,
     #[serde(alias = "engine")]
     layout_engine: Option<String>,
@@ -481,7 +511,17 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
             .ok()
             .or_else(|| parse_layout_document_from_parts(&cli.layout_parts).ok())
     };
-    let (external_input, inline_stream_labels) = if cli.layout_parts.len() == 1 {
+    let parsed_external_item = if cli.layout_parts.len() == 1 {
+        document
+            .as_ref()
+            .and_then(single_external_document_item)
+            .filter(|item| item_requires_document_external_rendering(item))
+    } else {
+        None
+    };
+    let (external_input, inline_stream_labels) = if let Some(item) = parsed_external_item {
+        (external_input_source_from_item(item), None)
+    } else if cli.layout_parts.len() == 1 {
         parse_external_input(&joined_layout)?
     } else {
         (None, None)
@@ -522,7 +562,8 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         interval_ms: cli.interval_ms,
         align: cli.align,
         packed: cli.packed,
-        solid_colors: cli.solid_colors,
+        solid_colors: resolve_boolean_flag(cli.solid_colors, cli.no_solid_colors),
+        invert_vertical: resolve_boolean_flag(cli.invert_vertical, cli.no_invert_vertical),
         window: cli.window,
         label: None,
         stream_labels: inline_stream_labels,
@@ -587,6 +628,7 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
                 split_lower: split_lower.clone(),
                 window: *window,
                 align: *align,
+                invert_vertical: resolve_boolean_flag(cli.invert_vertical, cli.no_invert_vertical),
                 width: *width,
                 frames: *frames,
             }),
@@ -741,9 +783,18 @@ fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
     if config.packed.unwrap_or(false) {
         args.push("--packed".to_owned());
     }
-    if config.solid_colors.unwrap_or(false) {
-        args.push("--solid-colors".to_owned());
-    }
+    push_bool_flag(
+        &mut args,
+        "--solid-colors",
+        "--no-solid-colors",
+        config.solid_colors,
+    );
+    push_bool_flag(
+        &mut args,
+        "--invert-vertical",
+        "--no-invert-vertical",
+        config.invert_vertical,
+    );
     push_flag_value(&mut args, "--window", config.window);
     push_flag_value(&mut args, "--engine", config.layout_engine);
     push_flag_value(&mut args, "--renderer", config.renderer);
@@ -768,6 +819,27 @@ fn push_flag_value(args: &mut Vec<String>, flag: &str, value: Option<String>) {
     if let Some(value) = non_empty_string(value) {
         args.push(flag.to_owned());
         args.push(value);
+    }
+}
+
+fn push_bool_flag(
+    args: &mut Vec<String>,
+    positive_flag: &str,
+    negative_flag: &str,
+    value: Option<bool>,
+) {
+    match value {
+        Some(true) => args.push(positive_flag.to_owned()),
+        Some(false) => args.push(negative_flag.to_owned()),
+        None => {}
+    }
+}
+
+fn resolve_boolean_flag(enabled: bool, disabled: bool) -> bool {
+    if disabled {
+        false
+    } else {
+        enabled
     }
 }
 
@@ -808,6 +880,36 @@ fn parse_external_input(
     Ok((Some(source), Some(labels)))
 }
 
+fn single_external_document_item(document: &Document) -> Option<&Item> {
+    let [row] = document.rows() else {
+        return None;
+    };
+    let [item] = row.items() else {
+        return None;
+    };
+    external_input_source_from_item(item)?;
+    Some(item)
+}
+
+fn item_requires_document_external_rendering(item: &Item) -> bool {
+    item.display() != DisplayMode::Full
+        || item.invert_vertical()
+        || item.size() != 1
+        || item.max_width().is_some()
+        || item.min_width().is_some()
+}
+
+fn external_input_source_from_item(item: &Item) -> Option<ExternalInputSource> {
+    match item.source() {
+        Source::File(path) => Some(ExternalInputSource::File(path.clone())),
+        Source::Process(command) => Some(ExternalInputSource::Process(command.clone())),
+        Source::Metric(_)
+        | Source::RndInstance(_)
+        | Source::SplitMetric(_, _)
+        | Source::StreamColumn(_) => None,
+    }
+}
+
 fn should_preserve_layout_part_boundaries(parts: &[String]) -> bool {
     parts.iter().any(|part| {
         let trimmed = part.trim();
@@ -825,55 +927,84 @@ fn parse_layout_document_from_parts(parts: &[String]) -> Result<Document, String
         return Err("layout must contain at least one metric".to_owned());
     }
 
-    let mut items = Vec::new();
+    let mut rows = Vec::new();
+    let mut current_items = Vec::new();
     let mut filter_available = false;
+    let mut explicit_rows = false;
 
     for part in parts {
-        if let Ok(item) = parse_layout_part_item(part) {
-            items.push(item);
-            continue;
+        let (leading_commas, core, trailing_commas) = split_part_row_separators(part);
+
+        for _ in 0..leading_commas {
+            if current_items.is_empty() {
+                return Err("rows cannot be empty".to_owned());
+            }
+            rows.push(Row::new(None, std::mem::take(&mut current_items)));
+            explicit_rows = true;
         }
 
-        let document = parse_layout_document(part)?;
-        if document.explicit_rows()
-            || document.rows().len() != 1
-            || document.rows()[0].label().is_some()
-        {
-            return Err("layout part cannot be merged as a flat item sequence".to_owned());
+        if !core.is_empty() {
+            if let Ok(item) = parse_layout_part_item(core) {
+                current_items.push(item);
+            } else {
+                let document = parse_layout_document(core)?;
+                if document.explicit_rows()
+                    || document.rows().len() != 1
+                    || document.rows()[0].label().is_some()
+                {
+                    return Err("layout part cannot be merged as a flat item sequence".to_owned());
+                }
+                filter_available |= document.filter_available();
+                current_items.extend(document.rows()[0].items().iter().cloned());
+            }
         }
-        filter_available |= document.filter_available();
-        items.extend(document.rows()[0].items().iter().cloned());
+
+        for _ in 0..trailing_commas {
+            if current_items.is_empty() {
+                return Err("rows cannot be empty".to_owned());
+            }
+            rows.push(Row::new(None, std::mem::take(&mut current_items)));
+            explicit_rows = true;
+        }
     }
 
-    if items.is_empty() {
+    if current_items.is_empty() {
         return Err("layout must contain at least one layout item".to_owned());
     }
 
-    Ok(Document::new(
-        vec![Row::new(None, items)],
-        false,
-        filter_available,
-    ))
+    rows.push(Row::new(None, current_items));
+
+    Ok(Document::new(rows, explicit_rows, filter_available))
+}
+
+fn split_part_row_separators(part: &str) -> (usize, &str, usize) {
+    let mut trimmed = part.trim();
+    let mut leading_commas = 0;
+    let mut trailing_commas = 0;
+
+    while let Some(stripped) = trimmed.strip_prefix(',') {
+        leading_commas += 1;
+        trimmed = stripped.trim_start();
+    }
+
+    while let Some(stripped) = trimmed.strip_suffix(',') {
+        trailing_commas += 1;
+        trimmed = stripped.trim_end();
+    }
+
+    (leading_commas, trimmed, trailing_commas)
 }
 
 fn parse_external_input_source(raw: &str) -> Result<Option<ExternalInputSource>, String> {
-    if let Some(path) = raw.strip_prefix("f:") {
-        let path = path.trim();
-        if path.is_empty() {
-            return Err("f: source path must be non-empty".to_owned());
-        }
-        return Ok(Some(ExternalInputSource::File(PathBuf::from(path))));
-    }
-
-    if let Some(command) = raw.strip_prefix("p:") {
-        let command = command.trim();
-        if command.is_empty() {
-            return Err("p: source command must be non-empty".to_owned());
-        }
-        return Ok(Some(ExternalInputSource::Process(command.to_owned())));
-    }
-
-    Ok(None)
+    Ok(match parse_external_source_token(raw)? {
+        Some(Source::File(path)) => Some(ExternalInputSource::File(path)),
+        Some(Source::Process(command)) => Some(ExternalInputSource::Process(command)),
+        Some(Source::Metric(_))
+        | Some(Source::RndInstance(_))
+        | Some(Source::SplitMetric(_, _))
+        | Some(Source::StreamColumn(_)) => None,
+        None => None,
+    })
 }
 
 fn parse_color_spec(raw: &str) -> Result<ColorSpec, String> {
@@ -1116,6 +1247,7 @@ mod tests {
             align = "right"
             packed = true
             solid_colors = true
+            invert_vertical = true
             colors = ["gruvbox", "320"]
             renderer = "block"
             "#,
@@ -1128,12 +1260,26 @@ mod tests {
                 "right",
                 "--packed",
                 "--solid-colors",
+                "--invert-vertical",
                 "--renderer",
                 "block",
                 "--colors",
                 "gruvbox,320",
             ]
         );
+    }
+
+    #[test]
+    fn explicit_false_toml_booleans_emit_negative_flags() {
+        let args = parse_toml_config_contents(
+            r#"
+            solid_colors = false
+            invert_vertical = false
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(args, vec!["--no-solid-colors", "--no-invert-vertical"]);
     }
 
     #[test]
@@ -1199,6 +1345,7 @@ mod tests {
             parse_toml_config_contents(
                 r#"
                 align = "right"
+                solid_colors = true
                 renderer = "block"
                 "#,
             )
@@ -1207,12 +1354,25 @@ mod tests {
         args.extend(vec![
             "--align".to_owned(),
             "left".to_owned(),
+            "--no-solid-colors".to_owned(),
             "--renderer".to_owned(),
             "braille".to_owned(),
         ]);
         let config = parse_args_from_vec(args).unwrap();
         assert_eq!(config.align, Align::Left);
+        assert!(!config.solid_colors);
         assert_eq!(config.renderer, Renderer::Braille);
+    }
+
+    #[test]
+    fn later_positive_flag_overrides_negative_config_default() {
+        let mut args = vec!["monlin".to_owned()];
+        args.extend(parse_toml_config_contents("solid_colors = false\n").unwrap());
+        args.push("--solid-colors".to_owned());
+
+        let config = parse_args_from_vec(args).unwrap();
+
+        assert!(config.solid_colors);
     }
 
     #[test]
@@ -1364,6 +1524,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_no_solid_colors_flag() {
+        let config = parse(&["monlin", "--solid-colors", "--no-solid-colors"]);
+        assert!(!config.solid_colors);
+    }
+
+    #[test]
+    fn parses_invert_vertical_flag() {
+        let config = parse(&["monlin", "--invert-vertical"]);
+        assert!(config.invert_vertical);
+    }
+
+    #[test]
+    fn parses_no_invert_vertical_flag() {
+        let config = parse(&["monlin", "--invert-vertical", "--no-invert-vertical"]);
+        assert!(!config.invert_vertical);
+    }
+
+    #[test]
     fn parses_debug_window_command() {
         let config = parse(&[
             "monlin",
@@ -1396,6 +1574,7 @@ mod tests {
     fn parses_debug_braille_command() {
         let config = parse(&[
             "monlin",
+            "--invert-vertical",
             "debug",
             "braille",
             "--split-upper",
@@ -1412,6 +1591,7 @@ mod tests {
                 split_lower: Some("1,0".to_owned()),
                 window: Window::Tail,
                 align: Align::Right,
+                invert_vertical: true,
                 width: None,
                 frames: true,
             })
@@ -1473,6 +1653,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_wrapped_quoted_process_input_source() {
+        let config = parse(&["monlin", "p:'echo 100'"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::Process("echo 100".to_owned()))
+        );
+    }
+
+    #[test]
     fn parses_labeled_file_input_source() {
         let config = parse(&["monlin", "cpu,ram=f:/tmp/data.log"]);
         assert_eq!(
@@ -1496,6 +1685,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_labeled_process_input_source_with_modifiers() {
+        let config = parse(&["monlin", "load=p:'echo 100'.value.inv"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::Process("echo 100".to_owned()))
+        );
+        assert_eq!(config.stream_labels, None);
+
+        let document = config.document.as_ref().unwrap();
+        assert_eq!(document.rows().len(), 1);
+        assert_eq!(document.rows()[0].items().len(), 1);
+        let item = &document.rows()[0].items()[0];
+        assert_eq!(item.label(), Some("load"));
+        assert_eq!(
+            item.source(),
+            &crate::layout::Source::Process("echo 100".to_owned())
+        );
+        assert_eq!(item.display(), DisplayMode::Value);
+        assert!(item.invert_vertical());
+    }
+
+    #[test]
+    fn parses_unlabeled_process_input_source_with_modifiers() {
+        let config = parse(&["monlin", "p:'echo 100'.value.inv"]);
+        assert_eq!(
+            config.external_input,
+            Some(ExternalInputSource::Process("echo 100".to_owned()))
+        );
+        assert_eq!(config.stream_labels, None);
+
+        let document = config.document.as_ref().unwrap();
+        let item = &document.rows()[0].items()[0];
+        assert_eq!(item.label(), None);
+        assert_eq!(item.display(), DisplayMode::Value);
+        assert!(item.invert_vertical());
+    }
+
+    #[test]
     fn parses_multiple_process_layout_args_as_document_sources() {
         let config = parse(&["monlin", "p:printf '10\\n'", "p:printf '20\\n'"]);
         assert_eq!(config.external_input, None);
@@ -1510,6 +1737,26 @@ mod tests {
             document.rows()[0].items()[1].source(),
             &crate::layout::Source::Process("printf '20\\n'".to_owned())
         );
+    }
+
+    #[test]
+    fn parses_comma_at_argv_boundary_between_process_items() {
+        let config = parse(&["monlin", "a=p:'printf 10',", "b=p:'printf 20'.inv"]);
+        assert_eq!(config.external_input, None);
+        let document = config.document.as_ref().unwrap();
+        assert!(document.explicit_rows());
+        assert_eq!(document.rows().len(), 2);
+        assert_eq!(document.rows()[0].items()[0].label(), Some("a"));
+        assert_eq!(document.rows()[1].items()[0].label(), Some("b"));
+        assert_eq!(
+            document.rows()[0].items()[0].source(),
+            &crate::layout::Source::Process("printf 10".to_owned())
+        );
+        assert_eq!(
+            document.rows()[1].items()[0].source(),
+            &crate::layout::Source::Process("printf 20".to_owned())
+        );
+        assert!(document.rows()[1].items()[0].invert_vertical());
     }
 
     #[test]
@@ -1784,8 +2031,8 @@ mod tests {
     #[test]
     fn help_text_documents_current_layout_syntax() {
         let help = help_text();
-        assert!(help.contains("source[.view][!display][:size][+max][-min]"));
-        assert!(help.contains("View modes are .pct and .abs."));
+        assert!(help.contains("source[.modifier...][:size][+max][-min]"));
+        assert!(help.contains("Modifiers are .pct, .abs, .full, .value, .bare, and .inv."));
         assert!(help.contains("Use label=source or label=(...)"));
         assert!(help.contains("Rows can be separated with ',' or a literal newline."));
         assert!(help.contains("named palette like gruvbox or solarized"));

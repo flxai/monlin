@@ -26,7 +26,7 @@ fn zsh_completion_can_be_printed() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("#compdef monlin"));
     assert!(stdout.contains("_monlin_layout"));
-    assert!(stdout.contains("pct abs"));
+    assert!(stdout.contains("pct abs full value bare inv"));
     assert!(stdout.contains("-i:Sampling interval in milliseconds"));
     assert!(stdout.contains("debug_commands=(colors window braille)"));
 }
@@ -157,6 +157,76 @@ fn multiple_process_layout_args_render_successfully() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("a"));
     assert!(stdout.contains("b"));
+}
+
+#[test]
+fn single_labeled_process_layout_arg_with_modifiers_renders_successfully() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "32",
+            "--color",
+            "never",
+            "load=p:'printf 100'.value.inv",
+        ])
+        .output()
+        .expect("failed to run monlin with labeled process modifier arg");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("100%"), "{stdout}");
+    assert!(!stdout.contains("load"), "{stdout}");
+}
+
+#[test]
+fn comma_at_argv_boundary_between_process_items_renders_multiple_rows() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "32",
+            "--color",
+            "never",
+            "a=p:'printf 10',",
+            "b=p:'printf 20'.inv",
+        ])
+        .output()
+        .expect("failed to run monlin with comma-separated process args");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
+    assert!(stdout.contains("a"), "{stdout}");
+    assert!(stdout.contains("b"), "{stdout}");
+}
+
+#[test]
+fn native_multiline_invert_layout_runs_successfully() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "32",
+            "--renderer",
+            "block",
+            "--color",
+            "never",
+            "rx tx,",
+            "rx.inv tx.inv",
+        ])
+        .output()
+        .expect("failed to run monlin with native invert layout");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.lines().count(), 2, "{stdout}");
 }
 
 #[test]

@@ -61,6 +61,26 @@ impl DisplayMode {
     }
 }
 
+pub fn item_modifier_names() -> &'static [&'static str] {
+    &["pct", "abs", "full", "value", "bare", "inv"]
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ItemModifier {
+    View(LayoutView),
+    Display(DisplayMode),
+    InvertVertical,
+}
+
+impl ItemModifier {
+    fn parse(token: &str) -> Option<Self> {
+        LayoutView::parse(token)
+            .map(Self::View)
+            .or_else(|| DisplayMode::parse(token).map(Self::Display))
+            .or_else(|| (token == "inv").then_some(Self::InvertVertical))
+    }
+}
+
 pub fn completion_source_specs() -> &'static [(&'static str, &'static str)] {
     &[
         ("cpu", "CPU usage"),
@@ -262,6 +282,7 @@ pub struct LayoutItem {
     metric: MetricKind,
     view: LayoutView,
     display: DisplayMode,
+    invert_vertical: bool,
     basis: Option<usize>,
     grow: usize,
     max_width: Option<usize>,
@@ -274,6 +295,7 @@ impl LayoutItem {
             metric,
             view,
             display: DisplayMode::Full,
+            invert_vertical: false,
             basis,
             grow,
             max_width: None,
@@ -294,6 +316,7 @@ impl LayoutItem {
             metric,
             view,
             display,
+            invert_vertical: false,
             basis,
             grow,
             max_width,
@@ -317,6 +340,10 @@ impl LayoutItem {
         self.display
     }
 
+    pub fn invert_vertical(&self) -> bool {
+        self.invert_vertical
+    }
+
     pub fn grow(&self) -> usize {
         self.grow
     }
@@ -327,6 +354,25 @@ impl LayoutItem {
 
     pub fn min_width(&self) -> Option<usize> {
         self.min_width
+    }
+
+    pub fn with_invert_vertical(mut self, invert_vertical: bool) -> Self {
+        self.invert_vertical = invert_vertical;
+        self
+    }
+
+    pub fn with_sizing(
+        mut self,
+        basis: Option<usize>,
+        grow: usize,
+        max_width: Option<usize>,
+        min_width: Option<usize>,
+    ) -> Self {
+        self.basis = basis;
+        self.grow = grow;
+        self.max_width = max_width;
+        self.min_width = min_width;
+        self
     }
 }
 
@@ -346,6 +392,7 @@ pub struct Item {
     source: Source,
     view: LayoutView,
     display: DisplayMode,
+    invert_vertical: bool,
     size: usize,
     max_width: Option<usize>,
     min_width: Option<usize>,
@@ -365,6 +412,7 @@ impl Item {
             source: Source::Metric(metric),
             view,
             display,
+            invert_vertical: false,
             size,
             max_width,
             min_width,
@@ -384,6 +432,7 @@ impl Item {
             source: Source::StreamColumn(column_index),
             view: LayoutView::Default,
             display,
+            invert_vertical: false,
             size,
             max_width,
             min_width,
@@ -403,6 +452,7 @@ impl Item {
             source: Source::File(path),
             view: LayoutView::Default,
             display,
+            invert_vertical: false,
             size,
             max_width,
             min_width,
@@ -422,6 +472,7 @@ impl Item {
             source: Source::Process(command),
             view: LayoutView::Default,
             display,
+            invert_vertical: false,
             size,
             max_width,
             min_width,
@@ -442,6 +493,7 @@ impl Item {
             source: Source::SplitMetric(upper, lower),
             view: LayoutView::Default,
             display,
+            invert_vertical: false,
             size,
             max_width,
             min_width,
@@ -462,6 +514,7 @@ impl Item {
             source,
             view: self.view,
             display: self.display,
+            invert_vertical: self.invert_vertical,
             size: self.size,
             max_width: self.max_width,
             min_width: self.min_width,
@@ -476,6 +529,10 @@ impl Item {
         self.display
     }
 
+    pub fn invert_vertical(&self) -> bool {
+        self.invert_vertical
+    }
+
     pub fn size(&self) -> usize {
         self.size
     }
@@ -488,6 +545,11 @@ impl Item {
         self.min_width
     }
 
+    pub fn with_invert_vertical(mut self, invert_vertical: bool) -> Self {
+        self.invert_vertical = invert_vertical;
+        self
+    }
+
     fn lower(&self) -> Result<LayoutItem, String> {
         match self.source {
             Source::Metric(metric) => Ok(LayoutItem::with_constraints(
@@ -498,7 +560,8 @@ impl Item {
                 self.size,
                 self.max_width,
                 self.min_width,
-            )),
+            )
+            .with_invert_vertical(self.invert_vertical)),
             Source::RndInstance(index) => Err(format!(
                 "synthetic rnd source #{} cannot yet be lowered into a native layout",
                 index + 1
@@ -1158,6 +1221,84 @@ enum ParsedEntry {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedModifiers {
+    view: LayoutView,
+    display: DisplayMode,
+    invert_vertical: bool,
+}
+
+impl Default for ParsedModifiers {
+    fn default() -> Self {
+        Self {
+            view: LayoutView::Default,
+            display: DisplayMode::Full,
+            invert_vertical: false,
+        }
+    }
+}
+
+fn parse_item_modifiers(token: &str) -> Result<(String, ParsedModifiers), String> {
+    let mut head = token;
+    let mut modifiers = ParsedModifiers::default();
+    let mut explicit_view = false;
+    let mut explicit_display = false;
+    let mut explicit_invert = false;
+
+    if let Some((prefix, suffix)) = head.rsplit_once('!') {
+        head = prefix;
+        modifiers.display =
+            DisplayMode::parse(suffix).ok_or_else(|| format!("unknown display mode: {suffix}"))?;
+        explicit_display = true;
+    }
+
+    let mut suffixes = Vec::new();
+    while let Some((prefix, suffix)) = head.rsplit_once('.') {
+        if ItemModifier::parse(suffix).is_some() {
+            suffixes.push(suffix.to_owned());
+            head = prefix;
+            continue;
+        }
+        break;
+    }
+    suffixes.reverse();
+
+    for suffix in suffixes {
+        match ItemModifier::parse(&suffix).expect("recognized item modifier") {
+            ItemModifier::View(view) => {
+                if explicit_view {
+                    return Err(format!("duplicate metric view: {suffix}"));
+                }
+                modifiers.view = view;
+                explicit_view = true;
+            }
+            ItemModifier::Display(display) => {
+                if explicit_display {
+                    return Err(format!("duplicate display mode: {suffix}"));
+                }
+                modifiers.display = display;
+                explicit_display = true;
+            }
+            ItemModifier::InvertVertical => {
+                if explicit_invert {
+                    return Err("duplicate invert modifier: inv".to_owned());
+                }
+                modifiers.invert_vertical = true;
+                explicit_invert = true;
+            }
+        }
+    }
+
+    Ok((head.to_owned(), modifiers))
+}
+
+fn unknown_item_modifier(token: &str) -> String {
+    token
+        .rsplit_once('.')
+        .map(|(_, suffix)| format!("unknown item modifier: {suffix}"))
+        .unwrap_or_else(|| format!("unknown item modifier: {token}"))
+}
+
 fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
     let is_all = token == "all"
         || token.starts_with("all.")
@@ -1173,21 +1314,22 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
         return Ok(None);
     }
 
-    let (token, display) = match token.rsplit_once('!') {
-        Some((head, display_token)) => (
-            head,
-            DisplayMode::parse(display_token)
-                .ok_or_else(|| format!("unknown display mode: {display_token}"))?,
-        ),
-        None => (token, DisplayMode::Full),
-    };
-
     if token.starts_with("all/") || token.starts_with("all:") {
         return Err("invalid all syntax; use 'all', 'avail', or write explicit rows".to_owned());
     }
     if token.starts_with("avail/") || token.starts_with("avail:") {
         return Err("invalid avail syntax; use 'avail' or write explicit rows".to_owned());
     }
+
+    if token.contains('/') || token.contains(':') || token.contains('+') || token.contains('-') {
+        return Err(if is_all {
+            "all does not support size or width constraints".to_owned()
+        } else {
+            "avail does not support size or width constraints".to_owned()
+        });
+    }
+
+    let (token, modifiers) = parse_item_modifiers(token)?;
 
     if token == "all" {
         return Ok(Some(ParsedEntry::Items {
@@ -1196,7 +1338,10 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
             items: all_metrics()
                 .iter()
                 .copied()
-                .map(|metric| Item::metric(metric, LayoutView::Default, display, 1, None, None))
+                .map(|metric| {
+                    Item::metric(metric, modifiers.view, modifiers.display, 1, None, None)
+                        .with_invert_vertical(modifiers.invert_vertical)
+                })
                 .collect(),
         }));
     }
@@ -1218,50 +1363,30 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
                             };
                             Item::metric(
                                 metric,
-                                item.view(),
-                                display,
+                                modifiers.view,
+                                modifiers.display,
                                 item.size(),
                                 item.max_width(),
                                 item.min_width(),
                             )
+                            .with_invert_vertical(modifiers.invert_vertical)
                         })
                         .collect()
                 })
                 .unwrap_or_default(),
         }));
     }
+    if token.starts_with("all.") || token.starts_with("avail.") {
+        return Err(unknown_item_modifier(&token));
+    }
 
-    let (count, filter_available, view, metrics) =
-        if let Some(view_token) = token.strip_prefix("all.") {
-            if view_token.contains(':')
-                || view_token.contains('/')
-                || view_token.contains('+')
-                || view_token.contains('-')
-            {
-                return Err("all does not support size or width constraints".to_owned());
-            }
-            (
-                2,
-                false,
-                LayoutView::parse(view_token)
-                    .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-                all_metrics().to_vec(),
-            )
-        } else if let Some(view_token) = token.strip_prefix("avail.") {
-            if view_token.contains(':')
-                || view_token.contains('/')
-                || view_token.contains('+')
-                || view_token.contains('-')
-            {
-                return Err("avail does not support size or width constraints".to_owned());
-            }
-            return Ok(Some(ParsedEntry::Items {
-                count: 1,
-                filter_available: true,
-                items: default_avail_document_rows(
-                    LayoutView::parse(view_token)
-                        .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-                )
+    let (count, filter_available, metrics) = if token == "all" {
+        (2, false, all_metrics().to_vec())
+    } else if token == "avail" {
+        return Ok(Some(ParsedEntry::Items {
+            count: 1,
+            filter_available: true,
+            items: default_avail_document_rows(modifiers.view)
                 .into_iter()
                 .next()
                 .map(|row| {
@@ -1275,19 +1400,20 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
                             Item::metric(
                                 metric,
                                 item.view(),
-                                display,
+                                modifiers.display,
                                 item.size(),
                                 item.max_width(),
                                 item.min_width(),
                             )
+                            .with_invert_vertical(modifiers.invert_vertical)
                         })
                         .collect()
                 })
                 .unwrap_or_default(),
-            }));
-        } else {
-            unreachable!("non-macro tokens return early");
-        };
+        }));
+    } else {
+        unreachable!("non-macro tokens return early");
+    };
 
     Ok(Some(ParsedEntry::Items {
         count,
@@ -1295,7 +1421,10 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
         items: metrics
             .iter()
             .copied()
-            .map(|metric| Item::metric(metric, view, display, 1, None, None))
+            .map(|metric| {
+                Item::metric(metric, modifiers.view, modifiers.display, 1, None, None)
+                    .with_invert_vertical(modifiers.invert_vertical)
+            })
             .collect(),
     }))
 }
@@ -1311,48 +1440,21 @@ fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
         return Ok(None);
     }
 
-    let (token, display) = match token.rsplit_once('!') {
-        Some((head, display_token)) => (
-            head,
-            DisplayMode::parse(display_token)
-                .ok_or_else(|| format!("unknown display mode: {display_token}"))?,
-        ),
-        None => (token, DisplayMode::Full),
-    };
+    if token.contains('/') || token.contains(':') || token.contains('+') || token.contains('-') {
+        return Err(if token.starts_with("xpu") {
+            "xpu does not support size or width constraints".to_owned()
+        } else {
+            "mem does not support size or width constraints".to_owned()
+        });
+    }
 
-    let (metrics, view) = if token == "xpu" {
-        (vec![MetricKind::Cpu, MetricKind::Gpu], LayoutView::Default)
+    let (token, modifiers) = parse_item_modifiers(token)?;
+    let metrics = if token == "xpu" {
+        vec![MetricKind::Cpu, MetricKind::Gpu]
     } else if token == "mem" {
-        (
-            vec![MetricKind::Memory, MetricKind::Vram],
-            LayoutView::Default,
-        )
-    } else if let Some(view_token) = token.strip_prefix("xpu.") {
-        if view_token.contains(':')
-            || view_token.contains('/')
-            || view_token.contains('+')
-            || view_token.contains('-')
-        {
-            return Err("xpu does not support size or width constraints".to_owned());
-        }
-        (
-            vec![MetricKind::Cpu, MetricKind::Gpu],
-            LayoutView::parse(view_token)
-                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-        )
-    } else if let Some(view_token) = token.strip_prefix("mem.") {
-        if view_token.contains(':')
-            || view_token.contains('/')
-            || view_token.contains('+')
-            || view_token.contains('-')
-        {
-            return Err("mem does not support size or width constraints".to_owned());
-        }
-        (
-            vec![MetricKind::Memory, MetricKind::Vram],
-            LayoutView::parse(view_token)
-                .ok_or_else(|| format!("unknown metric view: {view_token}"))?,
-        )
+        vec![MetricKind::Memory, MetricKind::Vram]
+    } else if token.starts_with("xpu.") || token.starts_with("mem.") {
+        return Err(unknown_item_modifier(&token));
     } else {
         unreachable!("non-alias tokens return early");
     };
@@ -1360,9 +1462,32 @@ fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
     Ok(Some(
         metrics
             .into_iter()
-            .map(|metric| Item::metric(metric, view, display, 1, None, None))
+            .map(|metric| {
+                Item::metric(metric, modifiers.view, modifiers.display, 1, None, None)
+                    .with_invert_vertical(modifiers.invert_vertical)
+            })
             .collect(),
     ))
+}
+
+pub fn parse_external_source_token(raw: &str) -> Result<Option<Source>, String> {
+    if let Some(path) = raw.strip_prefix("f:") {
+        let path = strip_wrapped_quotes(path.trim());
+        if path.is_empty() {
+            return Err("f: source path must be non-empty".to_owned());
+        }
+        return Ok(Some(Source::File(PathBuf::from(path))));
+    }
+
+    if let Some(command) = raw.strip_prefix("p:") {
+        let command = strip_wrapped_quotes(command.trim());
+        if command.is_empty() {
+            return Err("p: source command must be non-empty".to_owned());
+        }
+        return Ok(Some(Source::Process(command.to_owned())));
+    }
+
+    Ok(None)
 }
 
 fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item, String> {
@@ -1387,40 +1512,11 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
         _ => (head, Some(1)),
     };
 
-    let mut metric_token = head;
-    let mut view = LayoutView::Default;
-    let display = match metric_token.rsplit_once('!') {
-        Some((prefix, suffix)) => {
-            metric_token = prefix;
-            DisplayMode::parse(suffix).ok_or_else(|| format!("unknown display mode: {suffix}"))?
-        }
-        None => DisplayMode::Full,
-    };
-
-    let mut suffixes = Vec::new();
-    while let Some((prefix, suffix)) = metric_token.rsplit_once('.') {
-        if LayoutView::parse(suffix).is_some() {
-            suffixes.push(suffix);
-            metric_token = prefix;
-            continue;
-        }
-        break;
-    }
-    suffixes.reverse();
-
-    for suffix in suffixes {
-        let Some(parsed_view) = LayoutView::parse(suffix) else {
-            return Err(format!("unknown metric view: {suffix}"));
-        };
-        if view != LayoutView::Default {
-            return Err(format!("duplicate metric view: {suffix}"));
-        }
-        view = parsed_view;
-    }
+    let (metric_token, modifiers) = parse_item_modifiers(head)?;
 
     if !metric_token.starts_with("f:") && !metric_token.starts_with("p:") {
-        if let Some((_, suffix)) = metric_token.rsplit_once('.') {
-            return Err(format!("unknown metric view: {suffix}"));
+        if metric_token.contains('.') {
+            return Err(unknown_item_modifier(&metric_token));
         }
     }
 
@@ -1446,60 +1542,72 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
         return Ok(Item::stream_column(
             label,
             parsed_column - 1,
-            display,
+            modifiers.display,
             size,
             max_width,
             min_width,
-        ));
+        )
+        .with_invert_vertical(modifiers.invert_vertical));
     }
-    if let Some(path) = metric_token.strip_prefix("f:") {
-        let path = path.trim();
-        if path.is_empty() {
-            return Err("f: source path must be non-empty".to_owned());
-        }
-        return Ok(Item::file(
-            label,
-            PathBuf::from(path),
-            display,
-            size,
-            max_width,
-            min_width,
-        ));
-    }
-    if let Some(command) = metric_token.strip_prefix("p:") {
-        let command = command.trim();
-        if command.is_empty() {
-            return Err("p: source command must be non-empty".to_owned());
-        }
-        return Ok(Item::process(
-            label,
-            command.to_owned(),
-            display,
-            size,
-            max_width,
-            min_width,
-        ));
+    if let Some(source) = parse_external_source_token(&metric_token)? {
+        let item = match source {
+            Source::File(path) => {
+                Item::file(label, path, modifiers.display, size, max_width, min_width)
+            }
+            Source::Process(command) => Item::process(
+                label,
+                command,
+                modifiers.display,
+                size,
+                max_width,
+                min_width,
+            ),
+            Source::Metric(_)
+            | Source::RndInstance(_)
+            | Source::SplitMetric(_, _)
+            | Source::StreamColumn(_) => unreachable!("external source parser returns only p:/f:"),
+        };
+        return Ok(item.with_invert_vertical(modifiers.invert_vertical));
     }
 
     if let Some((upper, lower)) = metric_token.split_once('+') {
         let upper = MetricKind::parse(upper).ok_or_else(|| format!("unknown metric: {upper}"))?;
         let lower = MetricKind::parse(lower).ok_or_else(|| format!("unknown metric: {lower}"))?;
         return Ok(Item::split_metric(
-            label, upper, lower, display, size, max_width, min_width,
-        ));
+            label,
+            upper,
+            lower,
+            modifiers.display,
+            size,
+            max_width,
+            min_width,
+        )
+        .with_invert_vertical(modifiers.invert_vertical));
     }
 
-    let metric =
-        MetricKind::parse(metric_token).ok_or_else(|| format!("unknown metric: {metric_token}"))?;
+    let metric = MetricKind::parse(&metric_token)
+        .ok_or_else(|| format!("unknown metric: {metric_token}"))?;
     Ok(Item {
         label,
         source: Source::Metric(metric),
-        view,
-        display,
+        view: modifiers.view,
+        display: modifiers.display,
+        invert_vertical: modifiers.invert_vertical,
         size,
         max_width,
         min_width,
     })
+}
+
+fn strip_wrapped_quotes(raw: &str) -> &str {
+    if raw.len() >= 2
+        && ((raw.starts_with('\'') && raw.ends_with('\''))
+            || (raw.starts_with('"') && raw.ends_with('"')))
+    {
+        &raw[1..raw.len() - 1]
+    } else {
+        raw
+    }
 }
 
 fn parse_positive_suffix<'a>(
@@ -1682,6 +1790,27 @@ mod tests {
     }
 
     #[test]
+    fn external_source_token_strips_wrapped_quotes() {
+        assert_eq!(
+            parse_external_source_token("p:'echo 100'").unwrap(),
+            Some(Source::Process("echo 100".to_owned()))
+        );
+        assert_eq!(
+            parse_external_source_token("f:\"/tmp/example\"").unwrap(),
+            Some(Source::File(PathBuf::from("/tmp/example")))
+        );
+    }
+
+    #[test]
+    fn layout_part_item_preserves_process_modifiers_after_quote_normalization() {
+        let item = parse_layout_part_item("load=p:'echo 100'.value.inv").unwrap();
+        assert_eq!(item.label(), Some("load"));
+        assert_eq!(item.source(), &Source::Process("echo 100".to_owned()));
+        assert_eq!(item.display(), DisplayMode::Value);
+        assert!(item.invert_vertical());
+    }
+
+    #[test]
     fn document_parser_handles_split_metric_sources() {
         let document = parse_layout_document("spcram=(spc+ram)").unwrap();
         assert_eq!(document.rows().len(), 1);
@@ -1705,7 +1834,7 @@ mod tests {
 
     #[test]
     fn document_lowering_matches_current_layout_behavior() {
-        let document = parse_layout_document("cpu:3 ram!value+8-2").unwrap();
+        let document = parse_layout_document("cpu:3 ram.value+8-2").unwrap();
         let layout = document.lower().unwrap();
         let item0 = layout.rows()[0][0];
         let item1 = layout.rows()[0][1];
@@ -1958,6 +2087,18 @@ mod tests {
     }
 
     #[test]
+    fn grouped_metric_aliases_accept_unified_modifiers() {
+        let layout = parse_layout_spec("xpu.value.inv mem.bare").unwrap();
+        assert_eq!(layout.rows().len(), 1);
+        assert!(layout.rows()[0][0..2]
+            .iter()
+            .all(|item| item.display() == DisplayMode::Value && item.invert_vertical()));
+        assert!(layout.rows()[0][2..4]
+            .iter()
+            .all(|item| item.display() == DisplayMode::Bare && !item.invert_vertical()));
+    }
+
+    #[test]
     fn avail_view_expands_to_the_full_metric_set_with_that_view() {
         let layout = parse_layout_spec("avail.pct").unwrap();
         assert_eq!(
@@ -2186,6 +2327,17 @@ mod tests {
     }
 
     #[test]
+    fn dot_modifier_chain_applies_view_display_and_inversion() {
+        let layout = parse_layout_spec("cpu.abs.value.inv").unwrap();
+        let item = layout.rows()[0][0];
+
+        assert_eq!(item.metric(), MetricKind::Cpu);
+        assert_eq!(item.view(), LayoutView::Abs);
+        assert_eq!(item.display(), DisplayMode::Value);
+        assert!(item.invert_vertical());
+    }
+
+    #[test]
     fn mixed_item_syntax_conformance_matrix() {
         let cases = vec![
             (
@@ -2348,20 +2500,30 @@ mod tests {
     }
 
     #[test]
-    fn parses_display_modes_with_bang_marker() {
-        let document = parse_layout_document("cpu!bare ram.abs!value @12!full").unwrap();
+    fn parses_display_modes_with_dot_modifiers() {
+        let document = parse_layout_document("cpu.bare ram.abs.value @12.full net.inv").unwrap();
         let items = document.rows()[0].items();
         assert_eq!(items[0].display(), DisplayMode::Bare);
         assert_eq!(items[1].view(), LayoutView::Abs);
         assert_eq!(items[1].display(), DisplayMode::Value);
         assert_eq!(items[2].display(), DisplayMode::Full);
         assert_eq!(items[2].source(), &Source::StreamColumn(11));
+        assert!(items[3].invert_vertical());
     }
 
     #[test]
-    fn rejects_old_dot_display_syntax() {
-        let error = parse_layout_document("cpu.bare").unwrap_err();
-        assert!(error.contains("unknown metric view"));
+    fn legacy_bang_display_syntax_still_works() {
+        let document = parse_layout_document("cpu!bare ram.abs!value @12!full").unwrap();
+        let items = document.rows()[0].items();
+        assert_eq!(items[0].display(), DisplayMode::Bare);
+        assert_eq!(items[1].display(), DisplayMode::Value);
+        assert_eq!(items[2].display(), DisplayMode::Full);
+    }
+
+    #[test]
+    fn rejects_unknown_dot_modifiers() {
+        let error = parse_layout_document("cpu.wat").unwrap_err();
+        assert!(error.contains("unknown item modifier"));
     }
 
     #[test]
