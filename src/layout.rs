@@ -166,6 +166,16 @@ impl MetricKind {
         }
     }
 
+    pub fn split_alias_for_pair(upper: Self, lower: Self) -> Option<Self> {
+        match (upper, lower) {
+            (Self::Cpu, Self::Memory) => Some(Self::Sys),
+            (Self::Gpu, Self::Vram) => Some(Self::Gfx),
+            (Self::In, Self::Out) => Some(Self::Io),
+            (Self::Ingress, Self::Egress) => Some(Self::Net),
+            _ => None,
+        }
+    }
+
     pub fn is_split(self) -> bool {
         matches!(self, Self::Sys | Self::Gfx | Self::Io | Self::Net)
     }
@@ -1573,6 +1583,18 @@ fn parse_document_source_item(label: Option<String>, token: &str) -> Result<Item
     if let Some((upper, lower)) = metric_token.split_once('+') {
         let upper = MetricKind::parse(upper).ok_or_else(|| format!("unknown metric: {upper}"))?;
         let lower = MetricKind::parse(lower).ok_or_else(|| format!("unknown metric: {lower}"))?;
+        if let Some(metric) = MetricKind::split_alias_for_pair(upper, lower) {
+            return Ok(Item {
+                label,
+                source: Source::Metric(metric),
+                view: modifiers.view,
+                display: modifiers.display,
+                invert_vertical: modifiers.invert_vertical,
+                size,
+                max_width,
+                min_width,
+            });
+        }
         return Ok(Item::split_metric(
             label,
             upper,
@@ -1806,6 +1828,14 @@ mod tests {
         let item = parse_layout_part_item("load=p:'echo 100'.value.inv").unwrap();
         assert_eq!(item.label(), Some("load"));
         assert_eq!(item.source(), &Source::Process("echo 100".to_owned()));
+        assert_eq!(item.display(), DisplayMode::Value);
+        assert!(item.invert_vertical());
+    }
+
+    #[test]
+    fn layout_part_item_normalizes_documented_split_alias_pairs() {
+        let item = parse_layout_part_item("rx+tx.value.inv").unwrap();
+        assert_eq!(item.source(), &Source::Metric(MetricKind::Net));
         assert_eq!(item.display(), DisplayMode::Value);
         assert!(item.invert_vertical());
     }

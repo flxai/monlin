@@ -230,6 +230,29 @@ fn native_multiline_invert_layout_runs_successfully() {
 }
 
 #[test]
+fn documented_split_pair_renders_as_metric_alias() {
+    let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
+        .args([
+            "--once",
+            "--interval-ms",
+            "0",
+            "--width",
+            "32",
+            "--renderer",
+            "braille",
+            "--color",
+            "never",
+            "rx+tx",
+        ])
+        .output()
+        .expect("failed to run monlin with rx+tx layout");
+
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("net"), "{stdout}");
+}
+
+#[test]
 fn once_mode_exits_successfully() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([
