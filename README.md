@@ -38,7 +38,7 @@ Explicit stdin columns:
 
 ```sh
 printf '10 20 30\n' | monlin '@1 @2 @3'
-printf '10 20 30\n' | monlin '@1!bare @2!bare @3!bare'
+printf '10 20 30\n' | monlin '@1.bare @2.bare @3.bare'
 ```
 
 Polled sources:
@@ -83,8 +83,10 @@ Later layers override earlier ones.
 Example:
 
 ```toml
+align = "right"
 colors = "gruvbox"
 solid_colors = true
+invert_vertical = false
 history = 128
 interval_ms = 250
 window = "tail"
@@ -96,6 +98,9 @@ List-like fields can also be written as arrays:
 ```toml
 colors = ["gruvbox", "320"]
 ```
+
+Boolean config values are explicit, so `solid_colors = false` or `invert_vertical = false`
+can override an earlier config layer that enabled them.
 
 ## Layout DSL
 
@@ -114,24 +119,26 @@ whole layout when it contains spaces, parentheses, or `p:...` commands.
 The canonical item syntax is:
 
 ```text
-source[.value_mode][!display_mode][:size][+max][-min]
+source[.modifier...][:size][+max][-min]
 ```
 
 Examples:
 
 ```sh
 monlin "cpu"
-monlin "cpu.abs!value"
-monlin "cpu.abs!value:12+20-8"
-monlin "@1!bare"
+monlin "cpu.abs.value"
+monlin "cpu.abs.value:12+20-8"
+monlin "rx tx, rx.inv tx.inv"
+monlin "@1.bare"
 monlin "temp=p:printf '42\n'"
+monlin "a=p:'printf 10'," "b=p:'printf 20'.inv"
 ```
 
-Read `cpu.abs!value:12+20-8` left to right:
+Read `cpu.abs.value:12+20-8` left to right:
 
 - `cpu`: source
 - `.abs`: absolute value mode
-- `!value`: show only the value text, not the label
+- `.value`: show only the value text, not the label
 - `:12`: basis width
 - `+20`: maximum width
 - `-8`: preferred minimum width
@@ -147,15 +154,25 @@ An item can be:
 Modifiers:
 
 - `.pct` or `.abs` selects the value mode
-- `!full`, `!value`, or `!bare` selects how much text to show
+- `.full`, `.value`, or `.bare` selects how much text to show
+- `.inv` flips the graph vertically for that item
 - `:size` sets the item's basis width
 - `+max` caps how wide the item may expand
 - `-min` asks for at least that many columns when there is room
+
+Legacy `!full`, `!value`, and `!bare` suffixes are still accepted for compatibility.
 
 Items on the same row are separated by spaces. Rows are separated by:
 
 - `,`
 - or a literal newline
+
+Shell arguments are still joined with spaces before parsing, so a trailing comma at
+an argv boundary still means "end this row". For example:
+
+```sh
+monlin "a=p:'printf 10'," "b=p:'printf 20'.inv"
+```
 
 Without explicit row separators, flat layouts auto-wrap after 5 items.
 
@@ -183,9 +200,11 @@ monlin "cpu ram spc io net"
 monlin "xpu mem spc, io net"
 monlin "spcram=(spc+ram)"
 monlin "spcram=(spc,ram)"
+monlin "rx tx, rx.inv tx.inv"
 monlin "graph=(cpu=@1 ram=@2)"
 monlin "disk=(in.abs out.abs) net=(rx.abs tx.abs)"
 monlin "a=p:printf '10\n' b=p:printf '20\n'"
+monlin "a=p:'printf 10'," "b=p:'printf 20'.inv"
 ```
 
 ## Sources, Aliases, And Defaults
@@ -244,11 +263,19 @@ Value modes:
 - `.pct`
 - `.abs`
 
-Display modes:
+Display modifiers:
 
-- `!full`
-- `!value`
-- `!bare`
+- `.full`
+- `.value`
+- `.bare`
+
+Graph modifiers:
+
+- `.inv`
+
+Graph modifiers:
+
+- `.inv`
 
 Defaults are metric-aware:
 
@@ -273,7 +300,8 @@ Core flags:
 - `--align left|right`
 - `-w`, `--window tail|agg`
 - `-p`, `--packed`
-- `--solid-colors`
+- `--solid-colors`, `--no-solid-colors`
+- `--invert-vertical`, `--no-invert-vertical`
 - `-e`, `--engine auto|flow|flex|grid|pack`
 - `--renderer braille|block`
 - `-c`, `--colors ...`
@@ -289,6 +317,7 @@ Examples:
 monlin avail --history 512 -i 1000
 monlin io net --renderer block
 monlin -c gruvbox --solid-colors
+monlin --invert-vertical io net
 monlin --output i3bar all
 ```
 

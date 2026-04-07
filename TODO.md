@@ -22,7 +22,14 @@
 ## Layout DSL
 
 - Keep the current grammar small unless a real need appears:
-  - `source[.value_mode][.display_mode][:size][+max][-min]`
+  - `source[.modifier...][:size][+max][-min]`
+  - modifiers:
+    - `.pct`
+    - `.abs`
+    - `.full`
+    - `.value`
+    - `.bare`
+    - `.inv`
   - labels via `label=source`
   - groups via `label=(...)`
   - row separators via `,`
