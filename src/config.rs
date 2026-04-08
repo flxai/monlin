@@ -694,12 +694,10 @@ fn load_config_args_from_path(
 
 fn default_config_sources_for(search_env: &ConfigSearchEnv) -> Vec<ConfigSource> {
     let mut sources = system_config_sources_for(&search_env.xdg_config_dirs);
-    if let Some(source) = user_config_source_for(
+    sources.extend(user_config_sources_for(
         search_env.xdg_config_home.as_deref(),
         search_env.home.as_deref(),
-    ) {
-        sources.push(source);
-    }
+    ));
     sources
 }
 
@@ -713,16 +711,27 @@ fn system_config_sources_for(dirs: &[PathBuf]) -> Vec<ConfigSource> {
     sources
 }
 
-fn user_config_source_for(
+fn user_config_sources_for(
     xdg_config_home: Option<&Path>,
     home: Option<&Path>,
-) -> Option<ConfigSource> {
+) -> Vec<ConfigSource> {
+    let mut sources = Vec::new();
+
     if let Some(xdg_config_home) = xdg_config_home {
-        return config_source_in_root(&xdg_config_home.join("monlin"));
+        if let Some(source) = config_source_in_root(&xdg_config_home.join("monlin")) {
+            sources.push(source);
+        }
     }
 
-    let home = home?;
-    config_source_in_root(&home.join(".config").join("monlin"))
+    if let Some(home) = home {
+        if let Some(source) = config_source_in_root(&home.join(".config").join("monlin")) {
+            if !sources.iter().any(|existing| existing.path == source.path) {
+                sources.push(source);
+            }
+        }
+    }
+
+    sources
 }
 
 fn config_source_in_root(root: &Path) -> Option<ConfigSource> {
@@ -1443,6 +1452,56 @@ mod tests {
         assert_eq!(config.align, Align::Right);
         assert_eq!(config.renderer, Renderer::Braille);
         assert_eq!(config.width, Some(123));
+    }
+
+    #[test]
+    fn home_fallback_config_loads_when_xdg_config_home_is_set_but_missing() {
+        let root = unique_temp_dir("home-fallback-with-xdg");
+        let system = root.join("system");
+        let home = root.join("home");
+        let home_config = home.join(".config").join("monlin");
+        fs::create_dir_all(&home_config).unwrap();
+
+        fs::write(home_config.join("config.toml"), "colors = \"gruvbox\"\n").unwrap();
+
+        let search_env = config_search_env(Some(root.join("xdg")), vec![system], Some(home));
+        let args = resolve_args_with_config_for(vec!["monlin".to_owned()], &search_env).unwrap();
+
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(args, vec!["monlin", "--colors", "gruvbox"]);
+    }
+
+    #[test]
+    fn xdg_and_home_fallback_user_configs_merge_in_documented_order() {
+        let root = unique_temp_dir("xdg-home-merge");
+        let system = root.join("system");
+        let xdg_user = root.join("xdg-user").join("monlin");
+        let home = root.join("home");
+        let home_user = home.join(".config").join("monlin");
+        fs::create_dir_all(&xdg_user).unwrap();
+        fs::create_dir_all(&home_user).unwrap();
+
+        fs::write(
+            xdg_user.join("config.toml"),
+            "align = \"left\"\nrenderer = \"block\"\n",
+        )
+        .unwrap();
+        fs::write(
+            home_user.join("config.toml"),
+            "renderer = \"braille\"\nwidth = 77\n",
+        )
+        .unwrap();
+
+        let search_env = config_search_env(Some(root.join("xdg-user")), vec![system], Some(home));
+        let args = resolve_args_with_config_for(vec!["monlin".to_owned()], &search_env).unwrap();
+        let config = parse_args_from_vec(args).unwrap();
+
+        fs::remove_dir_all(&root).ok();
+
+        assert_eq!(config.align, Align::Left);
+        assert_eq!(config.renderer, Renderer::Braille);
+        assert_eq!(config.width, Some(77));
     }
 
     #[test]
