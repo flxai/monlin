@@ -289,6 +289,7 @@ struct Cli {
     packed: bool,
 
     #[arg(
+        short = 's',
         long = "solid-colors",
         action = ArgAction::SetTrue,
         overrides_with = "no_solid_colors",
@@ -1579,6 +1580,12 @@ mod tests {
     #[test]
     fn parses_solid_colors_flag() {
         let config = parse(&["monlin", "--solid-colors"]);
+        assert!(config.solid_colors);
+    }
+
+    #[test]
+    fn parses_short_solid_colors_flag() {
+        let config = parse(&["monlin", "-s"]);
         assert!(config.solid_colors);
     }
 

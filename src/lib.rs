@@ -327,6 +327,7 @@ _monlin() {{
     '--window:How to display retained history'
     '-p:Render packed graph-only output without labels, values, or inter-item spacing'
     '--packed:Render packed graph-only output without labels, values, or inter-item spacing'
+    '-s:Disable palette or theme shading for full-intensity colors'
     '--solid-colors:Disable palette or theme shading for full-intensity colors'
     '--no-solid-colors:Use palette or theme shading for non-colormap colors'
     '--invert-vertical:Flip graph fill direction vertically'
@@ -2624,6 +2625,7 @@ mod tests {
         let script = zsh_completion_script();
         assert!(script.contains("modifier_suffixes=(pct abs full value bare inv)"));
         assert!(script.contains("${token}.\" -- $modifier_suffixes"));
+        assert!(script.contains("-s:Disable palette or theme shading for full-intensity colors"));
         assert!(script.contains("--solid-colors"));
         assert!(script.contains("--no-solid-colors"));
         assert!(script.contains("--invert-vertical"));

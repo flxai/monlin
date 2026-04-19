@@ -300,7 +300,7 @@ Core flags:
 - `--align left|right`
 - `-w`, `--window tail|agg`
 - `-p`, `--packed`
-- `--solid-colors`, `--no-solid-colors`
+- `-s`, `--solid-colors`, `--no-solid-colors`
 - `--invert-vertical`, `--no-invert-vertical`
 - `-e`, `--engine auto|flow|flex|grid|pack`
 - `--renderer braille|block`
@@ -316,7 +316,7 @@ Examples:
 ```sh
 monlin avail --history 512 -i 1000
 monlin io net --renderer block
-monlin -c gruvbox --solid-colors
+monlin -c gruvbox -s
 monlin --invert-vertical io net
 monlin --output i3bar all
 ```
