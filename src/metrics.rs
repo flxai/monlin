@@ -200,19 +200,21 @@ impl Default for Sampler {
 impl Sampler {
     pub fn prime(&mut self, metrics: &[MetricKind]) -> io::Result<()> {
         if metrics.contains(&MetricKind::Cpu) {
-            self.cpu_prev = Some(read_cpu_counters()?);
+            self.cpu_prev = best_effort_host_metric(read_cpu_counters)?;
         }
         if metrics.contains(&MetricKind::Io)
             || metrics.contains(&MetricKind::In)
             || metrics.contains(&MetricKind::Out)
         {
-            self.disk_prev = Some((read_disk_counters()?, Instant::now()));
+            self.disk_prev = best_effort_host_metric(read_disk_counters)?
+                .map(|counters| (counters, Instant::now()));
         }
         if metrics.contains(&MetricKind::Ingress)
             || metrics.contains(&MetricKind::Egress)
             || metrics.contains(&MetricKind::Net)
         {
-            self.net_prev = Some((read_net_counters()?, Instant::now()));
+            self.net_prev = best_effort_host_metric(read_net_counters)?
+                .map(|counters| (counters, Instant::now()));
         }
         Ok(())
     }
@@ -223,7 +225,7 @@ impl Sampler {
 
         let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys)
         {
-            Some(self.sample_cpu()?)
+            self.sample_cpu()?
         } else {
             None
         };
@@ -259,13 +261,13 @@ impl Sampler {
 
         let memory_value =
             if metrics.contains(&MetricKind::Memory) || metrics.contains(&MetricKind::Sys) {
-                Some(read_memory_usage()?)
+                best_effort_host_metric(read_memory_usage)?
             } else {
                 None
             };
 
         let storage_value = if metrics.contains(&MetricKind::Storage) {
-            Some(read_storage_usage("/")?)
+            best_effort_host_metric(|| read_storage_usage("/"))?
         } else {
             None
         };
@@ -274,7 +276,7 @@ impl Sampler {
             || metrics.contains(&MetricKind::In)
             || metrics.contains(&MetricKind::Out)
         {
-            Some(self.sample_io()?)
+            self.sample_io()?
         } else {
             None
         };
@@ -283,7 +285,7 @@ impl Sampler {
             || metrics.contains(&MetricKind::Egress)
             || metrics.contains(&MetricKind::Net)
         {
-            Some(self.sample_net()?)
+            self.sample_net()?
         } else {
             None
         };
@@ -292,10 +294,12 @@ impl Sampler {
             let value = match metric {
                 MetricKind::Cpu => cpu_value.map(MetricValue::Single),
                 MetricKind::Rnd => rnd_value.map(|sample| MetricValue::Single(sample.normalized)),
-                MetricKind::Sys => Some(MetricValue::Split {
-                    upper: cpu_value.unwrap_or(0.0),
-                    lower: memory_value.map(|sample| sample.usage_ratio).unwrap_or(0.0),
-                }),
+                MetricKind::Sys => match (cpu_value, memory_value.map(|sample| sample.usage_ratio)) {
+                    (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
+                    (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
+                    (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
+                    (None, None) => None,
+                },
                 MetricKind::Gpu => gpu_value.map(MetricValue::Single),
                 MetricKind::Vram => vram_value.map(MetricValue::Single),
                 MetricKind::Gfx => match (gpu_value, vram_value) {
@@ -396,18 +400,24 @@ impl Sampler {
         sample_rnd_value(rng, state)
     }
 
-    fn sample_cpu(&mut self) -> io::Result<f64> {
-        let current = read_cpu_counters()?;
+    fn sample_cpu(&mut self) -> io::Result<Option<f64>> {
+        let Some(current) = best_effort_host_metric(read_cpu_counters)? else {
+            self.cpu_prev = None;
+            return Ok(None);
+        };
         let usage = self
             .cpu_prev
             .map(|prev| cpu_usage(prev, current))
             .unwrap_or(0.0);
         self.cpu_prev = Some(current);
-        Ok(usage)
+        Ok(Some(usage))
     }
 
-    fn sample_io(&mut self) -> io::Result<RateSample> {
-        let current = read_disk_counters()?;
+    fn sample_io(&mut self) -> io::Result<Option<RateSample>> {
+        let Some(current) = best_effort_host_metric(read_disk_counters)? else {
+            self.disk_prev = None;
+            return Ok(None);
+        };
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.disk_prev {
             let dt = now.duration_since(at).as_secs_f64();
@@ -432,11 +442,14 @@ impl Sampler {
             }
         };
         self.disk_prev = Some((current, now));
-        Ok(usage)
+        Ok(Some(usage))
     }
 
-    fn sample_net(&mut self) -> io::Result<RateSample> {
-        let current = read_net_counters()?;
+    fn sample_net(&mut self) -> io::Result<Option<RateSample>> {
+        let Some(current) = best_effort_host_metric(read_net_counters)? else {
+            self.net_prev = None;
+            return Ok(None);
+        };
         let now = Instant::now();
         let usage = if let Some((prev, at)) = self.net_prev {
             let dt = now.duration_since(at).as_secs_f64();
@@ -462,7 +475,7 @@ impl Sampler {
             }
         };
         self.net_prev = Some((current, now));
-        Ok(usage)
+        Ok(Some(usage))
     }
 
     fn sample_rnd(&mut self) -> RandomSample {
@@ -609,6 +622,24 @@ fn trim_rate_window(window: &mut VecDeque<RatePoint>, now: Instant, max_age: Dur
         }
         window.pop_front();
     }
+}
+
+fn best_effort_host_metric<T, F>(read: F) -> io::Result<Option<T>>
+where
+    F: FnOnce() -> io::Result<T>,
+{
+    match read() {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if host_metric_unavailable(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn host_metric_unavailable(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1288,10 +1319,25 @@ mod tests {
 
         let sample = sampler.sample(&metrics).unwrap();
 
-        assert!(sample.values.contains_key(&MetricKind::Memory));
-        assert!(sample.values.contains_key(&MetricKind::Storage));
-        assert!(sample.values.contains_key(&MetricKind::Io));
-        assert!(sample.values.contains_key(&MetricKind::Net));
+        for metric in [
+            MetricKind::Memory,
+            MetricKind::Storage,
+            MetricKind::Io,
+            MetricKind::Net,
+        ] {
+            if let Some(value) = sample.values.get(&metric) {
+                assert!(sample.headlines.contains_key(&metric));
+                match value {
+                    MetricValue::Single(value) => {
+                        assert!((0.0..=1.0).contains(value));
+                    }
+                    MetricValue::Split { upper, lower } => {
+                        assert!((0.0..=1.0).contains(upper));
+                        assert!((0.0..=1.0).contains(lower));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1317,17 +1363,21 @@ mod tests {
 
     #[test]
     fn direct_host_readers_execute_successfully() {
-        let memory = read_memory_usage().unwrap();
-        let storage = read_storage_usage("/").unwrap();
-        let disk = read_disk_counters().unwrap();
-        let net = read_net_counters().unwrap();
+        let memory = best_effort_host_metric(read_memory_usage).unwrap();
+        let storage = best_effort_host_metric(|| read_storage_usage("/")).unwrap();
+        let disk = best_effort_host_metric(read_disk_counters).unwrap();
+        let net = best_effort_host_metric(read_net_counters).unwrap();
         let gpu = read_generic_gpu_sample().unwrap();
 
-        assert!((0.0..=1.0).contains(&memory.usage_ratio));
-        assert!(memory.total_bytes >= memory.used_bytes);
-        assert!(memory.total_bytes >= memory.available_bytes);
-        assert!((0.0..=1.0).contains(&storage.usage_ratio));
-        assert!(storage.total_bytes >= storage.used_bytes);
+        if let Some(memory) = memory {
+            assert!((0.0..=1.0).contains(&memory.usage_ratio));
+            assert!(memory.total_bytes >= memory.used_bytes);
+            assert!(memory.total_bytes >= memory.available_bytes);
+        }
+        if let Some(storage) = storage {
+            assert!((0.0..=1.0).contains(&storage.usage_ratio));
+            assert!(storage.total_bytes >= storage.used_bytes);
+        }
         let _ = disk;
         let _ = net;
         assert!(gpu

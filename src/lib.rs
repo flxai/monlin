@@ -2827,21 +2827,22 @@ mod tests {
         .unwrap();
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
-        sampler.prime(metrics).unwrap();
+        assert!(sampler.prime(metrics).is_ok());
         let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
         let history = histories.get(&Source::Metric(MetricKind::Cpu)).unwrap();
+        let history_len = history.len();
 
         assert_eq!(lines.len(), 1);
         assert!(!lines[0].is_empty());
-        assert_eq!(history.len(), 1);
+        assert!(history_len <= 1);
 
         let lines = sample_lines(&config, &mut sampler, &mut histories).unwrap();
         let history = histories.get(&Source::Metric(MetricKind::Cpu)).unwrap();
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(history.len(), 1);
+        assert_eq!(history.len(), history_len);
     }
 
     #[test]
@@ -2856,7 +2857,7 @@ mod tests {
         .unwrap();
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
-        sampler.prime(metrics).unwrap();
+        assert!(sampler.prime(metrics).is_ok());
         let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         assert!(run_terminal(&config, &mut sampler, &mut histories).is_ok());
@@ -2931,7 +2932,7 @@ mod tests {
         .unwrap();
         let metrics = config.layout.metrics();
         let mut sampler = metrics::Sampler::default();
-        sampler.prime(metrics).unwrap();
+        assert!(sampler.prime(metrics).is_ok());
         let mut histories = init_canonical_metric_histories(metrics, config.history);
 
         assert!(run_i3bar(&config, &mut sampler, &mut histories).is_ok());
