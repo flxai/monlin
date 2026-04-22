@@ -3,12 +3,14 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum MetricKind {
     Cpu,
+    Xpu,
     Rnd,
     Sys,
     Gpu,
     Vram,
     Gfx,
     Memory,
+    Mem,
     Storage,
     Io,
     Net,
@@ -84,7 +86,7 @@ impl ItemModifier {
 pub fn completion_source_specs() -> &'static [(&'static str, &'static str)] {
     &[
         ("cpu", "CPU usage"),
-        ("xpu", "CPU and GPU pair"),
+        ("xpu", "CPU and GPU split metric"),
         ("rnd", "Synthetic random metric"),
         ("sys", "CPU and RAM split"),
         ("gpu", "GPU utilization"),
@@ -92,7 +94,7 @@ pub fn completion_source_specs() -> &'static [(&'static str, &'static str)] {
         ("vrm", "VRAM usage"),
         ("gfx", "GPU and VRAM split"),
         ("memory", "RAM usage"),
-        ("mem", "RAM and VRAM pair"),
+        ("mem", "RAM and VRAM split"),
         ("ram", "RAM usage"),
         ("storage", "Storage usage"),
         ("disk", "Storage usage"),
@@ -130,12 +132,14 @@ impl MetricKind {
     pub fn parse(token: &str) -> Option<Self> {
         match token {
             "cpu" => Some(Self::Cpu),
+            "xpu" => Some(Self::Xpu),
             "rnd" | "random" => Some(Self::Rnd),
             "sys" => Some(Self::Sys),
             "gpu" => Some(Self::Gpu),
             "vram" | "vrm" => Some(Self::Vram),
             "gfx" => Some(Self::Gfx),
             "memory" | "ram" => Some(Self::Memory),
+            "mem" => Some(Self::Mem),
             "storage" | "disk" | "space" | "spc" => Some(Self::Storage),
             "io" => Some(Self::Io),
             "net" => Some(Self::Net),
@@ -150,12 +154,14 @@ impl MetricKind {
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Cpu => "cpu",
+            Self::Xpu => "xpu",
             Self::Rnd => "rnd",
             Self::Sys => "sys",
             Self::Gpu => "gpu",
             Self::Vram => "vram",
             Self::Gfx => "gfx",
             Self::Memory => "ram",
+            Self::Mem => "mem",
             Self::Storage => "spc",
             Self::Io => "io",
             Self::Net => "net",
@@ -168,8 +174,10 @@ impl MetricKind {
 
     pub fn split_alias_for_pair(upper: Self, lower: Self) -> Option<Self> {
         match (upper, lower) {
+            (Self::Cpu, Self::Gpu) => Some(Self::Xpu),
             (Self::Cpu, Self::Memory) => Some(Self::Sys),
             (Self::Gpu, Self::Vram) => Some(Self::Gfx),
+            (Self::Memory, Self::Vram) => Some(Self::Mem),
             (Self::In, Self::Out) => Some(Self::Io),
             (Self::Ingress, Self::Egress) => Some(Self::Net),
             _ => None,
@@ -177,7 +185,10 @@ impl MetricKind {
     }
 
     pub fn is_split(self) -> bool {
-        matches!(self, Self::Sys | Self::Gfx | Self::Io | Self::Net)
+        matches!(
+            self,
+            Self::Xpu | Self::Sys | Self::Gfx | Self::Mem | Self::Io | Self::Net
+        )
     }
 
     pub fn default_view(self) -> LayoutView {
@@ -186,9 +197,14 @@ impl MetricKind {
                 LayoutView::Abs
             }
             Self::Memory | Self::Storage => LayoutView::Abs,
-            Self::Cpu | Self::Rnd | Self::Sys | Self::Gpu | Self::Vram | Self::Gfx => {
-                LayoutView::Pct
-            }
+            Self::Cpu
+            | Self::Xpu
+            | Self::Rnd
+            | Self::Sys
+            | Self::Gpu
+            | Self::Vram
+            | Self::Gfx
+            | Self::Mem => LayoutView::Pct,
         }
     }
 
@@ -235,11 +251,13 @@ fn format_percent(metric: MetricKind, value: f64) -> String {
     match metric {
         MetricKind::Vram => percent,
         MetricKind::Cpu
+        | MetricKind::Xpu
         | MetricKind::Rnd
         | MetricKind::Sys
         | MetricKind::Gpu
         | MetricKind::Gfx
         | MetricKind::Memory
+        | MetricKind::Mem
         | MetricKind::Storage
         | MetricKind::Io
         | MetricKind::Net
@@ -1158,10 +1176,6 @@ fn parse_document_entry(
         }
     }
 
-    if let Some(items) = parse_group_alias_items(&token)? {
-        return Ok(vec![Row::new(None, items)]);
-    }
-
     if matches!(parser.peek(), Some(LayoutToken::Equals))
         && matches!(parser.peek_n(1), Some(LayoutToken::Word(_)))
     {
@@ -1439,47 +1453,6 @@ fn parse_all_items(token: &str) -> Result<Option<ParsedEntry>, String> {
     }))
 }
 
-fn parse_group_alias_items(token: &str) -> Result<Option<Vec<Item>>, String> {
-    if !(token == "xpu"
-        || token == "mem"
-        || token.starts_with("xpu.")
-        || token.starts_with("mem.")
-        || token.starts_with("xpu!")
-        || token.starts_with("mem!"))
-    {
-        return Ok(None);
-    }
-
-    if token.contains('/') || token.contains(':') || token.contains('+') || token.contains('-') {
-        return Err(if token.starts_with("xpu") {
-            "xpu does not support size or width constraints".to_owned()
-        } else {
-            "mem does not support size or width constraints".to_owned()
-        });
-    }
-
-    let (token, modifiers) = parse_item_modifiers(token)?;
-    let metrics = if token == "xpu" {
-        vec![MetricKind::Cpu, MetricKind::Gpu]
-    } else if token == "mem" {
-        vec![MetricKind::Memory, MetricKind::Vram]
-    } else if token.starts_with("xpu.") || token.starts_with("mem.") {
-        return Err(unknown_item_modifier(&token));
-    } else {
-        unreachable!("non-alias tokens return early");
-    };
-
-    Ok(Some(
-        metrics
-            .into_iter()
-            .map(|metric| {
-                Item::metric(metric, modifiers.view, modifiers.display, 1, None, None)
-                    .with_invert_vertical(modifiers.invert_vertical)
-            })
-            .collect(),
-    ))
-}
-
 pub fn parse_external_source_token(raw: &str) -> Result<Option<Source>, String> {
     if let Some(path) = raw.strip_prefix("f:") {
         let path = strip_wrapped_quotes(path.trim());
@@ -1746,7 +1719,7 @@ mod tests {
                 MetricKind::Gfx,
                 MetricKind::Gpu,
                 MetricKind::Vram,
-                MetricKind::Memory,
+                MetricKind::Mem,
                 MetricKind::Net,
             ]
         );
@@ -1769,7 +1742,7 @@ mod tests {
                 .iter()
                 .map(|item| item.metric())
                 .collect::<Vec<_>>(),
-            [MetricKind::Memory, MetricKind::Vram, MetricKind::Net]
+            [MetricKind::Mem, MetricKind::Net]
         );
     }
 
@@ -1838,6 +1811,15 @@ mod tests {
         assert_eq!(item.source(), &Source::Metric(MetricKind::Net));
         assert_eq!(item.display(), DisplayMode::Value);
         assert!(item.invert_vertical());
+    }
+
+    #[test]
+    fn layout_part_item_normalizes_xpu_and_mem_split_pairs() {
+        let xpu = parse_layout_part_item("cpu+gpu").unwrap();
+        assert_eq!(xpu.source(), &Source::Metric(MetricKind::Xpu));
+
+        let mem = parse_layout_part_item("ram+vram").unwrap();
+        assert_eq!(mem.source(), &Source::Metric(MetricKind::Mem));
     }
 
     #[test]
@@ -1968,6 +1950,8 @@ mod tests {
     #[test]
     fn memory_and_gpu_use_new_labels() {
         assert_eq!(MetricKind::Memory.short_label(), "ram");
+        assert_eq!(MetricKind::Xpu.short_label(), "xpu");
+        assert_eq!(MetricKind::Mem.short_label(), "mem");
         assert_eq!(MetricKind::Storage.short_label(), "spc");
         assert_eq!(MetricKind::Rnd.short_label(), "rnd");
         assert_eq!(MetricKind::Sys.short_label(), "sys");
@@ -1988,8 +1972,10 @@ mod tests {
     #[test]
     fn default_views_match_metric_families() {
         assert_eq!(MetricKind::Cpu.default_view(), LayoutView::Pct);
+        assert_eq!(MetricKind::Xpu.default_view(), LayoutView::Pct);
         assert_eq!(MetricKind::Rnd.default_view(), LayoutView::Pct);
         assert_eq!(MetricKind::Memory.default_view(), LayoutView::Abs);
+        assert_eq!(MetricKind::Mem.default_view(), LayoutView::Pct);
         assert_eq!(MetricKind::Storage.default_view(), LayoutView::Abs);
         assert_eq!(MetricKind::Net.default_view(), LayoutView::Abs);
         assert_eq!(MetricKind::Ingress.default_view(), LayoutView::Abs);
@@ -2077,55 +2063,59 @@ mod tests {
     }
 
     #[test]
-    fn xpu_expands_to_cpu_and_gpu() {
+    fn xpu_maps_to_shared_cpu_gpu_metric() {
         let layout = parse_layout_spec("xpu").unwrap();
-        assert_eq!(layout.metrics(), &[MetricKind::Cpu, MetricKind::Gpu]);
+        assert_eq!(layout.metrics(), &[MetricKind::Xpu]);
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(
             layout.rows()[0]
                 .iter()
                 .map(|item| item.metric())
                 .collect::<Vec<_>>(),
-            [MetricKind::Cpu, MetricKind::Gpu]
+            [MetricKind::Xpu]
         );
     }
 
     #[test]
-    fn mem_expands_to_ram_and_vram() {
+    fn mem_maps_to_shared_ram_vram_metric() {
         let layout = parse_layout_spec("mem").unwrap();
-        assert_eq!(layout.metrics(), &[MetricKind::Memory, MetricKind::Vram]);
+        assert_eq!(layout.metrics(), &[MetricKind::Mem]);
         assert_eq!(layout.rows().len(), 1);
         assert_eq!(
             layout.rows()[0]
                 .iter()
                 .map(|item| item.metric())
                 .collect::<Vec<_>>(),
-            [MetricKind::Memory, MetricKind::Vram]
+            [MetricKind::Mem]
         );
     }
 
     #[test]
-    fn grouped_metric_aliases_accept_views() {
+    fn shared_metric_aliases_accept_views() {
         let layout = parse_layout_spec("xpu.pct mem.abs").unwrap();
         assert_eq!(layout.rows().len(), 1);
-        assert!(layout.rows()[0][0..2]
-            .iter()
-            .all(|item| item.view() == LayoutView::Pct));
-        assert!(layout.rows()[0][2..4]
-            .iter()
-            .all(|item| item.view() == LayoutView::Abs));
+        assert_eq!(
+            layout.rows()[0]
+                .iter()
+                .map(|item| (item.metric(), item.view()))
+                .collect::<Vec<_>>(),
+            vec![
+                (MetricKind::Xpu, LayoutView::Pct),
+                (MetricKind::Mem, LayoutView::Abs),
+            ]
+        );
     }
 
     #[test]
-    fn grouped_metric_aliases_accept_unified_modifiers() {
+    fn shared_metric_aliases_accept_unified_modifiers() {
         let layout = parse_layout_spec("xpu.value.inv mem.bare").unwrap();
         assert_eq!(layout.rows().len(), 1);
-        assert!(layout.rows()[0][0..2]
-            .iter()
-            .all(|item| item.display() == DisplayMode::Value && item.invert_vertical()));
-        assert!(layout.rows()[0][2..4]
-            .iter()
-            .all(|item| item.display() == DisplayMode::Bare && !item.invert_vertical()));
+        assert_eq!(layout.rows()[0][0].metric(), MetricKind::Xpu);
+        assert_eq!(layout.rows()[0][0].display(), DisplayMode::Value);
+        assert!(layout.rows()[0][0].invert_vertical());
+        assert_eq!(layout.rows()[0][1].metric(), MetricKind::Mem);
+        assert_eq!(layout.rows()[0][1].display(), DisplayMode::Bare);
+        assert!(!layout.rows()[0][1].invert_vertical());
     }
 
     #[test]

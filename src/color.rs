@@ -230,6 +230,10 @@ pub fn gradient_for(metric: MetricKind) -> Gradient {
 pub fn gradient_for_with_hues(metric: MetricKind, hues: Option<&BaseHues>) -> Gradient {
     match metric {
         MetricKind::Cpu => wheel_gradient(0, hues),
+        MetricKind::Xpu => blend_gradients(
+            gradient_for_with_hues(MetricKind::Cpu, hues),
+            gradient_for_with_hues(MetricKind::Gpu, hues),
+        ),
         MetricKind::Rnd => wheel_gradient(0, hues),
         MetricKind::Sys => blend_gradients(
             gradient_for_with_hues(MetricKind::Cpu, hues),
@@ -242,6 +246,10 @@ pub fn gradient_for_with_hues(metric: MetricKind, hues: Option<&BaseHues>) -> Gr
             gradient_for_with_hues(MetricKind::Vram, hues),
         ),
         MetricKind::Memory => wheel_gradient(1, hues),
+        MetricKind::Mem => blend_gradients(
+            gradient_for_with_hues(MetricKind::Memory, hues),
+            gradient_for_with_hues(MetricKind::Vram, hues),
+        ),
         MetricKind::Storage => wheel_gradient(3, hues),
         MetricKind::Io => blend_gradients(
             gradient_for_with_hues(MetricKind::In, hues),
@@ -328,12 +336,20 @@ pub fn split_gradients_for_with_hues(
     hues: Option<&BaseHues>,
 ) -> Option<(Gradient, Gradient)> {
     match metric {
+        MetricKind::Xpu => Some((
+            gradient_for_with_hues(MetricKind::Cpu, hues),
+            gradient_for_with_hues(MetricKind::Gpu, hues),
+        )),
         MetricKind::Sys => Some((
             gradient_for_with_hues(MetricKind::Cpu, hues),
             gradient_for_with_hues(MetricKind::Memory, hues),
         )),
         MetricKind::Gfx => Some((
             gradient_for_with_hues(MetricKind::Gpu, hues),
+            gradient_for_with_hues(MetricKind::Vram, hues),
+        )),
+        MetricKind::Mem => Some((
+            gradient_for_with_hues(MetricKind::Memory, hues),
             gradient_for_with_hues(MetricKind::Vram, hues),
         )),
         MetricKind::Net => Some((
@@ -444,9 +460,11 @@ fn default_base_hues() -> BaseHues {
 fn base_slots_for_metric(metric: MetricKind) -> &'static [usize] {
     match metric {
         MetricKind::Cpu => &[0],
+        MetricKind::Xpu => &[0, 2],
         MetricKind::Rnd => &[0],
         MetricKind::Sys => &[0, 1],
         MetricKind::Memory => &[1],
+        MetricKind::Mem => &[1, 2, 3],
         MetricKind::Gpu => &[2],
         MetricKind::Vram => &[2, 3],
         MetricKind::Gfx => &[2, 3],

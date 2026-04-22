@@ -192,6 +192,7 @@ Split composition uses `+` inside a single item:
 
 - `cpu gpu`: two separate items
 - `cpu+gpu`: one split item
+- `ram+vram`: one split item
 
 Examples:
 
@@ -220,10 +221,10 @@ Native sources:
 - `rx`, `tx`
 - `rnd`
 
-Grouped or split aliases:
+Split aliases:
 
-- `xpu` = `cpu gpu`
-- `mem` = `ram vram`
+- `xpu` = `cpu+gpu`
+- `mem` = `ram+vram`
 - `sys` = `cpu+ram`
 - `gfx` = `gpu+vram`
 - `io` = `in+out`

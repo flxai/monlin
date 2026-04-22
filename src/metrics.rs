@@ -199,7 +199,7 @@ impl Default for Sampler {
 
 impl Sampler {
     pub fn prime(&mut self, metrics: &[MetricKind]) -> io::Result<()> {
-        if metrics.contains(&MetricKind::Cpu) {
+        if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Xpu) {
             self.cpu_prev = best_effort_host_metric(read_cpu_counters)?;
         }
         if metrics.contains(&MetricKind::Io)
@@ -223,7 +223,9 @@ impl Sampler {
         let mut values = HashMap::new();
         let mut headlines = HashMap::new();
 
-        let cpu_value = if metrics.contains(&MetricKind::Cpu) || metrics.contains(&MetricKind::Sys)
+        let cpu_value = if metrics.contains(&MetricKind::Cpu)
+            || metrics.contains(&MetricKind::Xpu)
+            || metrics.contains(&MetricKind::Sys)
         {
             self.sample_cpu()?
         } else {
@@ -238,33 +240,41 @@ impl Sampler {
 
         let gpu_sample = if metrics.contains(&MetricKind::Gpu)
             || metrics.contains(&MetricKind::Vram)
+            || metrics.contains(&MetricKind::Xpu)
             || metrics.contains(&MetricKind::Gfx)
+            || metrics.contains(&MetricKind::Mem)
         {
             Some(read_gpu_sample().unwrap_or_default())
         } else {
             None
         };
 
-        let gpu_value = if metrics.contains(&MetricKind::Gpu) || metrics.contains(&MetricKind::Gfx)
+        let gpu_value = if metrics.contains(&MetricKind::Gpu)
+            || metrics.contains(&MetricKind::Xpu)
+            || metrics.contains(&MetricKind::Gfx)
         {
             gpu_sample.unwrap_or_default().utilization
         } else {
             None
         };
 
-        let vram_value =
-            if metrics.contains(&MetricKind::Vram) || metrics.contains(&MetricKind::Gfx) {
-                gpu_sample.unwrap_or_default().vram_fraction()
-            } else {
-                None
-            };
+        let vram_value = if metrics.contains(&MetricKind::Vram)
+            || metrics.contains(&MetricKind::Gfx)
+            || metrics.contains(&MetricKind::Mem)
+        {
+            gpu_sample.unwrap_or_default().vram_fraction()
+        } else {
+            None
+        };
 
-        let memory_value =
-            if metrics.contains(&MetricKind::Memory) || metrics.contains(&MetricKind::Sys) {
-                best_effort_host_metric(read_memory_usage)?
-            } else {
-                None
-            };
+        let memory_value = if metrics.contains(&MetricKind::Memory)
+            || metrics.contains(&MetricKind::Sys)
+            || metrics.contains(&MetricKind::Mem)
+        {
+            best_effort_host_metric(read_memory_usage)?
+        } else {
+            None
+        };
 
         let storage_value = if metrics.contains(&MetricKind::Storage) {
             best_effort_host_metric(|| read_storage_usage("/"))?
@@ -293,8 +303,15 @@ impl Sampler {
         for metric in metrics {
             let value = match metric {
                 MetricKind::Cpu => cpu_value.map(MetricValue::Single),
+                MetricKind::Xpu => match (cpu_value, gpu_value) {
+                    (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
+                    (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
+                    (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
+                    (None, None) => None,
+                },
                 MetricKind::Rnd => rnd_value.map(|sample| MetricValue::Single(sample.normalized)),
-                MetricKind::Sys => match (cpu_value, memory_value.map(|sample| sample.usage_ratio)) {
+                MetricKind::Sys => match (cpu_value, memory_value.map(|sample| sample.usage_ratio))
+                {
                     (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
                     (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
                     (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
@@ -310,6 +327,14 @@ impl Sampler {
                 },
                 MetricKind::Memory => {
                     memory_value.map(|sample| MetricValue::Single(sample.usage_ratio))
+                }
+                MetricKind::Mem => {
+                    match (memory_value.map(|sample| sample.usage_ratio), vram_value) {
+                        (Some(upper), Some(lower)) => Some(MetricValue::Split { upper, lower }),
+                        (Some(upper), None) => Some(MetricValue::Split { upper, lower: 0.0 }),
+                        (None, Some(lower)) => Some(MetricValue::Split { upper: 0.0, lower }),
+                        (None, None) => None,
+                    }
                 }
                 MetricKind::Storage => {
                     storage_value.map(|sample| MetricValue::Single(sample.usage_ratio))
@@ -559,8 +584,15 @@ fn canonicalize_metric_value(
             normalized,
             absolute: canonical_metric_absolute(metric, headline),
         },
-        (MetricKind::Sys, MetricValue::Split { upper, lower })
+        (MetricKind::Xpu, MetricValue::Split { upper, lower })
+        | (MetricKind::Sys, MetricValue::Split { upper, lower })
         | (MetricKind::Gfx, MetricValue::Split { upper, lower }) => CanonicalValue::Split {
+            upper_normalized: upper,
+            lower_normalized: lower,
+            upper_absolute: None,
+            lower_absolute: None,
+        },
+        (MetricKind::Mem, MetricValue::Split { upper, lower }) => CanonicalValue::Split {
             upper_normalized: upper,
             lower_normalized: lower,
             upper_absolute: None,
