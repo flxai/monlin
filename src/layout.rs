@@ -356,6 +356,11 @@ impl LayoutItem {
         self.metric
     }
 
+    pub fn with_metric(mut self, metric: MetricKind) -> Self {
+        self.metric = metric;
+        self
+    }
+
     pub fn view(&self) -> LayoutView {
         self.view
     }
@@ -782,6 +787,40 @@ impl Layout {
 
     pub fn filter_available(&self) -> bool {
         self.filter_available
+    }
+
+    fn is_default_avail_layout(&self) -> bool {
+        self.filter_available
+            && !self.explicit_rows
+            && self.rows.len() == 1
+            && self.rows[0]
+                .iter()
+                .map(|item| item.metric())
+                .eq(default_avail_metric_rows().into_iter().flatten())
+    }
+
+    pub fn adapt_avail_for_host(&self, prefer_shared_gpu_metrics: bool) -> Self {
+        if !self.is_default_avail_layout() {
+            return self.clone();
+        }
+
+        let [cpu, _gpu, memory, _vram, storage, io, net] = self.rows[0].as_slice() else {
+            return self.clone();
+        };
+
+        let rows = vec![if prefer_shared_gpu_metrics {
+            vec![
+                (*cpu).with_metric(MetricKind::Xpu),
+                (*memory).with_metric(MetricKind::Mem),
+                *storage,
+                *io,
+                *net,
+            ]
+        } else {
+            vec![*cpu, *memory, *storage, *io, *net]
+        }];
+
+        Self::from_rows_with_mode(rows, false, self.filter_available)
     }
 
     pub fn retain_available<F>(&self, mut keep: F) -> Self
@@ -2327,6 +2366,64 @@ mod tests {
                 vec![MetricKind::Io],
             ]
         );
+    }
+
+    #[test]
+    fn avail_adapts_to_xpu_mem_on_gpu_hosts() {
+        let layout = parse_layout_spec("avail").unwrap();
+        let adapted = layout.adapt_avail_for_host(true);
+
+        assert_eq!(
+            adapted
+                .rows()
+                .iter()
+                .map(|row| row.iter().map(|item| item.metric()).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            &[vec![
+                MetricKind::Xpu,
+                MetricKind::Mem,
+                MetricKind::Storage,
+                MetricKind::Io,
+                MetricKind::Net,
+            ]]
+        );
+    }
+
+    #[test]
+    fn avail_adapts_to_cpu_ram_on_non_gpu_hosts() {
+        let layout = parse_layout_spec("avail").unwrap();
+        let adapted = layout.adapt_avail_for_host(false);
+
+        assert_eq!(
+            adapted
+                .rows()
+                .iter()
+                .map(|row| row.iter().map(|item| item.metric()).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            &[vec![
+                MetricKind::Cpu,
+                MetricKind::Memory,
+                MetricKind::Storage,
+                MetricKind::Io,
+                MetricKind::Net,
+            ]]
+        );
+    }
+
+    #[test]
+    fn avail_adaptation_preserves_item_modifiers() {
+        let layout = parse_layout_spec("avail.abs.value.inv").unwrap();
+        let adapted = layout.adapt_avail_for_host(true);
+
+        assert_eq!(adapted.rows()[0][0].metric(), MetricKind::Xpu);
+        assert_eq!(adapted.rows()[0][0].view(), LayoutView::Abs);
+        assert_eq!(adapted.rows()[0][0].display(), DisplayMode::Value);
+        assert!(adapted.rows()[0][0].invert_vertical());
+
+        assert_eq!(adapted.rows()[0][1].metric(), MetricKind::Mem);
+        assert_eq!(adapted.rows()[0][1].view(), LayoutView::Abs);
+        assert_eq!(adapted.rows()[0][1].display(), DisplayMode::Value);
+        assert!(adapted.rows()[0][1].invert_vertical());
     }
 
     #[test]

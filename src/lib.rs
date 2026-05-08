@@ -4,7 +4,7 @@ pub mod layout;
 pub mod metrics;
 pub mod render;
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::c_void;
 use std::fs;
@@ -758,22 +758,22 @@ fn print_debug_braille(spec: &config::DebugBrailleSpec) -> Result<(), String> {
 }
 
 fn run_native(config: &config::Config) -> Result<(), String> {
-    let requested_metrics = config.layout.metrics();
+    let availability_probe_metrics = native_availability_probe_metrics(&config.layout);
     let mut sampler = metrics::Sampler::default();
-    sampler.prime(requested_metrics).map_err(monlin_error)?;
+    sampler
+        .prime(&availability_probe_metrics)
+        .map_err(monlin_error)?;
 
     let mut effective_config = config.clone();
     if config.layout.filter_available() {
         let availability = sampler
-            .sample_canonical(requested_metrics)
+            .sample_canonical(&availability_probe_metrics)
             .map_err(monlin_error)?;
-        let available = requested_metrics
-            .iter()
-            .copied()
-            .filter(|metric| availability.values.contains_key(&Source::Metric(*metric)))
-            .collect::<std::collections::HashSet<_>>();
+        let prefer_shared_gpu_metrics = native_prefers_shared_gpu_metrics(&availability);
+        let available = native_available_metric_set(&availability, &availability_probe_metrics);
         effective_config.layout = config
             .layout
+            .adapt_avail_for_host(prefer_shared_gpu_metrics)
             .retain_available(|metric| available.contains(&metric));
     }
 
@@ -784,6 +784,39 @@ fn run_native(config: &config::Config) -> Result<(), String> {
     match effective_config.output_mode {
         OutputMode::Terminal => run_terminal(&effective_config, &mut sampler, &mut histories),
         OutputMode::I3bar => run_i3bar(&effective_config, &mut sampler, &mut histories),
+    }
+}
+
+fn native_availability_probe_metrics(layout: &layout::Layout) -> Vec<MetricKind> {
+    let mut metrics = layout.metrics().to_vec();
+    if layout.filter_available() {
+        push_unique_metric(&mut metrics, MetricKind::Xpu);
+        push_unique_metric(&mut metrics, MetricKind::Mem);
+    }
+    metrics
+}
+
+fn native_available_metric_set(
+    availability: &CanonicalSample,
+    metrics: &[MetricKind],
+) -> HashSet<MetricKind> {
+    metrics
+        .iter()
+        .copied()
+        .filter(|metric| availability.values.contains_key(&Source::Metric(*metric)))
+        .collect()
+}
+
+fn native_prefers_shared_gpu_metrics(availability: &CanonicalSample) -> bool {
+    availability.values.contains_key(&Source::Metric(MetricKind::Gpu))
+        || availability
+            .values
+            .contains_key(&Source::Metric(MetricKind::Vram))
+}
+
+fn push_unique_metric(metrics: &mut Vec<MetricKind>, metric: MetricKind) {
+    if !metrics.contains(&metric) {
+        metrics.push(metric);
     }
 }
 
