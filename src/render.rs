@@ -4,7 +4,8 @@ use std::env;
 use clap::ValueEnum;
 
 use crate::color::{
-    color_for_intensity, metric_hues_for_visible_hue, paint, visible_hues, BaseHues, ColorSpec,
+    color_for_intensity, color_spec_high_rgb, metric_hues_for_visible_hue, paint, paint_bold,
+    visible_hues, BaseHues, ColorSpec,
 };
 use crate::config::{
     Align, Config, LayoutEngine, Space, StreamGroup, StreamItem, StreamLayout, Window,
@@ -402,7 +403,15 @@ pub fn render_lines_with_headlines(
         .max()
         .unwrap_or(0);
     let stable_column_widths = matches!(config.space, Space::Stable).then(|| {
-        stable_layout_column_widths(config, width, layout, values, headline_values, label_width)
+        stable_layout_column_widths(
+            config,
+            width,
+            color_enabled,
+            layout,
+            values,
+            headline_values,
+            label_width,
+        )
     });
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
@@ -455,14 +464,14 @@ pub fn render_document_lines(
         .map(|row| row.items().len())
         .sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
-    let outer_prefix = config_label_prefix(config);
+    let outer_prefix = config_label_prefix(config, color_enabled);
     let mut offset = 0;
     let mut lines = Vec::new();
 
     for row in document.rows() {
         let row_hues = take_row_hues(&all_hues, &mut offset, row.items().len());
         let prefix = match row.label() {
-            Some(label) => format!("{outer_prefix}{label} "),
+            Some(label) => format!("{outer_prefix}{} ", paint_label(config, label, color_enabled)),
             None => outer_prefix.clone(),
         };
         lines.push(render_document_row(
@@ -692,7 +701,7 @@ fn render_pack_lines_with_headlines(
             pack_row_specs(
                 config,
                 width,
-                &config_label_prefix(config),
+                &config_label_prefix(config, color_enabled),
                 items,
                 values,
                 headline_values,
@@ -732,7 +741,7 @@ fn render_flex_lines_with_headlines(
             flex_row_specs(
                 config,
                 width,
-                &config_label_prefix(config),
+                &config_label_prefix(config, color_enabled),
                 items,
                 values,
                 headline_values,
@@ -762,7 +771,7 @@ fn render_grid_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
-    let column_specs = grid_column_specs(config, width, layout, values, headline_values);
+    let column_specs = grid_column_specs(config, width, color_enabled, layout, values, headline_values);
     let row_specs = layout
         .rows()
         .iter()
@@ -792,7 +801,7 @@ fn render_native_grid_like_lines(
     row_specs: &[Vec<GridColumnSpec>],
 ) -> Vec<String> {
     let stable_layout = matches!(config.space, Space::Stable);
-    let prefix = config_label_prefix(config);
+    let prefix = config_label_prefix(config, color_enabled);
     let total_items = layout.rows().iter().map(|items| items.len()).sum::<usize>();
     let all_hues = visible_hues(total_items, config.colors.as_deref());
     let mut offset = 0;
@@ -838,12 +847,13 @@ fn render_native_grid_like_lines(
 fn grid_column_specs(
     config: &Config,
     width: usize,
+    color_enabled: bool,
     layout: &Layout,
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<GridColumnSpec> {
-    let prefix = config_label_prefix(config);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let prefix = config_label_prefix(config, color_enabled);
+    let inner_width = width.saturating_sub(visible_width(&prefix));
     let column_count = layout
         .rows()
         .iter()
@@ -1074,7 +1084,7 @@ fn flex_row_specs(
     }
 
     let stable_layout = matches!(config.space, Space::Stable);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let inner_width = width.saturating_sub(visible_width(prefix));
     let label_widths = items
         .iter()
         .enumerate()
@@ -1159,7 +1169,7 @@ fn pack_row_specs(
     }
 
     let stable_layout = matches!(config.space, Space::Stable);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let inner_width = width.saturating_sub(visible_width(&prefix));
     let spans = packed_row_spans(items);
     let label_widths = items
         .iter()
@@ -1274,13 +1284,14 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
 fn stable_layout_column_widths(
     config: &Config,
     width: usize,
+    color_enabled: bool,
     layout: &Layout,
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
     label_width: usize,
 ) -> Vec<usize> {
-    let prefix = config_label_prefix(config);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let prefix = config_label_prefix(config, color_enabled);
+    let inner_width = width.saturating_sub(visible_width(&prefix));
     let column_count = layout
         .rows()
         .iter()
@@ -1378,12 +1389,12 @@ fn render_stream_group_lines(
         .unwrap_or(values.len())
         .max(values.len());
     let stream_hues = visible_hues(max_ref, config.colors.as_deref());
-    let outer_prefix = config_label_prefix(config);
+    let outer_prefix = config_label_prefix(config, color_enabled);
 
     let mut lines = Vec::new();
     for group in groups {
         let group_prefix = match &group.label {
-            Some(label) => format!("{outer_prefix}{label} "),
+            Some(label) => format!("{outer_prefix}{} ", paint_label(config, label, color_enabled)),
             None => outer_prefix.clone(),
         };
         for row in &group.rows {
@@ -1416,7 +1427,7 @@ fn render_stream_group_row(
     prefix: &str,
     stream_hues: &[ColorSpec],
 ) -> String {
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let inner_width = width.saturating_sub(visible_width(prefix));
     let segments = items
         .iter()
         .map(|item| {
@@ -1527,7 +1538,7 @@ fn render_document_row(
     prefix: &str,
     row_hues: &[ColorSpec],
 ) -> String {
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let inner_width = width.saturating_sub(visible_width(prefix));
     let segments = items
         .iter()
         .map(|item| {
@@ -1712,7 +1723,7 @@ fn render_stream_rows(
             .collect();
     }
 
-    let prefix = config_label_prefix(config);
+    let prefix = config_label_prefix(config, color_enabled);
     let stream_labels = config.stream_labels.as_deref().unwrap_or(&[]);
     let label_width = stream_labels
         .iter()
@@ -1728,11 +1739,16 @@ fn render_stream_rows(
         .map(|(index, value)| {
             let row_label = stream_labels
                 .get(index)
-                .map(|label| format!("{label:>label_width$} "))
+                .map(|label| {
+                    format!(
+                        "{} ",
+                        paint_label(config, &format!("{label:>label_width$}"), color_enabled)
+                    )
+                })
                 .unwrap_or_default();
             let usage_text = stream_usage_text(DisplayMode::Value, *value);
             let fixed =
-                prefix.chars().count() + row_label.chars().count() + usage_text.chars().count();
+                visible_width(&prefix) + visible_width(&row_label) + usage_text.chars().count();
 
             let graph_width = width.saturating_sub(fixed + 1);
             let graph = render_stream_graph_for_visible_hue(
@@ -1783,8 +1799,8 @@ fn render_stream_columns_line(
         return pad_or_trim_visible(&segments.join(""), width);
     }
 
-    let prefix = config_label_prefix(config);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let prefix = config_label_prefix(config, color_enabled);
+    let inner_width = width.saturating_sub(visible_width(&prefix));
     let stream_hues = visible_hues(values.len(), config.colors.as_deref());
     let segments = values
         .iter()
@@ -1985,9 +2001,9 @@ fn render_row(
     row_hues: &[ColorSpec],
     stable_column_widths: Option<&[usize]>,
 ) -> String {
-    let prefix = config_label_prefix(config);
+    let prefix = config_label_prefix(config, color_enabled);
     let stable_layout = matches!(config.space, Space::Stable);
-    let inner_width = width.saturating_sub(prefix.chars().count());
+    let inner_width = width.saturating_sub(visible_width(&prefix));
     let separators = items.len().saturating_sub(1);
     let segment_space = inner_width.saturating_sub(separators);
 
@@ -2364,12 +2380,24 @@ fn take_row_hues<'a>(
     row_hues
 }
 
-fn config_label_prefix(config: &Config) -> String {
+fn config_label_prefix(config: &Config, color_enabled: bool) -> String {
     config
         .label
         .as_ref()
-        .map(|label| format!("{label} "))
+        .map(|label| format!("{} ", paint_label(config, label, color_enabled)))
         .unwrap_or_default()
+}
+
+fn paint_label(config: &Config, label: &str, color_enabled: bool) -> String {
+    let Some(color) = config.label_color else {
+        return label.to_owned();
+    };
+    let rgb = color_spec_high_rgb(color);
+    if config.label_bold {
+        paint_bold(label, rgb, color_enabled)
+    } else {
+        paint(label, rgb, color_enabled)
+    }
 }
 
 fn render_inline_segment(
@@ -3539,6 +3567,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3613,6 +3643,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3665,6 +3697,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3750,6 +3784,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: Some("host".to_owned()),
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3813,6 +3849,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3950,6 +3988,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -3995,6 +4035,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4042,6 +4084,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: Some("host".to_owned()),
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4120,6 +4164,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec![
                 "a".to_owned(),
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
@@ -4203,6 +4249,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec!["a".to_owned(), "b".to_owned()]),
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4254,6 +4302,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4405,6 +4455,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4549,6 +4601,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4696,6 +4750,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4810,6 +4866,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4926,6 +4984,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -4987,7 +5047,7 @@ mod tests {
             (MetricKind::Net, HeadlineValue::Scalar(150.0)),
         ]);
 
-        let specs = grid_column_specs(&config, 80, &layout, &values, &headline_values);
+        let specs = grid_column_specs(&config, 80, false, &layout, &values, &headline_values);
         assert_eq!(specs.len(), 3);
         assert!(specs[0].graph_width < specs[1].graph_width);
         assert!(specs[1].graph_width < specs[2].graph_width);
@@ -5007,6 +5067,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -5099,6 +5161,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -5191,6 +5255,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -5244,6 +5310,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
             stream_layout: StreamLayout::Lines,
@@ -5297,6 +5365,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: Some(vec!["wifi".to_owned(), "vpn".to_owned()]),
             stream_groups: None,
             stream_layout: StreamLayout::Lines,
@@ -5517,6 +5587,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -5598,6 +5670,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -5704,6 +5778,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,
@@ -6191,6 +6267,8 @@ mod tests {
             invert_vertical: false,
             window: Window::Agg,
             label: None,
+            label_color: None,
+            label_bold: false,
             stream_labels: None,
             stream_groups: None,
             stream_layout: StreamLayout::Columns,

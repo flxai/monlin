@@ -417,6 +417,21 @@ pub fn paint(text: &str, color: Rgb, enabled: bool) -> String {
     )
 }
 
+pub fn paint_bold(text: &str, color: Rgb, enabled: bool) -> String {
+    if !enabled {
+        return text.to_owned();
+    }
+
+    format!(
+        "\x1b[1m\x1b[38;2;{};{};{}m{}\x1b[0m",
+        color.r, color.g, color.b, text
+    )
+}
+
+pub fn color_spec_high_rgb(spec: ColorSpec) -> Rgb {
+    spec_high_rgb(spec)
+}
+
 fn emphasize(t: f64) -> f64 {
     easing_spline().clamped_sample(t).unwrap_or(t)
 }

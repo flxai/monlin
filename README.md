@@ -306,6 +306,8 @@ Core flags:
 - `-e`, `--engine auto|flow|flex|grid|pack`
 - `--renderer braille|block`
 - `-c`, `--colors ...`
+- `--label-color ...`
+- `--label-bold`
 - `--color auto|always|never`
 - `--output terminal|i3bar`
 - `--width N`
@@ -372,7 +374,7 @@ monlin debug braille --samples '0,0,1,1,0' --frames
 - fallback renderer: block
 - default window mode: `tail`
 - default alignment: `right`
-- labels stay plain
+- labels stay plain unless `--label-color` is set
 - graph glyphs are colorized
 - split metrics render upper and lower halves separately
 

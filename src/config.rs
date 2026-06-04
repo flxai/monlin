@@ -205,6 +205,8 @@ pub struct Config {
     pub invert_vertical: bool,
     pub window: Window,
     pub label: Option<String>,
+    pub label_color: Option<ColorSpec>,
+    pub label_bold: bool,
     pub stream_labels: Option<Vec<String>>,
     pub stream_groups: Option<Vec<StreamGroup>>,
     pub stream_layout: StreamLayout,
@@ -349,6 +351,15 @@ struct Cli {
     )]
     colors: Option<String>,
 
+    #[arg(
+        long = "label-color",
+        help = "Color labels with a color token like Rfabd2f, angle 40, or L086078020"
+    )]
+    label_color: Option<String>,
+
+    #[arg(long = "label-bold", action = ArgAction::SetTrue, help = "Render colored labels in bold text")]
+    label_bold: bool,
+
     #[arg(long = "color", value_enum, default_value_t = ColorMode::Auto, help = "When to emit ANSI colors")]
     color_mode: ColorMode,
 
@@ -428,6 +439,10 @@ struct TomlConfig {
     layout_engine: Option<String>,
     renderer: Option<String>,
     colors: Option<StringList>,
+    #[serde(alias = "label-color")]
+    label_color: Option<String>,
+    #[serde(alias = "label-bold")]
+    label_bold: Option<bool>,
     #[serde(alias = "color")]
     color_mode: Option<String>,
     #[serde(alias = "output")]
@@ -556,6 +571,11 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         .transpose()?
         .map(|tokens| expand_color_specs(&tokens))
         .transpose()?;
+    let label_color = cli
+        .label_color
+        .as_deref()
+        .map(parse_color_spec)
+        .transpose()?;
 
     Ok(Config {
         document,
@@ -567,6 +587,8 @@ fn parse_args_from_vec(args: Vec<String>) -> Result<Config, String> {
         invert_vertical: resolve_boolean_flag(cli.invert_vertical, cli.no_invert_vertical),
         window: cli.window,
         label: None,
+        label_color,
+        label_bold: cli.label_bold,
         stream_labels: inline_stream_labels,
         stream_groups,
         stream_layout: StreamLayout::Columns,
@@ -811,6 +833,10 @@ fn toml_config_to_args(config: TomlConfig) -> Vec<String> {
     if let Some(colors) = config.colors.and_then(StringList::into_csv) {
         args.push("--colors".to_owned());
         args.push(colors);
+    }
+    push_flag_value(&mut args, "--label-color", config.label_color);
+    if config.label_bold.unwrap_or(false) {
+        args.push("--label-bold".to_owned());
     }
     push_flag_value(&mut args, "--color", config.color_mode);
     push_flag_value(&mut args, "--output", config.output_mode);
@@ -1920,6 +1946,20 @@ mod tests {
                 }),
             ])
         );
+    }
+
+    #[test]
+    fn parses_label_color_and_bold() {
+        let config = parse(&["monlin", "--label-color", "Rfabd2f", "--label-bold"]);
+        assert_eq!(
+            config.label_color,
+            Some(ColorSpec::Rgb(Rgb {
+                r: 0xfa,
+                g: 0xbd,
+                b: 0x2f
+            }))
+        );
+        assert!(config.label_bold);
     }
 
     #[test]
