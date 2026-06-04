@@ -27,6 +27,8 @@ const BRAILLE_LEFT_BITS: [u8; 4] = [6, 2, 1, 0];
 const BRAILLE_RIGHT_BITS: [u8; 4] = [7, 5, 4, 3];
 const INVERTED_BRAILLE_LEFT_BITS: [u8; 4] = [0, 1, 2, 6];
 const INVERTED_BRAILLE_RIGHT_BITS: [u8; 4] = [3, 4, 5, 7];
+const SUPERSCRIPT_DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+const SUBSCRIPT_DIGITS: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct GridColumnSpec {
@@ -42,6 +44,12 @@ struct InlineSegmentText {
     separator: &'static str,
     usage_text: String,
     fixed: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StackedNumberTextError {
+    top_len: usize,
+    bottom_len: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -81,6 +89,62 @@ struct RenderContext {
     renderer: Renderer,
     stable_layout: bool,
     graph: GraphRenderOptions,
+}
+
+fn stacked_two_row_number_text(
+    top_row: &str,
+    bottom_row: &str,
+) -> Result<String, StackedNumberTextError> {
+    let top_len = top_row.chars().count();
+    let bottom_len = bottom_row.chars().count();
+    if top_len != bottom_len {
+        return Err(StackedNumberTextError {
+            top_len,
+            bottom_len,
+        });
+    }
+
+    let bottom = bottom_row.chars().map(subscript_char).collect::<String>();
+    let top = top_row.chars().map(superscript_char).collect::<String>();
+    Ok(format!("{bottom}\n{top}"))
+}
+
+#[allow(dead_code)]
+fn paired_inline_number_text(
+    top_row: &str,
+    bottom_row: &str,
+) -> Result<String, StackedNumberTextError> {
+    let top_len = top_row.chars().count();
+    let bottom_len = bottom_row.chars().count();
+    if top_len != bottom_len {
+        return Err(StackedNumberTextError {
+            top_len,
+            bottom_len,
+        });
+    }
+
+    Ok(top_row
+        .chars()
+        .zip(bottom_row.chars())
+        .map(|(top, bottom)| format!("{}{}", superscript_char(top), subscript_char(bottom)))
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+fn superscript_char(ch: char) -> char {
+    digit_style_char(ch, &SUPERSCRIPT_DIGITS)
+}
+
+fn subscript_char(ch: char) -> char {
+    digit_style_char(ch, &SUBSCRIPT_DIGITS)
+}
+
+fn digit_style_char(ch: char, digits: &[char; 10]) -> char {
+    match ch {
+        '0'..='9' => digits[(ch as u8 - b'0') as usize],
+        ' ' => ' ',
+        _ => ch,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -471,7 +535,10 @@ pub fn render_document_lines(
     for row in document.rows() {
         let row_hues = take_row_hues(&all_hues, &mut offset, row.items().len());
         let prefix = match row.label() {
-            Some(label) => format!("{outer_prefix}{} ", paint_label(config, label, color_enabled)),
+            Some(label) => format!(
+                "{outer_prefix}{} ",
+                paint_label(config, label, color_enabled)
+            ),
             None => outer_prefix.clone(),
         };
         lines.push(render_document_row(
@@ -771,7 +838,14 @@ fn render_grid_lines_with_headlines(
     values: &HashMap<MetricKind, MetricValue>,
     headline_values: &HashMap<MetricKind, HeadlineValue>,
 ) -> Vec<String> {
-    let column_specs = grid_column_specs(config, width, color_enabled, layout, values, headline_values);
+    let column_specs = grid_column_specs(
+        config,
+        width,
+        color_enabled,
+        layout,
+        values,
+        headline_values,
+    );
     let row_specs = layout
         .rows()
         .iter()
@@ -839,7 +913,7 @@ fn render_native_grid_like_lines(
                     }
                 })
                 .collect::<Vec<_>>();
-            pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+            join_rendered_segments(&prefix, &segments, width)
         })
         .collect()
 }
@@ -1394,7 +1468,10 @@ fn render_stream_group_lines(
     let mut lines = Vec::new();
     for group in groups {
         let group_prefix = match &group.label {
-            Some(label) => format!("{outer_prefix}{} ", paint_label(config, label, color_enabled)),
+            Some(label) => format!(
+                "{outer_prefix}{} ",
+                paint_label(config, label, color_enabled)
+            ),
             None => outer_prefix.clone(),
         };
         for row in &group.rows {
@@ -1525,7 +1602,7 @@ fn render_stream_group_row(
         })
         .collect::<Vec<_>>();
 
-    pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
+    join_rendered_segments(&prefix, &rendered, width)
 }
 
 fn render_document_row(
@@ -1633,7 +1710,7 @@ fn render_document_row(
         })
         .collect::<Vec<_>>();
 
-    pad_or_trim_visible(&format!("{prefix}{}", rendered.join(" ")), width)
+    join_rendered_segments(prefix, &rendered, width)
 }
 
 fn document_item_label(item: &Item) -> String {
@@ -1842,7 +1919,7 @@ fn render_stream_columns_line(
         })
         .collect::<Vec<_>>();
 
-    pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+    join_rendered_segments(&prefix, &segments, width)
 }
 
 fn stream_column_widths(
@@ -2129,7 +2206,7 @@ fn render_row(
         })
         .collect::<Vec<_>>();
 
-    pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width)
+    join_rendered_segments(&prefix, &segments, width)
 }
 
 fn stream_metric_for(index: usize) -> MetricKind {
@@ -2447,6 +2524,10 @@ fn render_inline_segment_to_width(
     width: usize,
     align: Align,
 ) -> String {
+    if parts.usage_text.contains('\n') {
+        return render_multiline_inline_segment_to_width(parts, graph, width, align);
+    }
+
     pad_or_trim_visible(
         &render_inline_segment(
             align,
@@ -2457,6 +2538,83 @@ fn render_inline_segment_to_width(
         ),
         width,
     )
+}
+
+fn render_multiline_inline_segment_to_width(
+    parts: &InlineSegmentText,
+    graph: &str,
+    width: usize,
+    _align: Align,
+) -> String {
+    let label_prefix = format!("{}{}", parts.label, parts.separator);
+    let continuation_prefix = " ".repeat(visible_width(&label_prefix));
+    let usage_lines = parts.usage_text.split('\n').collect::<Vec<_>>();
+    let last_index = usage_lines.len().saturating_sub(1);
+
+    usage_lines
+        .iter()
+        .enumerate()
+        .map(|(index, usage_line)| {
+            let prefix = if index == 0 {
+                label_prefix.as_str()
+            } else {
+                continuation_prefix.as_str()
+            };
+            let mut line = format!("{prefix}{usage_line}");
+            if index == last_index && !graph.is_empty() {
+                line.push(' ');
+                line.push_str(graph);
+            }
+            pad_or_trim_visible(&line, width)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn join_rendered_segments(prefix: &str, segments: &[String], width: usize) -> String {
+    if segments.iter().all(|segment| !segment.contains('\n')) {
+        return pad_or_trim_visible(&format!("{prefix}{}", segments.join(" ")), width);
+    }
+
+    let prefix_width = visible_width(prefix);
+    let split_segments = segments
+        .iter()
+        .map(|segment| {
+            let segment_width = visible_width(segment);
+            let lines = segment
+                .split('\n')
+                .map(|line| pad_or_trim_visible(line, segment_width))
+                .collect::<Vec<_>>();
+            (segment_width, lines)
+        })
+        .collect::<Vec<_>>();
+    let height = split_segments
+        .iter()
+        .map(|(_, lines)| lines.len())
+        .max()
+        .unwrap_or(1);
+
+    (0..height)
+        .map(|row| {
+            let mut line = if row == 0 {
+                prefix.to_owned()
+            } else {
+                " ".repeat(prefix_width)
+            };
+            for (index, (segment_width, lines)) in split_segments.iter().enumerate() {
+                if index > 0 {
+                    line.push(' ');
+                }
+                if let Some(segment_line) = lines.get(row) {
+                    line.push_str(segment_line);
+                } else {
+                    line.push_str(&" ".repeat(*segment_width));
+                }
+            }
+            pad_or_trim_visible(&line, width)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_segment_with_headline(
@@ -2622,6 +2780,10 @@ fn render_grid_text(
     spec: GridColumnSpec,
     graph: Option<&str>,
 ) -> String {
+    if usage_text.contains('\n') {
+        return render_multiline_grid_text(display, label, usage_text, spec, graph);
+    }
+
     match display {
         DisplayMode::Full => {
             let label = format!("{label:<label_width$}", label_width = spec.label_width);
@@ -2643,6 +2805,49 @@ fn render_grid_text(
             _ => String::new(),
         },
     }
+}
+
+fn render_multiline_grid_text(
+    display: DisplayMode,
+    label: &str,
+    usage_text: &str,
+    spec: GridColumnSpec,
+    graph: Option<&str>,
+) -> String {
+    let usage_lines = usage_text.split('\n').collect::<Vec<_>>();
+    let last_index = usage_lines.len().saturating_sub(1);
+    usage_lines
+        .iter()
+        .enumerate()
+        .map(|(index, usage_line)| match display {
+            DisplayMode::Full => {
+                let label = if index == 0 {
+                    format!("{label:<label_width$}", label_width = spec.label_width)
+                } else {
+                    " ".repeat(spec.label_width)
+                };
+                let usage_line =
+                    format!("{usage_line:>value_width$}", value_width = spec.value_width);
+                match (graph, spec.graph_width > 0, index == last_index) {
+                    (Some(graph), true, true) => format!("{label} {usage_line} {graph}"),
+                    _ => format!("{label} {usage_line}"),
+                }
+            }
+            DisplayMode::Value => {
+                let usage_line =
+                    format!("{usage_line:>value_width$}", value_width = spec.value_width);
+                match (graph, spec.graph_width > 0, index == last_index) {
+                    (Some(graph), true, true) => format!("{usage_line} {graph}"),
+                    _ => usage_line,
+                }
+            }
+            DisplayMode::Bare => match (graph, spec.graph_width > 0, index == last_index) {
+                (Some(graph), true, true) => graph.to_owned(),
+                _ => String::new(),
+            },
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn segment_text_parts(
@@ -2704,6 +2909,19 @@ fn segment_usage_text(
     headline_value: Option<HeadlineValue>,
     stable_layout: bool,
 ) -> String {
+    if let MetricValue::Split { upper, lower } = value {
+        if metric.is_split() {
+            return split_segment_usage_text(
+                metric,
+                view,
+                upper,
+                lower,
+                headline_value,
+                stable_layout,
+            );
+        }
+    }
+
     let usage_text = metric.format_value(
         view,
         value.headline_value(),
@@ -2717,6 +2935,81 @@ fn segment_usage_text(
     } else {
         usage_text
     }
+}
+
+fn split_segment_usage_text(
+    metric: MetricKind,
+    view: LayoutView,
+    upper: f64,
+    lower: f64,
+    headline_value: Option<HeadlineValue>,
+    stable_layout: bool,
+) -> String {
+    let (upper_headline, lower_headline) = split_channel_headlines(headline_value, upper, lower);
+    let top_row = metric.format_value(view, upper, &upper_headline);
+    let bottom_row = metric.format_value(view, lower, &lower_headline);
+    let width = top_row.chars().count().max(bottom_row.chars().count());
+    let top_row = format!("{top_row:>width$}");
+    let bottom_row = format!("{bottom_row:>width$}");
+
+    let mut usage_text = stacked_two_row_number_text(&top_row, &bottom_row)
+        .unwrap_or_else(|_| format!("{bottom_row}\n{top_row}"));
+    if stable_layout {
+        usage_text = pad_stacked_usage_text(&usage_text, stable_layout_usage_width(metric, view));
+    }
+    usage_text
+}
+
+fn split_channel_headlines(
+    headline_value: Option<HeadlineValue>,
+    upper: f64,
+    lower: f64,
+) -> (HeadlineValue, HeadlineValue) {
+    match headline_value {
+        Some(HeadlineValue::Split { upper, lower }) => {
+            (HeadlineValue::Scalar(upper), HeadlineValue::Scalar(lower))
+        }
+        Some(HeadlineValue::Scalar(value)) => {
+            (HeadlineValue::Scalar(value), HeadlineValue::Scalar(value))
+        }
+        Some(HeadlineValue::Memory {
+            used_bytes,
+            available_bytes,
+            total_bytes,
+        }) => (
+            HeadlineValue::Memory {
+                used_bytes,
+                available_bytes,
+                total_bytes,
+            },
+            HeadlineValue::Memory {
+                used_bytes,
+                available_bytes,
+                total_bytes,
+            },
+        ),
+        Some(HeadlineValue::Storage {
+            used_bytes,
+            total_bytes,
+        }) => (
+            HeadlineValue::Storage {
+                used_bytes,
+                total_bytes,
+            },
+            HeadlineValue::Storage {
+                used_bytes,
+                total_bytes,
+            },
+        ),
+        None => (HeadlineValue::Scalar(upper), HeadlineValue::Scalar(lower)),
+    }
+}
+
+fn pad_stacked_usage_text(text: &str, width: usize) -> String {
+    text.split('\n')
+        .map(|line| format!("{line:>width$}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn unavailable_usage_text(metric: MetricKind, view: LayoutView, stable_layout: bool) -> String {
@@ -2751,11 +3044,13 @@ fn display_value_width(
     stable_layout: bool,
 ) -> usize {
     match display {
-        DisplayMode::Full | DisplayMode::Value => {
-            segment_usage_text(metric, view, value, headline_value, stable_layout)
-                .chars()
-                .count()
-        }
+        DisplayMode::Full | DisplayMode::Value => visible_width(&segment_usage_text(
+            metric,
+            view,
+            value,
+            headline_value,
+            stable_layout,
+        )),
         DisplayMode::Bare => 0,
     }
 }
@@ -2768,9 +3063,7 @@ fn unavailable_display_value_width(
 ) -> usize {
     match display {
         DisplayMode::Full | DisplayMode::Value => {
-            unavailable_usage_text(metric, view, stable_layout)
-                .chars()
-                .count()
+            visible_width(&unavailable_usage_text(metric, view, stable_layout))
         }
         DisplayMode::Bare => 0,
     }
@@ -2886,6 +3179,14 @@ fn paint_unavailable_text(text: &str, color_enabled: bool) -> String {
 }
 
 fn pad_or_trim_visible(text: &str, width: usize) -> String {
+    if text.contains('\n') {
+        return text
+            .split('\n')
+            .map(|line| pad_or_trim_visible(line, width))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
     let visible = visible_width(text);
     if visible >= width {
         return trim_visible(text, width);
@@ -2931,6 +3232,10 @@ fn trim_visible(text: &str, width: usize) -> String {
 }
 
 pub(crate) fn visible_width(text: &str) -> usize {
+    text.split('\n').map(visible_line_width).max().unwrap_or(0)
+}
+
+fn visible_line_width(text: &str) -> usize {
     let mut width = 0;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -3402,6 +3707,41 @@ mod tests {
         let chars = graph.chars().collect::<Vec<_>>();
         assert_eq!(chars.len(), 1);
         chars[0]
+    }
+
+    #[test]
+    fn stacked_two_row_number_text_encodes_bottom_then_top() {
+        assert_eq!(
+            stacked_two_row_number_text("1234", "5678").unwrap(),
+            "₅₆₇₈\n¹²³⁴"
+        );
+    }
+
+    #[test]
+    fn stacked_two_row_number_text_preserves_spaces_and_other_chars() {
+        assert_eq!(
+            stacked_two_row_number_text(" 9K%", "12M%").unwrap(),
+            "₁₂M%\n ⁹K%"
+        );
+    }
+
+    #[test]
+    fn stacked_two_row_number_text_rejects_misaligned_rows() {
+        assert_eq!(
+            stacked_two_row_number_text("123", "12").unwrap_err(),
+            StackedNumberTextError {
+                top_len: 3,
+                bottom_len: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn paired_inline_number_text_encodes_columns() {
+        assert_eq!(
+            paired_inline_number_text("1234", "5678").unwrap(),
+            "¹₅ ²₆ ³₇ ⁴₈"
+        );
     }
 
     #[test]
@@ -3958,8 +4298,20 @@ mod tests {
                     total_bytes: 1024,
                 },
             ),
-            (MetricKind::Io, HeadlineValue::Scalar(16.0 * 1024.0)),
-            (MetricKind::Net, HeadlineValue::Scalar(14.0 * 1024.0)),
+            (
+                MetricKind::Io,
+                HeadlineValue::Split {
+                    upper: 16.0 * 1024.0,
+                    lower: 16.0 * 1024.0,
+                },
+            ),
+            (
+                MetricKind::Net,
+                HeadlineValue::Split {
+                    upper: 14.0 * 1024.0,
+                    lower: 14.0 * 1024.0,
+                },
+            ),
         ]);
 
         let line = &render_lines_with_headlines(
@@ -3973,7 +4325,8 @@ mod tests {
         )[0];
 
         assert_eq!(visible_width(line), 80);
-        assert!(line.contains("net  14K "), "unexpected row: {line}");
+        assert!(line.contains("net  ₁₄K"), "unexpected row: {line}");
+        assert!(line.contains("¹⁴K"), "unexpected row: {line}");
     }
 
     #[test]
@@ -4291,7 +4644,7 @@ mod tests {
             visible_width(&line[..byte_index])
         }
 
-        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys rx tx").unwrap();
+        let layout = crate::layout::parse_layout_spec("cpu ram spc rx, gpu in tx out").unwrap();
         let config = Config {
             document: None,
             history: 8,
@@ -4338,62 +4691,35 @@ mod tests {
                 VecDeque::from(vec![MetricValue::Single(0.89)]),
             ),
             (
-                MetricKind::Io,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                }]),
-            ),
-            (
-                MetricKind::Net,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.3,
-                    lower: 0.2,
-                }]),
-            ),
-            (
-                MetricKind::Sys,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.4,
-                    lower: 0.4,
-                }]),
-            ),
-            (
                 MetricKind::Ingress,
                 VecDeque::from(vec![MetricValue::Single(0.25)]),
             ),
             (
+                MetricKind::Gpu,
+                VecDeque::from(vec![MetricValue::Single(0.4)]),
+            ),
+            (
+                MetricKind::In,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+            (
                 MetricKind::Egress,
                 VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+            (
+                MetricKind::Out,
+                VecDeque::from(vec![MetricValue::Single(0.1)]),
             ),
         ]);
         let values = HashMap::from([
             (MetricKind::Cpu, MetricValue::Single(0.07)),
             (MetricKind::Memory, MetricValue::Single(0.44)),
             (MetricKind::Storage, MetricValue::Single(0.89)),
-            (
-                MetricKind::Io,
-                MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                },
-            ),
-            (
-                MetricKind::Net,
-                MetricValue::Split {
-                    upper: 0.3,
-                    lower: 0.2,
-                },
-            ),
-            (
-                MetricKind::Sys,
-                MetricValue::Split {
-                    upper: 0.4,
-                    lower: 0.4,
-                },
-            ),
             (MetricKind::Ingress, MetricValue::Single(0.25)),
+            (MetricKind::Gpu, MetricValue::Single(0.4)),
+            (MetricKind::In, MetricValue::Single(0.2)),
             (MetricKind::Egress, MetricValue::Single(0.2)),
+            (MetricKind::Out, MetricValue::Single(0.1)),
         ]);
         let headlines = HashMap::from([
             (
@@ -4411,10 +4737,10 @@ mod tests {
                     total_bytes: 1024,
                 },
             ),
-            (MetricKind::Io, HeadlineValue::Scalar(32.0 * 1024.0)),
-            (MetricKind::Net, HeadlineValue::Scalar(1.2 * 1024.0)),
             (MetricKind::Ingress, HeadlineValue::Scalar(1.0 * 1024.0)),
+            (MetricKind::In, HeadlineValue::Scalar(32.0 * 1024.0)),
             (MetricKind::Egress, HeadlineValue::Scalar(200.0)),
+            (MetricKind::Out, HeadlineValue::Scalar(8.0 * 1024.0)),
         ]);
 
         let lines = render_lines_with_headlines(
@@ -4422,16 +4748,20 @@ mod tests {
         );
 
         assert_eq!(
+            visible_offset(&lines[0], "cpu "),
+            visible_offset(&lines[1], "gpu ")
+        );
+        assert_eq!(
             visible_offset(&lines[0], " ram "),
-            visible_offset(&lines[1], " sys ")
+            visible_offset(&lines[1], " in ")
         );
         assert_eq!(
             visible_offset(&lines[0], " spc "),
-            visible_offset(&lines[1], " rx ")
+            visible_offset(&lines[1], " tx ")
         );
         assert_eq!(
-            visible_offset(&lines[0], " io "),
-            visible_offset(&lines[1], " tx ")
+            visible_offset(&lines[0], " rx "),
+            visible_offset(&lines[1], " out ")
         );
     }
 
@@ -4444,7 +4774,7 @@ mod tests {
             visible_width(&line[..byte_index]) + visible_width(token)
         }
 
-        let layout = crate::layout::parse_layout_spec("cpu ram spc io, net sys rx tx").unwrap();
+        let layout = crate::layout::parse_layout_spec("cpu ram spc rx, gpu in tx out").unwrap();
         let config = Config {
             document: None,
             history: 8,
@@ -4491,62 +4821,35 @@ mod tests {
                 VecDeque::from(vec![MetricValue::Single(0.89)]),
             ),
             (
-                MetricKind::Io,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                }]),
-            ),
-            (
-                MetricKind::Net,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.3,
-                    lower: 0.2,
-                }]),
-            ),
-            (
-                MetricKind::Sys,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.4,
-                    lower: 0.4,
-                }]),
-            ),
-            (
                 MetricKind::Ingress,
                 VecDeque::from(vec![MetricValue::Single(0.25)]),
             ),
             (
+                MetricKind::Gpu,
+                VecDeque::from(vec![MetricValue::Single(0.4)]),
+            ),
+            (
+                MetricKind::In,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+            (
                 MetricKind::Egress,
                 VecDeque::from(vec![MetricValue::Single(0.2)]),
+            ),
+            (
+                MetricKind::Out,
+                VecDeque::from(vec![MetricValue::Single(0.1)]),
             ),
         ]);
         let values = HashMap::from([
             (MetricKind::Cpu, MetricValue::Single(0.07)),
             (MetricKind::Memory, MetricValue::Single(0.44)),
             (MetricKind::Storage, MetricValue::Single(0.89)),
-            (
-                MetricKind::Io,
-                MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                },
-            ),
-            (
-                MetricKind::Net,
-                MetricValue::Split {
-                    upper: 0.3,
-                    lower: 0.2,
-                },
-            ),
-            (
-                MetricKind::Sys,
-                MetricValue::Split {
-                    upper: 0.4,
-                    lower: 0.4,
-                },
-            ),
             (MetricKind::Ingress, MetricValue::Single(0.25)),
+            (MetricKind::Gpu, MetricValue::Single(0.4)),
+            (MetricKind::In, MetricValue::Single(0.2)),
             (MetricKind::Egress, MetricValue::Single(0.2)),
+            (MetricKind::Out, MetricValue::Single(0.1)),
         ]);
         let headlines = HashMap::from([
             (
@@ -4564,10 +4867,10 @@ mod tests {
                     total_bytes: 1024,
                 },
             ),
-            (MetricKind::Io, HeadlineValue::Scalar(32.0 * 1024.0)),
-            (MetricKind::Net, HeadlineValue::Scalar(12.0 * 1024.0)),
             (MetricKind::Ingress, HeadlineValue::Scalar(526.0)),
+            (MetricKind::In, HeadlineValue::Scalar(32.0 * 1024.0)),
             (MetricKind::Egress, HeadlineValue::Scalar(12.0 * 1024.0)),
+            (MetricKind::Out, HeadlineValue::Scalar(8.0 * 1024.0)),
         ]);
 
         let lines = render_lines_with_headlines(
@@ -4575,16 +4878,20 @@ mod tests {
         );
 
         assert_eq!(
+            graph_start(&lines[0], "cpu   7% "),
+            graph_start(&lines[1], "gpu  40% ")
+        );
+        assert_eq!(
             graph_start(&lines[0], "ram  17G "),
-            graph_start(&lines[1], "sys  40% ")
+            graph_start(&lines[1], "in   32K ")
         );
         assert_eq!(
             graph_start(&lines[0], "spc 1.0K "),
-            graph_start(&lines[1], "rx  526B ")
+            graph_start(&lines[1], "tx   12K ")
         );
         assert_eq!(
-            graph_start(&lines[0], "io  32K "),
-            graph_start(&lines[1], "tx  12K ")
+            graph_start(&lines[0], "rx  526B "),
+            graph_start(&lines[1], "out 8.0K ")
         );
     }
 
@@ -4855,7 +5162,7 @@ mod tests {
 
     #[test]
     fn flex_engine_spans_underfull_rows_across_tracks() {
-        let layout = crate::layout::parse_layout_spec("cpu ram spc, io").unwrap();
+        let layout = crate::layout::parse_layout_spec("cpu ram spc, rx").unwrap();
         let base_config = Config {
             document: None,
             history: 8,
@@ -4907,24 +5214,15 @@ mod tests {
                 VecDeque::from(vec![MetricValue::Single(0.89)]),
             ),
             (
-                MetricKind::Io,
-                VecDeque::from(vec![MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                }]),
+                MetricKind::Ingress,
+                VecDeque::from(vec![MetricValue::Single(0.2)]),
             ),
         ]);
         let values = HashMap::from([
             (MetricKind::Cpu, MetricValue::Single(0.07)),
             (MetricKind::Memory, MetricValue::Single(0.44)),
             (MetricKind::Storage, MetricValue::Single(0.89)),
-            (
-                MetricKind::Io,
-                MetricValue::Split {
-                    upper: 0.2,
-                    lower: 0.1,
-                },
-            ),
+            (MetricKind::Ingress, MetricValue::Single(0.2)),
         ]);
         let gib = 1024_u64 * 1024 * 1024;
         let headline_values = HashMap::from([
@@ -4944,7 +5242,7 @@ mod tests {
                     total_bytes: 1024 * gib,
                 },
             ),
-            (MetricKind::Io, HeadlineValue::Scalar(0.0)),
+            (MetricKind::Ingress, HeadlineValue::Scalar(0.0)),
         ]);
 
         let grid_lines = render_lines_with_headlines(
@@ -4966,9 +5264,12 @@ mod tests {
             &headline_values,
         );
 
+        let first_physical_width =
+            |line: &str| visible_width(line.split('\n').next().unwrap_or_default().trim_end());
+
         assert_eq!(grid_lines.len(), 2);
         assert_eq!(flex_lines.len(), 2);
-        assert!(visible_width(flex_lines[1].trim_end()) > visible_width(grid_lines[1].trim_end()));
+        assert!(first_physical_width(&flex_lines[1]) > first_physical_width(&grid_lines[1]));
     }
 
     #[test]
@@ -5766,7 +6067,7 @@ mod tests {
     }
 
     #[test]
-    fn combined_net_uses_summed_rate_headline() {
+    fn combined_net_stacks_split_rate_headlines() {
         let layout = crate::layout::parse_layout_spec("net").unwrap();
         let config = Config {
             document: None,
@@ -5816,14 +6117,18 @@ mod tests {
         )]);
         let headlines = HashMap::from([(
             MetricKind::Net,
-            HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0),
+            HeadlineValue::Split {
+                upper: 2.0 * 1024.0 * 1024.0,
+                lower: 1.5 * 1024.0 * 1024.0,
+            },
         )]);
 
         let lines = render_lines_with_headlines(
             &config, 24, false, &histories, &layout, &values, &headlines,
         );
 
-        assert!(lines[0].contains("3.5M"));
+        assert!(lines[0].contains("₁.₅M"), "unexpected row: {}", lines[0]);
+        assert!(lines[0].contains("².⁰M"), "unexpected row: {}", lines[0]);
     }
 
     #[test]
@@ -5841,7 +6146,8 @@ mod tests {
             test_render_context(Align::Left, Renderer::Braille, false),
         );
 
-        assert!(segment.contains("net   0B"));
+        assert!(segment.contains("net   ₀B"));
+        assert!(segment.contains("⁰B"));
     }
 
     #[test]
@@ -5886,8 +6192,10 @@ mod tests {
             test_render_context(Align::Left, Renderer::Braille, false),
         );
 
-        assert!(io_small.starts_with("io 105K "));
-        assert!(io_large.starts_with("io  14M "));
+        assert!(io_small.starts_with("io ₁₀₅K"));
+        assert!(io_small.contains("¹⁰⁵K"));
+        assert!(io_large.starts_with("io  ₁₄M"));
+        assert!(io_large.contains("¹⁴M"));
     }
 
     #[test]
@@ -5918,7 +6226,7 @@ mod tests {
                     lower: 0.25,
                 },
                 Some(HeadlineValue::Scalar(3.5 * 1024.0 * 1024.0)),
-                " 50%",
+                vec!["₂₅%", "⁵⁰%"],
             ),
             (
                 LayoutItem::new(MetricKind::Storage, LayoutView::Pct, None, 1),
@@ -5927,7 +6235,7 @@ mod tests {
                     used_bytes: 512 * 1024 * 1024,
                     total_bytes: 2 * 1024 * 1024 * 1024,
                 }),
-                " 50%",
+                vec![" 50%"],
             ),
             (
                 LayoutItem::new(MetricKind::Storage, LayoutView::Abs, None, 1),
@@ -5936,11 +6244,11 @@ mod tests {
                     used_bytes: 512 * 1024 * 1024,
                     total_bytes: 2 * 1024 * 1024 * 1024,
                 }),
-                "1.5G",
+                vec!["1.5G"],
             ),
         ];
 
-        for (item, value, headline, expected) in cases {
+        for (item, value, headline, expected_parts) in cases {
             let segment = render_segment_with_headline(
                 item,
                 &VecDeque::new(),
@@ -5951,12 +6259,14 @@ mod tests {
                 test_render_context(Align::Left, Renderer::Braille, false),
             );
 
-            assert!(
-                segment.contains(expected),
-                "expected {expected:?} in {segment:?} for {:?} {:?}",
-                item.metric(),
-                item.view()
-            );
+            for expected in expected_parts {
+                assert!(
+                    segment.contains(expected),
+                    "expected {expected:?} in {segment:?} for {:?} {:?}",
+                    item.metric(),
+                    item.view()
+                );
+            }
         }
     }
 

@@ -808,7 +808,9 @@ fn native_available_metric_set(
 }
 
 fn native_prefers_shared_gpu_metrics(availability: &CanonicalSample) -> bool {
-    availability.values.contains_key(&Source::Metric(MetricKind::Gpu))
+    availability
+        .values
+        .contains_key(&Source::Metric(MetricKind::Gpu))
         || availability
             .values
             .contains_key(&Source::Metric(MetricKind::Vram))
@@ -1530,9 +1532,13 @@ fn write_terminal_frame<W: Write>(
 }
 
 fn write_frame_lines<W: Write>(stdout: &mut W, lines: &[String]) -> io::Result<()> {
-    for (index, line) in lines.iter().enumerate() {
+    let physical_lines = lines
+        .iter()
+        .flat_map(|line| line.split('\n'))
+        .collect::<Vec<_>>();
+    for (index, line) in physical_lines.iter().enumerate() {
         write!(stdout, "{line}\x1b[K")?;
-        if index + 1 < lines.len() {
+        if index + 1 < physical_lines.len() {
             writeln!(stdout)?;
         }
     }
@@ -1571,8 +1577,12 @@ fn physical_frame_rows(lines: &[String], width: usize) -> usize {
     lines
         .iter()
         .map(|line| {
-            let visible = render::visible_width(line);
-            visible.max(1).div_ceil(width)
+            line.split('\n')
+                .map(|physical_line| {
+                    let visible = render::visible_width(physical_line);
+                    visible.max(1).div_ceil(width)
+                })
+                .sum::<usize>()
         })
         .sum()
 }

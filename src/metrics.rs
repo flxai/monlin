@@ -79,6 +79,10 @@ pub struct CanonicalSample {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeadlineValue {
     Scalar(f64),
+    Split {
+        upper: f64,
+        lower: f64,
+    },
     Memory {
         used_bytes: u64,
         available_bytes: u64,
@@ -94,6 +98,7 @@ impl HeadlineValue {
     pub fn scalar(self) -> Option<f64> {
         match self {
             Self::Scalar(value) => Some(value),
+            Self::Split { upper, lower } => Some(upper + lower),
             Self::Memory { .. } => None,
             Self::Storage { .. } => None,
         }
@@ -353,16 +358,20 @@ impl Sampler {
             if let Some(value) = value {
                 let value = clamp_value(value);
                 let headline = match metric {
-                    MetricKind::Io => io_value
-                        .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
+                    MetricKind::Io => io_value.map(|sample| HeadlineValue::Split {
+                        upper: sample.upper_raw,
+                        lower: sample.lower_raw,
+                    }),
                     MetricKind::In => {
                         io_value.map(|sample| HeadlineValue::Scalar(sample.lower_raw))
                     }
                     MetricKind::Out => {
                         io_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw))
                     }
-                    MetricKind::Net => net_value
-                        .map(|sample| HeadlineValue::Scalar(sample.upper_raw + sample.lower_raw)),
+                    MetricKind::Net => net_value.map(|sample| HeadlineValue::Split {
+                        upper: sample.upper_raw,
+                        lower: sample.lower_raw,
+                    }),
                     MetricKind::Ingress => {
                         net_value.map(|sample| HeadlineValue::Scalar(sample.upper_raw))
                     }
@@ -600,12 +609,18 @@ fn canonicalize_metric_value(
         },
         (MetricKind::Io, MetricValue::Split { upper, lower })
         | (MetricKind::Net, MetricValue::Split { upper, lower }) => {
-            let total = headline.scalar().unwrap_or(0.0);
+            let (upper_absolute, lower_absolute) = match headline {
+                HeadlineValue::Split { upper, lower } => (Some(upper), Some(lower)),
+                _ => {
+                    let total = headline.scalar().unwrap_or(0.0);
+                    (Some(total), Some(total))
+                }
+            };
             CanonicalValue::Split {
                 upper_normalized: upper,
                 lower_normalized: lower,
-                upper_absolute: Some(total),
-                lower_absolute: Some(total),
+                upper_absolute,
+                lower_absolute,
             }
         }
         (_, MetricValue::Single(normalized)) => CanonicalValue::Scalar {
@@ -1387,7 +1402,9 @@ mod tests {
 
         match headline {
             HeadlineValue::Scalar(value) => assert!(value >= 0.0),
-            HeadlineValue::Memory { .. } | HeadlineValue::Storage { .. } => {
+            HeadlineValue::Split { .. }
+            | HeadlineValue::Memory { .. }
+            | HeadlineValue::Storage { .. } => {
                 panic!("rnd should expose a scalar headline")
             }
         }
