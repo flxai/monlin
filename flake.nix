@@ -3,7 +3,10 @@
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
 
-  outputs = {self, nixpkgs}: let
+  outputs = {
+    self,
+    nixpkgs,
+  }: let
     systems = [
       "x86_64-linux"
       "aarch64-linux"
@@ -13,7 +16,7 @@
       pkgs = nixpkgs.legacyPackages.${system};
       staticPkgs = pkgs.pkgsStatic;
       commonArgs = {
-        version = "0.6.7";
+        version = "0.6.8";
         src = self;
         cargoLock.lockFile = ./Cargo.lock;
         nativeBuildInputs = [pkgs.installShellFiles];
@@ -25,72 +28,77 @@
           platforms = platforms.linux;
         };
       };
-      monlin = pkgs.rustPlatform.buildRustPackage (commonArgs // {
-        pname = "monlin";
-        doCheck = true;
-        postInstall = ''
-          installShellCompletion --cmd monlin \
-            --zsh <("$out/bin/monlin" completion zsh)
-        '';
-      });
-      monlin-static = staticPkgs.rustPlatform.buildRustPackage (commonArgs // {
-        pname = "monlin-static";
-        doCheck = false;
-        nativeBuildInputs = [pkgs.installShellFiles];
-        postInstall = ''
-          installShellCompletion --cmd monlin \
-            --zsh <("$out/bin/monlin" completion zsh)
-        '';
-      });
-      fmt = pkgs.runCommand "monlin-fmt-check" {
-        nativeBuildInputs = [pkgs.cargo pkgs.rustfmt];
-        src = self;
-      } ''
-        cp -r "$src" source
-        chmod -R +w source
-        cd source
-        cargo fmt --check
-        touch "$out"
-      '';
-      clippy = pkgs.rustPlatform.buildRustPackage (commonArgs // {
-        pname = "monlin-clippy";
-        doCheck = true;
-        nativeBuildInputs = [pkgs.clippy];
-        buildPhase = ''
-          runHook preBuild
-          touch monlin-clippy
-          runHook postBuild
-        '';
-        checkPhase = ''
-          runHook preCheck
-          cargo clippy --offline --workspace --all-targets
-          runHook postCheck
-        '';
-        installPhase = ''
-          runHook preInstall
+      monlin = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "monlin";
+          doCheck = true;
+          postInstall = ''
+            installShellCompletion --cmd monlin \
+              --zsh <("$out/bin/monlin" completion zsh)
+          '';
+        });
+      monlin-static = staticPkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "monlin-static";
+          doCheck = false;
+          nativeBuildInputs = [pkgs.installShellFiles];
+          postInstall = ''
+            installShellCompletion --cmd monlin \
+              --zsh <("$out/bin/monlin" completion zsh)
+          '';
+        });
+      fmt =
+        pkgs.runCommand "monlin-fmt-check" {
+          nativeBuildInputs = [pkgs.cargo pkgs.rustfmt];
+          src = self;
+        } ''
+          cp -r "$src" source
+          chmod -R +w source
+          cd source
+          cargo fmt --check
           touch "$out"
-          runHook postInstall
         '';
-      });
-      tests = pkgs.rustPlatform.buildRustPackage (commonArgs // {
-        pname = "monlin-test";
-        doCheck = true;
-        buildPhase = ''
-          runHook preBuild
-          touch monlin-test
-          runHook postBuild
-        '';
-        checkPhase = ''
-          runHook preCheck
-          cargo test --offline --quiet
-          runHook postCheck
-        '';
-        installPhase = ''
-          runHook preInstall
-          touch "$out"
-          runHook postInstall
-        '';
-      });
+      clippy = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "monlin-clippy";
+          doCheck = true;
+          nativeBuildInputs = [pkgs.clippy];
+          buildPhase = ''
+            runHook preBuild
+            touch monlin-clippy
+            runHook postBuild
+          '';
+          checkPhase = ''
+            runHook preCheck
+            cargo clippy --offline --workspace --all-targets
+            runHook postCheck
+          '';
+          installPhase = ''
+            runHook preInstall
+            touch "$out"
+            runHook postInstall
+          '';
+        });
+      tests = pkgs.rustPlatform.buildRustPackage (commonArgs
+        // {
+          pname = "monlin-test";
+          doCheck = true;
+          buildPhase = ''
+            runHook preBuild
+            touch monlin-test
+            runHook postBuild
+          '';
+          checkPhase = ''
+            runHook preCheck
+            cargo test --offline --quiet
+            runHook postCheck
+          '';
+          installPhase = ''
+            runHook preInstall
+            touch "$out"
+            runHook postInstall
+          '';
+        });
     in {
       packages = {
         default = monlin;

@@ -253,25 +253,42 @@ fn documented_split_pair_renders_as_metric_alias() {
 }
 
 #[test]
-fn once_mode_exits_successfully() {
+fn split_rate_once_mode_stays_single_row_with_ascii_digits() {
     let output = Command::new(env!("CARGO_BIN_EXE_monlin"))
         .args([
             "--once",
             "--interval-ms",
             "0",
             "--width",
-            "48",
+            "96",
             "--color",
             "never",
+            "io net",
         ])
         .output()
-        .expect("failed to run monlin --once");
+        .expect("failed to run monlin --once io net");
 
-    assert!(output.status.success());
+    assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("cpu"));
-    assert!(!stdout.trim().is_empty());
-    assert!(stdout.lines().count() <= 2, "{stdout}");
+    assert_eq!(stdout.lines().count(), 1, "{stdout}");
+    let tokens = stdout.split_whitespace().collect::<Vec<_>>();
+    for metric in ["io", "net"] {
+        let index = tokens
+            .iter()
+            .position(|token| *token == metric)
+            .expect("missing rate metric");
+        let value = tokens[index + 1];
+        assert!(
+            value
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '.'),
+            "unexpected rate value: {value}"
+        );
+        assert!(
+            value.starts_with(|ch: char| ch.is_ascii_digit()),
+            "unexpected rate value: {value}"
+        );
+    }
 }
 
 #[test]

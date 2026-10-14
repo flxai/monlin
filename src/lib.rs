@@ -1532,13 +1532,9 @@ fn write_terminal_frame<W: Write>(
 }
 
 fn write_frame_lines<W: Write>(stdout: &mut W, lines: &[String]) -> io::Result<()> {
-    let physical_lines = lines
-        .iter()
-        .flat_map(|line| line.split('\n'))
-        .collect::<Vec<_>>();
-    for (index, line) in physical_lines.iter().enumerate() {
+    for (index, line) in lines.iter().enumerate() {
         write!(stdout, "{line}\x1b[K")?;
-        if index + 1 < physical_lines.len() {
+        if index + 1 < lines.len() {
             writeln!(stdout)?;
         }
     }
@@ -1577,12 +1573,8 @@ fn physical_frame_rows(lines: &[String], width: usize) -> usize {
     lines
         .iter()
         .map(|line| {
-            line.split('\n')
-                .map(|physical_line| {
-                    let visible = render::visible_width(physical_line);
-                    visible.max(1).div_ceil(width)
-                })
-                .sum::<usize>()
+            let visible = render::visible_width(line);
+            visible.max(1).div_ceil(width)
         })
         .sum()
 }

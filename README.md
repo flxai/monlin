@@ -376,7 +376,13 @@ monlin debug braille --samples '0,0,1,1,0' --frames
 - default alignment: `right`
 - labels stay plain unless `--label-color` is set
 - graph glyphs are colorized
-- split metrics render upper and lower halves separately
+- split graphs render upper and lower halves separately; value text stays on one row with ordinary ASCII digits
+- `io` and `net` show the combined rate; use `in out` or `rx tx` for separate directional values
+
+Version 0.6.8 reverts the split-value stacking experiment published in v0.6.7,
+including its superscript/subscript digits. Styled labels and GPU-aware layouts
+from v0.6.6 are retained. Upgrade the package or its Nix flake pin; deleting the
+older GitHub release does not update already installed or pinned copies.
 
 When `--output i3bar` is used:
 
